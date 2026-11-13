@@ -32,6 +32,10 @@ tracing = { workspace = true }
 # Opaque ListPortfolios page tokens: the resume key is hex-encoded, so a client
 # cannot read a token as an id and a foreign token fails to decode.
 hex = { workspace = true }
+# A portfolio-principal association records the IDENTIFIER of the principal it names, and
+# the account's principals are IAM's own records, read out of IAM's state in this same
+# shared engine (no network client: the store is in-process).
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

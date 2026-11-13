@@ -5,6 +5,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::SystemTime;
 
+/// How a portfolio-principal association's identifier is resolved: its own concern, in
+/// its own file.
+mod principal_identity;
+
+pub use principal_identity::{
+    association_principal_identifier, principal_identifier, IamState, PRINCIPAL_TYPE_IAM_PATTERN,
+};
+
 use crate::ops::types::{
     ConstraintDetail, ConstraintSummary, PortfolioDetail, ProductViewDetail, ProductViewSummary,
     ProvisionedProductAttribute, ProvisionedProductDetail,
@@ -47,7 +55,8 @@ pub struct Portfolio {
     pub tags: BTreeMap<String, String>,
     /// The principals associated with this portfolio, keyed by principal ARN: the
     /// API addresses an association BY that ARN, so re-associating one ARN changes
-    /// its type rather than listing it twice. The stored value carries the order the
+    /// its type rather than listing it twice. The stored value carries the identifier
+    /// a read of the association REPORTS for its principal, and the order the
     /// associations were made in, which is the order
     /// `ListPrincipalsForPortfolio` reports and pages over.
     pub principals: BTreeMap<String, PrincipalAssociation>,
@@ -63,6 +72,12 @@ pub struct Portfolio {
 pub struct PrincipalAssociation {
     /// `PrincipalType` (`IAM` | `IAM_PATTERN`), as the request declared it.
     pub principal_type: String,
+    /// The identifier this association reports for its principal, resolved ONCE when
+    /// the association was stored: the principal's own unique id in the account's
+    /// identity records for a concrete (`IAM`) principal, and the pattern itself for
+    /// an `IAM_PATTERN`, which names no single principal. See
+    /// [`association_principal_identifier`].
+    pub principal_identifier: String,
     /// The position of this association in the order they were made, so a list
     /// reports them in that order however the ARNs sort. Re-associating an ARN keeps
     /// its original position: it is the same association with a new type.

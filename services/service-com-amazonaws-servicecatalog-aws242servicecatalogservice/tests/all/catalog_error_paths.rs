@@ -943,7 +943,9 @@ async fn principals_are_listed_from_the_associations_stored_on_the_portfolio() {
         );
     }
 
-    // Re-associating one ARN changes its type rather than listing the ARN twice.
+    // Re-associating one ARN changes its type rather than listing the ARN twice. Under
+    // `IAM_PATTERN` the value reported for it is the ARN itself, which is how the row is
+    // found below: a pattern names no single principal to resolve.
     let (status, body) = call(
         &router,
         "AssociatePrincipalWithPortfolio",
@@ -1178,6 +1180,16 @@ async fn a_principal_arn_the_type_does_not_admit_is_refused() {
         "the refused associations must store nothing, got {listed}"
     );
 
+    // What the FIRST association — the role associated as `IAM` — is reported as, read
+    // before it is removed. A concrete principal is reported as its identifier rather
+    // than as the ARN the request carried, so this is the entry the disassociation has to
+    // take away; the associations are reported in the order they were made, so it is the
+    // first.
+    let removed = listed
+        .pointer("/Principals/0")
+        .cloned()
+        .unwrap_or_else(|| panic!("no first Principal in {listed}"));
+
     // And a disassociation removes the one it names, leaving the rest.
     let (status, body) = call(
         &router,
@@ -1209,10 +1221,8 @@ async fn a_principal_arn_the_type_does_not_admit_is_refused() {
         "case \"disassociate\": exactly the named association is gone, got {listed}"
     );
     assert!(
-        !remaining
-            .iter()
-            .any(|p| p["PrincipalARN"] == json!("arn:aws:iam::000000000000:role/Admin")),
-        "case \"disassociate\": the named ARN must be gone, got {listed}"
+        !remaining.contains(&removed),
+        "case \"disassociate\": the named association must be gone, got {listed}"
     );
 }
 

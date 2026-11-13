@@ -18613,6 +18613,7 @@ dependencies = [
  "http",
  "serde_json",
  "service-com-amazonaws-cloudformation-cloudformation",
+ "service-com-amazonaws-iam-awsidentitymanagementv20100508",
  "service-com-amazonaws-s3-amazons3",
  "service-common",
  "sha2 0.10.9",

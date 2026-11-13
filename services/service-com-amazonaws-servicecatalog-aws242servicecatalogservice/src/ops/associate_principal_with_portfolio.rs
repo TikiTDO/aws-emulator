@@ -188,6 +188,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             None => {}
         }
 
+        // WHICH principal was associated is settled here, before the association is
+        // stored: a concrete (`IAM`) ARN names one principal, and what the association
+        // records for it is that principal's identifier in the account's identity
+        // records — not the request string, which is only how the association is
+        // addressed. An `IAM_PATTERN` names a SET of principals, so the pattern itself
+        // is what is recorded. The identity store is read and released before this
+        // service's own store is locked; an engine carrying no identity records at all is
+        // the same unreachable-state failure this service's own store answers.
+        let principal_identifier = crate::state::association_principal_identifier(
+            &*self.engine,
+            &input.principal_arn,
+            &input.principal_type,
+        )
+        .ok_or_else(crate::state::state_unavailable)?;
+
         let state = crate::state::service_state(&*self.engine)
             .ok_or_else(crate::state::state_unavailable)?;
         let mut state = state.lock();
@@ -242,6 +257,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             input.principal_arn,
             crate::state::PrincipalAssociation {
                 principal_type: input.principal_type,
+                principal_identifier,
                 sequence,
             },
         );
@@ -251,8 +267,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 }
 
 /// The `PrincipalType` whose ARN may omit the account id and may carry wildcards
-/// (`smithy_query query="shape" shape="PrincipalType"`: `IAM` | `IAM_PATTERN`).
-const IAM_PATTERN: &str = "IAM_PATTERN";
+/// (`smithy_query query="shape" shape="PrincipalType"`: `IAM` | `IAM_PATTERN`) — the
+/// crate's ONE name for it, so the ARN validation here and the identifier the
+/// association records are keyed on one value.
+use crate::state::PRINCIPAL_TYPE_IAM_PATTERN as IAM_PATTERN;
 
 /// What is wrong with a `PrincipalARN`, which decides WHICH modelled error answers
 /// it: a value that is no principal ARN at all is a bad parameter, while a

@@ -203,7 +203,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // already handed out.
         let mut principals = Vec::new();
         let mut next_page_token = None;
-        for (arn, association) in portfolio
+        for (_, association) in portfolio
             .principals_in_association_order()
             .into_iter()
             .filter(|(_, association)| {
@@ -216,9 +216,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 break;
             }
             principals.push(Principal {
-                // The ARN is reported exactly as it was associated: it is the
-                // caller's own value, and it is what addresses the association.
-                principal_arn: Some(arn.clone()),
+                // The identifier the association RECORDED for its principal, resolved
+                // when it was stored: the principal's own unique id in the account's
+                // identity records for a concrete principal, and the pattern itself for
+                // an `IAM_PATTERN`, which names no single principal. The ARN the request
+                // carried is how the association is ADDRESSED, not what is reported.
+                principal_arn: Some(association.principal_identifier.clone()),
                 principal_type: Some(association.principal_type.clone()),
             });
         }
