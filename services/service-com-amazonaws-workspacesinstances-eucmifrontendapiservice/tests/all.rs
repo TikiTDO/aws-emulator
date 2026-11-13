@@ -19,6 +19,8 @@ mod availability_zone_catalog;
 mod catalog_fidelity;
 #[path = "all/create_tag_specifications.rs"]
 mod create_tag_specifications;
+#[path = "all/ec2_managed_instance_propagation.rs"]
+mod ec2_managed_instance_propagation;
 #[path = "all/idempotency_token_reuse.rs"]
 mod idempotency_token_reuse;
 #[path = "all/instance_configuration_validation.rs"]

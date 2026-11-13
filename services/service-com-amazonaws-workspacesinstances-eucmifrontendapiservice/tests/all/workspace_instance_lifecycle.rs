@@ -14,17 +14,99 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
+use service_com_amazonaws_ec2_amazonec2 as ec2;
 use service_com_amazonaws_workspacesinstances_eucmifrontendapiservice as wsinst;
 use smithy_server_runtime::MultiServiceRouter;
 
 /// The `X-Amz-Target` prefix from the crate's `OPERATIONS.md` wire-protocol section.
 const TARGET_PREFIX: &str = "EUCMIFrontendAPIService";
 
-/// A router carrying only this service, over one shared engine — the same
-/// `EmulatedService::new(engine)` seam `core/router` mounts. The engine is returned
-/// alongside so a test can read the stored record directly where the wire cannot
-/// show what it needs (the clock deadline on a record, or that a refused request
-/// stored nothing).
+/// The VPC of the account's own Amazon EC2 that the launch fixtures of this suite — and
+/// of its siblings — are placed in, and the zone its subnets sit in: the first zone of
+/// [`DEFAULT_TEST_REGION`], which is the zone a launch that names none lands in.
+const ACCOUNT_VPC: &str = "vpc-0123456789abcdef0";
+const ACCOUNT_VPC_CIDR: &str = "10.0.0.0/16";
+pub(crate) const ACCOUNT_ZONE: &str = "us-east-1a";
+
+/// The subnets the launch fixtures of this crate's suites name, held in the account's own
+/// Amazon EC2 so the launch a create makes is placed in a subnet the account really has.
+pub(crate) const ACCOUNT_SUBNETS: &[&str] =
+    &["subnet-abc123", "subnet-0a1b2c3d", "subnet-0e1f2a3b"];
+
+/// The security groups those fixtures name, of [`ACCOUNT_VPC`], for the same reason.
+pub(crate) const ACCOUNT_SECURITY_GROUPS: &[&str] = &[
+    "sg-111111",
+    "sg-222222",
+    "sg-0000000a",
+    "sg-0000000b",
+    "sg-00000001",
+    "sg-00000002",
+];
+
+/// Write [`ACCOUNT_VPC`], [`ACCOUNT_SUBNETS`] and [`ACCOUNT_SECURITY_GROUPS`] into the
+/// account's own Amazon EC2 store, at those ids.
+///
+/// `CreateWorkspaceInstance` launches the managed EC2 instance in the caller's own
+/// network, so a fixture that names a subnet or a security group names one the account
+/// has. Written through EC2's own store at CHOSEN ids rather than through EC2's API,
+/// because `ec2:CreateSubnet` mints the id it chooses and these fixtures name specific
+/// ones.
+fn seed_account_network(engine: &Arc<engine::InMemoryEngine>) {
+    let store = ec2::state::service_state(&**engine)
+        .expect("the in-memory engine carries the account's EC2 store");
+    let mut store = store.lock();
+    store.vpcs.insert(
+        ACCOUNT_VPC.to_string(),
+        ec2::ops::types::Vpc {
+            vpc_id: Some(ACCOUNT_VPC.to_string()),
+            state: Some(ec2::state::VPC_STATE_AVAILABLE.to_string()),
+            cidr_block: Some(ACCOUNT_VPC_CIDR.to_string()),
+            ..Default::default()
+        },
+    );
+    // Amazon EC2 is regional, so a VPC written without a Region is in no Region and its
+    // own describes report neither it nor the subnets and groups of it.
+    store
+        .vpc_regions
+        .insert(ACCOUNT_VPC.to_string(), DEFAULT_TEST_REGION.to_string());
+    for (index, subnet_id) in ACCOUNT_SUBNETS.iter().enumerate() {
+        store.subnets.insert(
+            (*subnet_id).to_string(),
+            ec2::ops::types::Subnet {
+                subnet_id: Some((*subnet_id).to_string()),
+                vpc_id: Some(ACCOUNT_VPC.to_string()),
+                state: Some(ec2::state::SUBNET_STATE_AVAILABLE.to_string()),
+                // A distinct /24 of the VPC's block per subnet: two subnets of one VPC
+                // cannot overlap, and an instance launched into one draws its private
+                // address from that block.
+                cidr_block: Some(format!("10.0.{index}.0/24")),
+                availability_zone: Some(ACCOUNT_ZONE.to_string()),
+                availability_zone_id: ec2::state::zone_id_for_zone_name(ACCOUNT_ZONE),
+                ..Default::default()
+            },
+        );
+    }
+    for group_id in ACCOUNT_SECURITY_GROUPS {
+        store.security_groups.insert(
+            (*group_id).to_string(),
+            ec2::ops::types::SecurityGroup {
+                group_id: Some((*group_id).to_string()),
+                vpc_id: Some(ACCOUNT_VPC.to_string()),
+                ..Default::default()
+            },
+        );
+    }
+}
+
+/// A router carrying this service and the service that OWNS the EC2 instance a WorkSpace
+/// Instance is, over one shared engine — the same `EmulatedService::new(engine)` seam
+/// `core/router` mounts both through. The engine is returned alongside so a test can read
+/// the stored record directly where the wire cannot show what it needs (the clock deadline
+/// on a record, or that a refused request stored nothing).
+///
+/// Amazon EC2 is mounted because `CreateWorkspaceInstance` launches a real instance there
+/// and `DeleteWorkspaceInstance` terminates it: without the owner of instances beside it,
+/// no launch could be made at all.
 pub(crate) fn harness() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
@@ -32,6 +114,8 @@ pub(crate) fn harness() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     // unsigned requests whose credential scope still names the service.
     router.set_request_authentication(false);
     router.register_service(wsinst::EmulatedService::new(Arc::clone(&engine)));
+    router.register_service(ec2::EmulatedService::new(Arc::clone(&engine)));
+    seed_account_network(&engine);
     (router, engine)
 }
 
@@ -225,7 +309,7 @@ fn create_rows() -> Vec<CreateRow> {
         },
         CreateRow {
             case: "flat members",
-            managed_instance: json!({ "ImageId": "ami-0123456789", "InstanceType": "t3.medium", "SubnetId": "subnet-abc123" }),
+            managed_instance: json!({ "ImageId": "ami-00112233445566778", "InstanceType": "t3.medium", "SubnetId": ACCOUNT_SUBNETS[0] }),
             tags: vec![("env".to_string(), "dev".to_string())],
             billing_mode: Some("HOURLY"),
             expected_billing_mode: "HOURLY",
@@ -248,15 +332,23 @@ fn create_rows() -> Vec<CreateRow> {
         },
         CreateRow {
             case: "list-valued members",
+            // A launch that names its network interfaces names its subnet and its
+            // security groups ON them — "if you specify a network interface, you must
+            // specify any subnets as part of the network interface instead of using this
+            // parameter" (Amazon EC2 `RunInstances$SubnetId`, `$SecurityGroupIds`) — so
+            // the lists here are the interface's, and both name resources the account has.
             managed_instance: json!({
-                "ImageId": "ami-deadbeef01",
+                "ImageId": "ami-0deadbeefdeadbeef",
                 "InstanceType": "c5.large",
-                "SecurityGroupIds": ["sg-111111", "sg-222222"],
                 "BlockDeviceMappings": [
                     { "DeviceName": "/dev/sda1", "Ebs": { "VolumeType": "gp3", "VolumeSize": 100 } }
                 ],
                 "NetworkInterfaces": [
-                    { "DeviceIndex": 0, "SubnetId": "subnet-abc123", "Groups": ["sg-111111"] }
+                    {
+                        "DeviceIndex": 0,
+                        "SubnetId": ACCOUNT_SUBNETS[0],
+                        "Groups": [ACCOUNT_SECURITY_GROUPS[0], ACCOUNT_SECURITY_GROUPS[1]],
+                    }
                 ]
             }),
             tags: vec![],

@@ -184,18 +184,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         Ok(GetWorkspaceInstanceOutput {
-            // Both error lists report what the stored record carries. A launch this
-            // service cannot carry out is refused by `CreateWorkspaceInstance` before
-            // anything is stored, so every record here is one of a configuration this
-            // service launched: none of them carries a WorkSpace Instance or an EC2
-            // failure, and both lists stay absent rather than empty.
+            // A WorkSpace Instance error is a failure of this service's own work on the
+            // instance; no operation of this slice records one, so the list stays absent
+            // rather than empty.
             workspace_instance_errors: None,
-            ec2_instance_errors: None,
+            // What Amazon EC2 answered when the launch of the managed instance, or its
+            // termination, failed. Absent — not empty — for an instance whose EC2 calls
+            // all succeeded, which is every instance that reports a managed instance.
+            ec2_instance_errors: (!record.ec2_instance_errors.is_empty())
+                .then(|| record.ec2_instance_errors.clone()),
             provision_state: Some(record.provision_state.clone()),
             workspace_instance_id: Some(record.id.clone()),
-            ec2_managed_instance: Some(EC2ManagedInstance {
-                instance_id: Some(record.ec2_instance_id.clone()),
-            }),
+            // "Unique identifier of the managed EC2 instance" — the id Amazon EC2 minted
+            // for the launch this service made, so `ec2:DescribeInstances` resolves it.
+            // Absent while the launch is still in flight and for one that failed: there
+            // is then no managed instance, and reporting an id for it would name an
+            // instance EC2 does not hold.
+            ec2_managed_instance: record
+                .ec2_instance_id
+                .clone()
+                .map(|instance_id| EC2ManagedInstance {
+                    instance_id: Some(instance_id),
+                }),
             billing_configuration: Some(record.billing_configuration.clone()),
         })
     }

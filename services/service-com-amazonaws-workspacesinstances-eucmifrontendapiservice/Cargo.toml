@@ -27,12 +27,19 @@ hex = { workspace = true }
 # Digests a create request's parameters into the idempotency fingerprint a reused
 # `ClientToken` is checked against (`state::request_fingerprint`).
 sha2 = { workspace = true }
+# Launches and terminates the managed EC2 instance a WorkSpace Instance IS, over the
+# in-process callback into this emulator's own Amazon EC2 (`state::managed_ec2_instance`).
+aws-sdk-ec2 = { version = "1", default-features = false }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
 hex = { workspace = true }
+# The service that OWNS the EC2 instance a WorkSpace Instance is: mounted beside this
+# service so a test can read the launched instance back out of EC2 itself.
+service-com-amazonaws-ec2-amazonec2 = { path = "../service-com-amazonaws-ec2-amazonec2" }
+aws-sdk-ec2 = { version = "1", default-features = false, features = ["behavior-version-latest"] }
 
 [lints]
 workspace = true

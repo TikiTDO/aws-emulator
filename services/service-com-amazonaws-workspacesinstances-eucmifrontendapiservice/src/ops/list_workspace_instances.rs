@@ -213,9 +213,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             |record| WorkspaceInstance {
                 provision_state: Some(record.provision_state.clone()),
                 workspace_instance_id: Some(record.id.clone()),
-                ec2_managed_instance: Some(EC2ManagedInstance {
-                    instance_id: Some(record.ec2_instance_id.clone()),
-                }),
+                // The id Amazon EC2 minted for the managed instance, reported exactly as
+                // `GetWorkspaceInstance` reports it: absent for an instance that has no
+                // managed instance behind it (a launch still in flight, or one EC2
+                // refused), so the listing never names an instance EC2 does not hold.
+                ec2_managed_instance: record
+                    .ec2_instance_id
+                    .clone()
+                    .map(|instance_id| EC2ManagedInstance {
+                        instance_id: Some(instance_id),
+                    }),
             },
         );
 

@@ -141,37 +141,80 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // A regional resource is deletable only through the Region it was created in,
         // which travels in the request's credential scope.
         let region = crate::state::request_region(ctx.parts());
-        let Some(state) = crate::state::service_state(&*self.engine) else {
-            return Err(DeleteWorkspaceInstanceErrorModeled::InternalServerException(
-                InternalServerException {
-                    message: "the WorkSpaces Instances store is unavailable".to_string(),
-                    retry_after_seconds: None,
-                },
-            )
-            .into());
-        };
-        let mut state = state.lock();
-        let now = std::time::Instant::now();
+        // The record's own teardown is started under ONE guard, which the block releases
+        // before the termination below: the store is never held across the hop.
+        let ec2_instance_id = {
+            let Some(state) = crate::state::service_state(&*self.engine) else {
+                return Err(DeleteWorkspaceInstanceErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: "the WorkSpaces Instances store is unavailable".to_string(),
+                        retry_after_seconds: None,
+                    },
+                )
+                .into());
+            };
+            let mut state = state.lock();
+            let now = std::time::Instant::now();
 
-        // Deleting a WorkSpace Instance is ASYNCHRONOUS teardown: "Usage of this API
-        // will result in deletion of the resource in question", not in the resource
-        // being gone by the time this call answers. The call is accepted, the instance
-        // moves to the transient `DEALLOCATING`, and it keeps being reported — by
-        // `GetWorkspaceInstance` and by `ListWorkspaceInstances`, including under a
-        // `ProvisionStates` filter naming that state — until the teardown has finished
-        // and the record's retention has elapsed. Removing it inside the request would
-        // make a state the model declares unobservable.
-        let Some(record) = state.settled_mut(&region, &input.workspace_instance_id, now) else {
-            return Err(crate::state::instance_not_found_error(
-                &input.workspace_instance_id,
-                DeleteWorkspaceInstanceErrorModeled::ResourceNotFoundException,
-            ));
+            // Deleting a WorkSpace Instance is ASYNCHRONOUS teardown: "Usage of this API
+            // will result in deletion of the resource in question", not in the resource
+            // being gone by the time this call answers. The call is accepted, the instance
+            // moves to the transient `DEALLOCATING`, and it keeps being reported — by
+            // `GetWorkspaceInstance` and by `ListWorkspaceInstances`, including under a
+            // `ProvisionStates` filter naming that state — until the teardown has finished
+            // and the record's retention has elapsed. Removing it inside the request would
+            // make a state the model declares unobservable.
+            let Some(record) = state.settled_mut(&region, &input.workspace_instance_id, now) else {
+                return Err(crate::state::instance_not_found_error(
+                    &input.workspace_instance_id,
+                    DeleteWorkspaceInstanceErrorModeled::ResourceNotFoundException,
+                ));
+            };
+
+            // A record already tearing down is left exactly as it is: this call asks for
+            // the end state that teardown is already heading to, so it is accepted and
+            // changes nothing — it neither restarts the teardown clock nor conflicts.
+            // That is also why the termination below is made only by the delete that
+            // STARTS the teardown: the managed instance was already asked to shut down
+            // then, so a repeat asks Amazon EC2 for nothing.
+            let starts_the_teardown = !record.is_tearing_down();
+            record.begin_deallocation(now);
+            // The managed instance this teardown has to shut down. `None` for an instance
+            // whose launch never produced one: there is nothing to terminate, and the
+            // teardown is just the record's own.
+            record
+                .ec2_instance_id
+                .clone()
+                .filter(|_| starts_the_teardown)
         };
 
-        // A record already tearing down is left exactly as it is: this call asks for
-        // the end state that teardown is already heading to, so it is accepted and
-        // changes nothing — it neither restarts the teardown clock nor conflicts.
-        record.begin_deallocation(now);
+        // Deleting a WorkSpace Instance shuts down the EC2 instance it IS: the instance
+        // is Amazon EC2's resource, so the teardown asks the service that owns it, with
+        // NO store guard held — the block above released it — so no other caller is
+        // ordered behind the hop.
+        let Some(ec2_instance_id) = ec2_instance_id else {
+            return Ok(DeleteWorkspaceInstanceOutput {});
+        };
+        let terminated = crate::state::terminate(ctx, &region, &ec2_instance_id).await;
+
+        if let Err(error) = terminated {
+            // The managed instance is still running, so the teardown did not finish:
+            // the instance reports the terminal `ERROR_DEALLOCATING` and EC2's own
+            // error rather than a deallocation nothing carried out.
+            let Some(state) = crate::state::service_state(&*self.engine) else {
+                return Err(DeleteWorkspaceInstanceErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: "the WorkSpaces Instances store is unavailable".to_string(),
+                        retry_after_seconds: None,
+                    },
+                )
+                .into());
+            };
+            let mut state = state.lock();
+            if let Some(record) = state.instances.get_mut(&input.workspace_instance_id) {
+                record.deallocation_failed(error);
+            }
+        }
 
         Ok(DeleteWorkspaceInstanceOutput {})
     }

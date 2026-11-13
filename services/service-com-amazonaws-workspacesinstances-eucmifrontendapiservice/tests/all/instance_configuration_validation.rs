@@ -32,7 +32,7 @@ use service_com_amazonaws_workspacesinstances_eucmifrontendapiservice as wsinst;
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::workspace_instance_lifecycle::{
-    call, error_code, harness, launchable_managed_instance, TEST_IMAGE_ID, TEST_INSTANCE_TYPE,
+    call, error_code, harness, launchable_managed_instance, ok, TEST_IMAGE_ID, TEST_INSTANCE_TYPE,
 };
 
 /// The `ValidationExceptionReason` a single bad member is reported with, as the
@@ -156,6 +156,59 @@ async fn assert_created(
         "case {case:?}: a launched instance carries no lifecycle error, got {got}"
     );
     id
+}
+
+/// Assert `body` is ACCEPTED and stored, and that the launch it asks for is one Amazon
+/// EC2 itself refuses: the WorkSpace Instance reaches the terminal `ERROR_ALLOCATING`,
+/// reports EC2's own error code through the modelled `EC2InstanceErrors`, and reports no
+/// managed instance, there being none.
+///
+/// This service's own rules decide which configurations it STORES; the service that owns
+/// instances decides which launches it carries out, so a configuration past one of ITS
+/// rules is reported this way rather than as a refusal of the create.
+async fn assert_launch_refused_by_ec2(
+    router: &MultiServiceRouter,
+    engine: &engine::InMemoryEngine,
+    case: &str,
+    body: Value,
+    expected_code: &str,
+) {
+    let held = stored_instances(engine);
+    let (status, payload) = call(router, "CreateWorkspaceInstance", body).await;
+    assert_eq!(
+        status, 200,
+        "case {case:?}: expected the create to be accepted, got {status} with {payload}"
+    );
+    let id = payload["WorkspaceInstanceId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("case {case:?}: no WorkspaceInstanceId in {payload}"))
+        .to_string();
+    assert_eq!(
+        stored_instances(engine),
+        held + 1,
+        "case {case:?}: an accepted create must store one instance"
+    );
+
+    let got = ok(
+        router,
+        "GetWorkspaceInstance",
+        json!({ "WorkspaceInstanceId": &id }),
+    )
+    .await;
+    assert_eq!(
+        got["ProvisionState"].as_str(),
+        Some(wsinst::state::PROVISION_STATE_ERROR_ALLOCATING),
+        "case {case:?}: expected the failed allocation to be reported, got {got}"
+    );
+    assert_eq!(
+        got["EC2InstanceErrors"][0]["EC2ErrorCode"].as_str(),
+        Some(expected_code),
+        "case {case:?}: expected EC2's own error code, got {got}"
+    );
+    assert!(
+        got["EC2ManagedInstance"].is_null(),
+        "case {case:?}: a launch that was refused has no managed instance, got {got}"
+    );
 }
 
 /// A `ManagedInstance` with `members` merged onto the minimal launchable one.
@@ -433,13 +486,6 @@ async fn a_launch_names_its_subnet_in_one_place() {
                 "NetworkInterfaces": [{ "DeviceIndex": 0, "SubnetId": "subnet-0a1b2c3d" }],
             }),
         ),
-        (
-            "an instance subnet beside an interface that names none",
-            json!({
-                "SubnetId": "subnet-0e1f2a3b",
-                "NetworkInterfaces": [{ "DeviceIndex": 0, "Groups": ["sg-0000000a"] }],
-            }),
-        ),
         ("no subnet at all", json!({})),
     ] {
         assert_created(
@@ -450,6 +496,27 @@ async fn a_launch_names_its_subnet_in_one_place() {
         )
         .await;
     }
+
+    // An instance-level subnet BESIDE network interfaces passes this service's rule —
+    // the interface names no subnet, so the request names one placement — and is stored.
+    // The launch itself is Amazon EC2's, and EC2 refuses that combination outright ("if
+    // you specify a network interface, you must specify any subnets as part of the
+    // network interface instead of using this parameter", `RunInstances$SubnetId`), so
+    // the WorkSpace Instance reports EC2's refusal rather than an allocation nothing
+    // carried out.
+    assert_launch_refused_by_ec2(
+        &router,
+        &engine,
+        "an instance subnet beside an interface that names none",
+        json!({
+            "ManagedInstance": configuration(json!({
+                "SubnetId": "subnet-0e1f2a3b",
+                "NetworkInterfaces": [{ "DeviceIndex": 0, "Groups": ["sg-0000000a"] }],
+            })),
+        }),
+        "InvalidParameterCombination",
+    )
+    .await;
 }
 
 #[tokio::test]

@@ -19,12 +19,16 @@ use std::time::{Duration, Instant, SystemTime};
 use sha2::{Digest, Sha256};
 
 use crate::ops::types::{
-    BillingConfiguration, ConflictException, InstanceTypeInfo, ManagedInstanceRequest,
-    ResourceNotFoundException, ServiceQuotaExceededException, SupportedInstanceConfiguration, Tag,
-    TagSpecification, ValidationException, ValidationExceptionField,
-    VolumeModificationRateExceededException, BILLING_MODE_VALUES,
+    BillingConfiguration, ConflictException, EC2InstanceError, InstanceTypeInfo,
+    ManagedInstanceRequest, ResourceNotFoundException, ServiceQuotaExceededException,
+    SupportedInstanceConfiguration, Tag, TagSpecification, ValidationException,
+    ValidationExceptionField, VolumeModificationRateExceededException, BILLING_MODE_VALUES,
     INSTANCE_CONFIGURATION_TENANCY_ENUM_VALUES, PLATFORM_TYPE_ENUM_VALUES,
 };
+
+/// The seam this service launches and terminates the managed EC2 instance through.
+mod managed_ec2_instance;
+pub use managed_ec2_instance::*;
 
 /// The `ResourceType` this service reports for a WorkSpace Instance in its
 /// resource-scoped errors.
@@ -157,22 +161,31 @@ pub const PROVISION_STATE_DEALLOCATING: &str = "DEALLOCATING";
 /// [`PROVISION_STATE_ALLOCATING`].
 pub const PROVISION_STATE_DEALLOCATED: &str = "DEALLOCATED";
 
-// The two remaining `ProvisionStateEnum` values, `ERROR_ALLOCATING` and
-// `ERROR_DEALLOCATING`, name a FAILED allocation or teardown. Nothing in this
-// emulator can fail either one — every create launches and every delete tears down —
-// so no record is ever put in them: a failure state for work that succeeded would be
-// a fabricated status. They become reachable the day this slice models something that
-// can fail (a capacity refusal, a stuck volume detach), and the filter in
-// `ListWorkspaceInstances` already matches whatever a record holds.
+/// The terminal state an instance whose EC2 launch FAILED is reported in: the launch
+/// this service made on the caller's behalf was refused, so no managed instance was
+/// allocated. What EC2 answered is reported beside it, in
+/// [`WorkspaceInstanceRecord::ec2_instance_errors`] / `GetWorkspaceInstance$EC2InstanceErrors`.
+/// See [`PROVISION_STATE_ALLOCATING`].
+pub const PROVISION_STATE_ERROR_ALLOCATING: &str = "ERROR_ALLOCATING";
 
-/// How long after `CreateWorkspaceInstance` the `ALLOCATING -> ALLOCATED`
-/// transition the call starts becomes due.
+/// The terminal state an instance whose EC2 TERMINATION failed is reported in: the
+/// teardown `DeleteWorkspaceInstance` started could not shut the managed instance down,
+/// so the instance is not deallocated. Reported with what EC2 answered, exactly as
+/// [`PROVISION_STATE_ERROR_ALLOCATING`] is.
+pub const PROVISION_STATE_ERROR_DEALLOCATING: &str = "ERROR_DEALLOCATING";
+
+/// How long after the managed EC2 instance is launched the `ALLOCATING -> ALLOCATED`
+/// transition `CreateWorkspaceInstance` starts becomes due.
 ///
 /// AWS documents no duration for it, so this is a CHOSEN span: it is deliberately
 /// non-zero, so a caller that reads the instance back immediately still observes
 /// the transient `ALLOCATING` state, and short enough that a test can wait it out.
 /// The due instant is stored on the record ([`WorkspaceInstanceRecord::allocation_due`])
 /// and materialised lazily by [`WorkspaceInstanceRecord::settle`]; nothing sleeps.
+///
+/// Measured from the instant Amazon EC2 accepted the launch
+/// ([`WorkspaceInstanceRecord::launched`]), not from the start of the create: a
+/// WorkSpace Instance is allocated only once the instance it manages exists.
 pub const ALLOCATION_SPAN: Duration = Duration::from_millis(500);
 
 /// How long after `DeleteWorkspaceInstance` the `DEALLOCATING -> DEALLOCATED`
@@ -1607,8 +1620,16 @@ pub struct WorkspaceInstanceRecord {
     /// for the operations that report it (the volume and instance-type slices still
     /// at 501); nothing in this slice returns it.
     pub managed_instance: ManagedInstanceRequest,
-    /// The minted `i-…` id of the EC2 instance WorkSpaces manages for this record.
-    pub ec2_instance_id: String,
+    /// The `InstanceId` Amazon EC2 minted for the managed instance this WorkSpace
+    /// Instance IS ([`launch`]), and `None` while the launch is still being made or
+    /// after it failed — there is then no managed instance to report, and
+    /// [`Self::ec2_instance_errors`] carries what EC2 answered.
+    pub ec2_instance_id: Option<String>,
+    /// What Amazon EC2 answered when the launch or the termination of the managed
+    /// instance failed, as the modelled `EC2InstanceError` list
+    /// `GetWorkspaceInstance$EC2InstanceErrors` reports: empty for an instance whose
+    /// EC2 calls all succeeded.
+    pub ec2_instance_errors: Vec<EC2InstanceError>,
     /// The instance's ACTIVE billing configuration: the one supplied at create time,
     /// or [`DEFAULT_BILLING_MODE`] when the create call supplied none.
     pub billing_configuration: BillingConfiguration,
@@ -1646,6 +1667,38 @@ impl WorkspaceInstanceRecord {
         {
             self.provision_state = PROVISION_STATE_DEALLOCATED.to_string();
         }
+    }
+
+    /// Record the managed EC2 instance the launch this record's create made produced:
+    /// the id EC2 minted, and the instant the `ALLOCATING -> ALLOCATED` move falls due.
+    ///
+    /// The span runs from HERE — from the moment EC2 accepted the launch — rather than
+    /// from the start of the create, because the WorkSpace Instance is allocated only
+    /// once the instance it manages exists: EC2's own `pending -> running` move was
+    /// already owed when this was called, so the WorkSpace Instance reaches `ALLOCATED`
+    /// after the instance behind it is running rather than before it.
+    pub fn launched(&mut self, ec2_instance_id: String, now: Instant) {
+        self.ec2_instance_id = Some(ec2_instance_id);
+        self.allocation_due = now + ALLOCATION_SPAN;
+    }
+
+    /// Record that the launch FAILED: the instance is in the terminal
+    /// [`PROVISION_STATE_ERROR_ALLOCATING`] and carries what EC2 answered, so the
+    /// caller reads the refusal rather than polling an allocation that will never
+    /// finish.
+    pub fn allocation_failed(&mut self, error: EC2InstanceError) {
+        self.provision_state = PROVISION_STATE_ERROR_ALLOCATING.to_string();
+        self.ec2_instance_errors.push(error);
+    }
+
+    /// Record that the TERMINATION of the managed instance failed: the teardown is in
+    /// the terminal [`PROVISION_STATE_ERROR_DEALLOCATING`] and carries what EC2
+    /// answered. The teardown deadline [`Self::begin_deallocation`] set stays, so the
+    /// record is still reported for one [`DEALLOCATED_RETENTION`] past it
+    /// ([`Self::is_forgotten`]) and the store stays bounded.
+    pub fn deallocation_failed(&mut self, error: EC2InstanceError) {
+        self.provision_state = PROVISION_STATE_ERROR_DEALLOCATING.to_string();
+        self.ec2_instance_errors.push(error);
     }
 
     /// Start the asynchronous teardown `DeleteWorkspaceInstance` performs: the
@@ -2030,21 +2083,23 @@ pub struct ComAmazonawsWorkspacesinstancesEucmifrontendapiserviceState {
     /// the call that carried it, so a modify token can neither replay a create nor be
     /// retired by one.
     pub volume_modification_tokens: BTreeMap<(String, String), IdempotencyClaim>,
-    /// Source of the unique `wsinst-…` / `i-…` identifiers.
+    /// Source of the unique `wsinst-…` / `vol-…` identifiers this service mints.
+    ///
+    /// The `i-…` id of a WorkSpace Instance's managed EC2 instance is NOT minted here:
+    /// instances are Amazon EC2's resources, so that id is the one EC2 minted for the
+    /// launch this service made ([`launch`]).
     pub id_counter: u64,
 }
 
 impl ComAmazonawsWorkspacesinstancesEucmifrontendapiserviceState {
-    /// Mint the next pair of identifiers: a `wsinst-…` instance id and the `i-…`
-    /// id of the EC2 instance behind it.
+    /// Mint the next `wsinst-…` WorkSpace Instance id.
     ///
     /// The `wsinst-` prefix is 7 characters and the model requires 8..63 further
     /// `[0-9a-zA-Z]`, so a 16-hex-digit counter gives a 23-character id inside the
-    /// modelled `len 15..70`. EC2 instance ids are `i-` plus 17 hex digits.
-    pub fn mint_ids(&mut self) -> (String, String) {
+    /// modelled `len 15..70`.
+    pub fn mint_instance_id(&mut self) -> String {
         self.id_counter += 1;
-        let n = self.id_counter;
-        (format!("wsinst-{n:016x}"), format!("i-{n:017x}"))
+        format!("wsinst-{:016x}", self.id_counter)
     }
 
     /// Apply every clock-due transition, then hand back Region `region`'s record for
@@ -2209,7 +2264,7 @@ impl ComAmazonawsWorkspacesinstancesEucmifrontendapiserviceState {
     ///
     /// The `vol-` prefix is 4 characters and the model requires 1..63 further
     /// `[0-9a-zA-Z]`, so a 17-hex-digit counter is well inside the pattern. The
-    /// counter is the one [`Self::mint_ids`] draws from, so no two resources of this
+    /// counter is the one [`Self::mint_instance_id`] draws from, so no two resources of this
     /// service ever share a number.
     pub fn mint_volume_id(&mut self) -> String {
         self.id_counter += 1;

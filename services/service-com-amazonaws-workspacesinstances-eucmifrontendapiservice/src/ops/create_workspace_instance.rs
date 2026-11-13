@@ -366,6 +366,142 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         validate_launch_configuration(&input, &region)
             .map_err(CreateWorkspaceInstanceErrorModeled::ValidationException)?;
 
+        // PHASE 1 — the record. Everything this service decides on its own (the token,
+        // the quota, the id and the stored configuration) is settled under ONE guard,
+        // which is released before the launch below: the store is never held across the
+        // hop, and the instance exists in `ALLOCATING` while the launch is in flight.
+        let instance_id = {
+            let Some(state) = crate::state::service_state(&*self.engine) else {
+                return Err(CreateWorkspaceInstanceErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: "the WorkSpaces Instances store is unavailable".to_string(),
+                        retry_after_seconds: None,
+                    },
+                )
+                .into());
+            };
+            let mut state = state.lock();
+            // The moves the clock already owes, materialised before anything is read:
+            // a torn-down record past its retention is no longer reported, and neither is
+            // the `ClientToken` of the create that made it, so the replay below cannot
+            // hand back an id this service has stopped knowing.
+            state.settle_all(std::time::Instant::now());
+
+            // `@idempotent` + `@idempotencyToken`: a token identifies ONE request, so a
+            // repeat call carrying a token this service has already created an instance for
+            // replays the SAME id and creates nothing ONLY where the parameters are the ones
+            // that token was spent on. A call that reuses a spent token with different
+            // parameters is a different request under a spent token, and is refused with the
+            // modelled `ConflictException` rather than handed an instance it did not ask
+            // for; nothing is written on that refusal.
+            //
+            // The fingerprint is taken over the request with its token cleared, so every
+            // member except the token itself is compared.
+            let mut parameters = input.clone();
+            parameters.client_token = None;
+            let fingerprint = crate::state::request_fingerprint(&parameters);
+            match crate::state::resolve_client_token(
+                &state.client_tokens,
+                &region,
+                input.client_token.as_deref(),
+                &fingerprint,
+            ) {
+                TokenOutcome::Replay(instance_id) => {
+                    // A replay creates nothing: the instance that token was spent on was
+                    // launched by the create that spent it, so no second launch is made.
+                    return Ok(CreateWorkspaceInstanceOutput {
+                        workspace_instance_id: Some(instance_id),
+                    });
+                }
+                TokenOutcome::Mismatch(instance_id) => {
+                    return Err(CreateWorkspaceInstanceErrorModeled::ConflictException(
+                        crate::state::idempotent_parameter_mismatch(
+                            &instance_id,
+                            crate::state::WORKSPACE_INSTANCE_RESOURCE_TYPE,
+                        ),
+                    )
+                    .into())
+                }
+                TokenOutcome::Unclaimed => {}
+            }
+
+            // A real account has a Service Quotas limit on RUNNING WorkSpace Instances,
+            // and this operation models `ServiceQuotaExceededException` for reaching it.
+            // An instance `DeleteWorkspaceInstance` has started tearing down is no longer
+            // running, so it no longer holds a slot even while it is still reported — and
+            // a second bound on the records held in total keeps the store from growing
+            // without bound through those (see `state::MAX_HELD_INSTANCES`). The count the
+            // error reports is what the account HOLDS, whichever bound was reached.
+            if !state.has_instance_capacity(&region) {
+                return Err(
+                    CreateWorkspaceInstanceErrorModeled::ServiceQuotaExceededException(
+                        crate::state::instance_quota_exceeded(state.held_instance_count(&region)),
+                    )
+                    .into(),
+                );
+            }
+
+            let instance_id = state.mint_instance_id();
+
+            let record = crate::state::WorkspaceInstanceRecord {
+                id: instance_id.clone(),
+                region: region.clone(),
+                // The instance is launched, not ready: it starts in the non-terminal
+                // `ALLOCATING` state, and the move to `ALLOCATED` falls due one
+                // `ALLOCATION_SPAN` after the launch below is accepted
+                // (`WorkspaceInstanceRecord::launched`). Until then this deadline keeps
+                // the record in `ALLOCATING`, so a read that arrives while the launch is
+                // in flight reports exactly that.
+                provision_state: crate::state::PROVISION_STATE_ALLOCATING.to_string(),
+                managed_instance: input.managed_instance.clone(),
+                // The managed instance is Amazon EC2's resource, so its id is whatever
+                // the launch below mints — nothing is reported for it until then.
+                ec2_instance_id: None,
+                ec2_instance_errors: Vec::new(),
+                // The model documents hourly billing as the default when the call supplies
+                // no `BillingConfiguration`, and Get reports the ACTIVE configuration, so
+                // the default is materialised here rather than left absent.
+                billing_configuration: input.billing_configuration.clone().unwrap_or(
+                    BillingConfiguration {
+                        billing_mode: crate::state::DEFAULT_BILLING_MODE.to_string(),
+                    },
+                ),
+                tags: tags.clone(),
+                client_token: input.client_token.clone(),
+                created_at: std::time::SystemTime::now(),
+                allocation_due: std::time::Instant::now() + crate::state::ALLOCATION_SPAN,
+                // Nothing has asked for this instance to be torn down, so no
+                // deallocation deadline is owed yet; `DeleteWorkspaceInstance` sets it.
+                deallocation_due: None,
+            };
+
+            if let Some(token) = input.client_token.clone() {
+                state.client_tokens.insert(
+                    (region.clone(), token),
+                    crate::state::IdempotencyClaim {
+                        resource_id: instance_id.clone(),
+                        fingerprint,
+                    },
+                );
+            }
+            state.instances.insert(instance_id.clone(), record);
+            instance_id
+        };
+
+        // PHASE 2 — THE LAUNCH. A WorkSpace Instance IS a managed EC2 instance, so the instance is
+        // created in the service that OWNS instances, with the configuration this call
+        // carried, and the id EC2 minted is what this service reports from then on.
+        // Awaited with NO store guard held — the guard above is dropped before this line —
+        // so no other caller is ordered behind the hop.
+        let launched = crate::state::launch(
+            ctx,
+            &region,
+            &instance_id,
+            &input.managed_instance,
+            &tags,
+        )
+        .await;
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(CreateWorkspaceInstanceErrorModeled::InternalServerException(
                 InternalServerException {
@@ -375,101 +511,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
+        // PHASE 3 — the outcome, on the record the launch was made for.
         let mut state = state.lock();
-        // The moves the clock already owes, materialised before anything is read:
-        // a torn-down record past its retention is no longer reported, and neither is
-        // the `ClientToken` of the create that made it, so the replay below cannot
-        // hand back an id this service has stopped knowing.
-        state.settle_all(std::time::Instant::now());
-
-        // `@idempotent` + `@idempotencyToken`: a token identifies ONE request, so a
-        // repeat call carrying a token this service has already created an instance for
-        // replays the SAME id and creates nothing ONLY where the parameters are the ones
-        // that token was spent on. A call that reuses a spent token with different
-        // parameters is a different request under a spent token, and is refused with the
-        // modelled `ConflictException` rather than handed an instance it did not ask
-        // for; nothing is written on that refusal.
-        //
-        // The fingerprint is taken over the request with its token cleared, so every
-        // member except the token itself is compared.
-        let mut parameters = input.clone();
-        parameters.client_token = None;
-        let fingerprint = crate::state::request_fingerprint(&parameters);
-        match crate::state::resolve_client_token(
-            &state.client_tokens,
-            &region,
-            input.client_token.as_deref(),
-            &fingerprint,
-        ) {
-            TokenOutcome::Replay(instance_id) => {
-                return Ok(CreateWorkspaceInstanceOutput {
-                    workspace_instance_id: Some(instance_id),
-                })
+        if let Some(record) = state.instances.get_mut(&instance_id) {
+            match launched {
+                Ok(ec2_instance_id) => record.launched(ec2_instance_id, std::time::Instant::now()),
+                // The launch was refused, so there is no managed instance: the WorkSpace
+                // Instance reports the terminal `ERROR_ALLOCATING` and EC2's own error,
+                // rather than an allocation that never finishes or an instance id that
+                // resolves nowhere.
+                Err(error) => record.allocation_failed(error),
             }
-            TokenOutcome::Mismatch(instance_id) => {
-                return Err(CreateWorkspaceInstanceErrorModeled::ConflictException(
-                    crate::state::idempotent_parameter_mismatch(
-                        &instance_id,
-                        crate::state::WORKSPACE_INSTANCE_RESOURCE_TYPE,
-                    ),
-                )
-                .into())
-            }
-            TokenOutcome::Unclaimed => {}
         }
-
-        // A real account has a Service Quotas limit on RUNNING WorkSpace Instances,
-        // and this operation models `ServiceQuotaExceededException` for reaching it.
-        // An instance `DeleteWorkspaceInstance` has started tearing down is no longer
-        // running, so it no longer holds a slot even while it is still reported — and
-        // a second bound on the records held in total keeps the store from growing
-        // without bound through those (see `state::MAX_HELD_INSTANCES`). The count the
-        // error reports is what the account HOLDS, whichever bound was reached.
-        if !state.has_instance_capacity(&region) {
-            return Err(
-                CreateWorkspaceInstanceErrorModeled::ServiceQuotaExceededException(
-                    crate::state::instance_quota_exceeded(state.held_instance_count(&region)),
-                )
-                .into(),
-            );
-        }
-
-        let (instance_id, ec2_instance_id) = state.mint_ids();
-
-        let record = crate::state::WorkspaceInstanceRecord {
-            id: instance_id.clone(),
-            region: region.clone(),
-            // The instance is launched, not ready: it starts in the non-terminal
-            // `ALLOCATING` state and the move to `ALLOCATED` falls due one
-            // `ALLOCATION_SPAN` from now.
-            provision_state: crate::state::PROVISION_STATE_ALLOCATING.to_string(),
-            managed_instance: input.managed_instance,
-            ec2_instance_id,
-            // The model documents hourly billing as the default when the call supplies
-            // no `BillingConfiguration`, and Get reports the ACTIVE configuration, so
-            // the default is materialised here rather than left absent.
-            billing_configuration: input.billing_configuration.unwrap_or(BillingConfiguration {
-                billing_mode: crate::state::DEFAULT_BILLING_MODE.to_string(),
-            }),
-            tags,
-            client_token: input.client_token.clone(),
-            created_at: std::time::SystemTime::now(),
-            allocation_due: std::time::Instant::now() + crate::state::ALLOCATION_SPAN,
-            // Nothing has asked for this instance to be torn down, so no
-            // deallocation deadline is owed yet; `DeleteWorkspaceInstance` sets it.
-            deallocation_due: None,
-        };
-
-        if let Some(token) = input.client_token {
-            state.client_tokens.insert(
-                (region, token),
-                crate::state::IdempotencyClaim {
-                    resource_id: instance_id.clone(),
-                    fingerprint,
-                },
-            );
-        }
-        state.instances.insert(instance_id.clone(), record);
 
         Ok(CreateWorkspaceInstanceOutput {
             workspace_instance_id: Some(instance_id),

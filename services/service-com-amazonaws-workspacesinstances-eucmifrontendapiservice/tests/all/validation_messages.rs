@@ -47,14 +47,19 @@ const TAG_KEY_PATTERN: &str = r"([\p{L}\p{Z}\p{N}_.:/=+\-@]+)";
 /// (`smithy_query(query="operation",operation="CreateWorkspaceInstance")`).
 const CLIENT_TOKEN_PATTERN: &str = r"[\x20-\x7E]+";
 
-/// A router carrying only this service, over one shared engine — the same
-/// `EmulatedService::new(engine)` seam `core/router` mounts.
+/// A router carrying this service and the service that owns the EC2 instance a WorkSpace
+/// Instance is, over one shared engine — the same `EmulatedService::new(engine)` seam
+/// `core/router` mounts both through. Amazon EC2 is mounted because a create launches a
+/// real instance there.
 fn router() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     // Signatures are the emulator's concern, not this service's.
     router.set_request_authentication(false);
-    router.register_service(wsinst::EmulatedService::new(engine));
+    router.register_service(wsinst::EmulatedService::new(Arc::clone(&engine)));
+    router.register_service(
+        service_com_amazonaws_ec2_amazonec2::EmulatedService::new(engine),
+    );
     router
 }
 
