@@ -518,8 +518,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .into());
                 };
                 return Ok(ListInvoiceSummariesOutput {
-                    invoice_summaries: if filter.admits(invoice) {
-                        vec![invoice.clone()]
+                    invoice_summaries: if filter.admits(&invoice.summary) {
+                        vec![invoice.summary.clone()]
                     } else {
                         Vec::new()
                     },
@@ -538,8 +538,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             page_size,
             NEXT_TOKEN_PREFIX,
             |invoice| {
-                (linked_to_account(invoice, account_id) && filter.admits(invoice))
-                    .then(|| invoice.clone())
+                (linked_to_account(&invoice.summary, account_id)
+                    && filter.admits(&invoice.summary))
+                .then(|| invoice.summary.clone())
             },
         );
 

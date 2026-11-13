@@ -20,8 +20,7 @@
 //!    rejected (one, a few, more than fit, and the most the list constraints admit), the
 //!    constraint class the clause states (a `@length` minimum, a `@pattern`, an absent
 //!    `@required` member), which member and which list the rejected values sit in, and
-//!    which operation refuses the request — including one still scaffolded, whose refusal
-//!    carries the message alone.
+//!    which operation refuses the request.
 //! 2. A failure whose text NAMES something the caller supplied is held to the same bound.
 //!    `ProcurementPortalIdString` is the one input shape of this model with no maximum
 //!    length (`smithy_query(query="operation",
@@ -134,9 +133,21 @@ fn clause(path: &str, requirement: &str) -> String {
 /// The message the `fieldList` entry for a rejected member states: the requirement it
 /// failed, about the value the entry refused — withheld behind the `[redacted]` marker —
 /// with the member left to the entry's own `name`.
-fn field_message(requirement: &str) -> String {
-    format!("Value [redacted] failed to satisfy constraint: {requirement}")
+///
+/// An ABSENT member is the one exception: there was no value to withhold, so the entry
+/// keeps the `null` the envelope reports it as (`crate::service::validation`).
+fn field_message(clause: &str) -> String {
+    let requirement = requirement_of(clause);
+    let value = match clause.starts_with(ABSENT_VALUE_PREFIX) {
+        true => "null",
+        false => "[redacted]",
+    };
+    format!("Value {value} failed to satisfy constraint: {requirement}")
 }
+
+/// How a clause opens when the member it names was ABSENT rather than rejected for its
+/// value.
+const ABSENT_VALUE_PREFIX: &str = "Value null at '";
 
 /// The member path a clause names, read back out of it.
 fn path_of(clause: &str) -> String {
@@ -188,10 +199,6 @@ struct Case {
     request: Value,
     /// Every clause the request earns, in the order the validating walk finds them.
     clauses: Vec<String>,
-    /// Does this operation's refusal carry the modelled `fieldList`? Only an implemented
-    /// operation's does; a scaffolded one keeps the generic envelope, which has room for
-    /// the message alone.
-    modelled: bool,
 }
 
 impl std::fmt::Debug for Case {
@@ -228,7 +235,6 @@ fn cases() -> Vec<Case> {
             label: format!("{count} tags with an empty key"),
             request: json!({"ResourceArn": RESOURCE_ARN, "ResourceTags": empty_keyed_tags(count)}),
             clauses: tag_key_clauses("resourceTags", count),
-            modelled: true,
         });
     }
     // The same rejected member on another operation and another plane: the bound belongs
@@ -245,7 +251,6 @@ fn cases() -> Vec<Case> {
                 "ResourceTags": empty_keyed_tags(count),
             }),
             clauses: tag_key_clauses("resourceTags", count),
-            modelled: true,
         });
     }
     // A list of STRINGS rather than of structures: `ResourceTagKeyList` is `@length(0..200)`
@@ -260,7 +265,6 @@ fn cases() -> Vec<Case> {
         clauses: (1..=200)
             .map(|position| clause(&format!("resourceTagKeys.{position}.member"), MIN_LENGTH_ONE))
             .collect(),
-        modelled: true,
     });
     // A `@pattern` clause, which is longer than a `@length` one — so fewer of them fit —
     // on the longest list this model admits (`AccountIdList` is `@length(1..1000)`).
@@ -279,11 +283,10 @@ fn cases() -> Vec<Case> {
                     )
                 })
                 .collect(),
-            modelled: true,
         });
     }
-    // A SCAFFOLDED operation's refusal: the generic envelope, worded by the same formatter
-    // and held to the same bound, with no modelled members to carry detail in.
+    // The invoice-document reader's own `@required` member, absent: the same wording from
+    // the same formatter, held to the same bound, in the same modelled shape.
     cases.push(Case {
         operation: "GetInvoicePDF",
         label: "no InvoiceId at all".to_string(),
@@ -292,7 +295,6 @@ fn cases() -> Vec<Case> {
             "Value null at 'invoiceId' failed to satisfy constraint: Member must not be null"
                 .to_string(),
         ],
-        modelled: false,
     });
     cases
 }
@@ -372,15 +374,6 @@ async fn a_refusal_states_as_many_whole_clauses_as_the_modelled_bound_admits() {
             );
         }
 
-        if !case.modelled {
-            assert!(
-                answer.body.get("fieldList").is_none(),
-                "case {case:?}: a scaffolded operation's refusal carries the message \
-                 alone, got {answer:?}"
-            );
-            continue;
-        }
-
         // One entry per clause the envelope states — the two halves state the same
         // violations — and every text of an entry inside the same modelled bound.
         let field_list = answer.body["fieldList"]
@@ -402,7 +395,7 @@ async fn a_refusal_states_as_many_whole_clauses_as_the_modelled_bound_admits() {
             );
             assert_eq!(
                 entry_message,
-                field_message(&requirement_of(clauses[position])),
+                field_message(clauses[position]),
                 "case {case:?}: entry {position} must state the requirement the envelope \
                  states for that member, got {answer:?}"
             );

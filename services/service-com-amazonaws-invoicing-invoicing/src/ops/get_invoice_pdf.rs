@@ -1,15 +1,27 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetInvoicePDF
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetInvoicePDF`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetInvoicePDF::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports where the documents of ONE invoice are downloaded from: the invoice document
+//! itself, which every invoice has, and each supplemental document issued with it, each as
+//! a pre-signed URL that leads back to this emulator together with the instant that URL
+//! stops verifying.
+//!
+//! The invoice is the one the request's `InvoiceId` names in the registry
+//! [`crate::state::ComAmazonawsInvoicingInvoicingState::invoices`] holds — the same one
+//! copy `ListInvoiceSummaries` reports — so an id the registry does not hold is the
+//! modelled `ResourceNotFoundException` rather than a URL for a document nothing issued.
+//! An invoice is ISSUED by AWS out of a billing period's activity and no operation of this
+//! service's API creates one, so the registry is empty until something puts an invoice
+//! there (see the `crate::state` module docs).
+//!
+//! Each URL and its expiry come from the framework's URL signer
+//! ([`crate::state::signed_document_url`]), which signs for the base URL this emulator is
+//! reached on, and the document plane in [`crate::service`] serves the document at that
+//! address out of the same stored invoice — so a URL this operation hands out is one a
+//! client can actually fetch the document from. Nothing is stored or advanced here: this
+//! operation is `@readonly` (`smithy_query(query="operation",
+//! operation="GetInvoicePDF")`), so a later caller sees exactly what the previous one saw.
 //!
 //! ## Shape of an operation
 //!
@@ -152,18 +164,95 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetInvoicePDF` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetInvoicePDFErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetInvoicePDF"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            GetInvoicePDFErrorModeled::InternalServerException(crate::state::state_unavailable())
+        })?;
+
+        // The stored invoice this request names, and the AUTHENTICATED address of each
+        // document it was issued with — the invoice document first, then one per
+        // supplemental document in stored order. Both are taken in one pass under the
+        // guard: an address carries the store's own authenticator for exactly the document
+        // it names (`crate::state::...::document_token`), which is what makes it an address
+        // no caller could have assembled. Nothing this operation does writes to the store.
+        let (invoice, addresses) = {
+            let store = state.lock();
+            let Some(invoice) = store.invoices.get(&input.invoice_id) else {
+                // The request names a RESOURCE, so an id the registry does not hold is
+                // the modelled 404 — the same refusal every reader of this plane answers
+                // for an identifier that resolves to nothing.
+                return Err(GetInvoicePDFErrorModeled::ResourceNotFoundException(
+                    crate::state::no_such_resource_unnamed(),
+                )
+                .into());
+            };
+            let invoice = invoice.clone();
+            let targets = ::std::iter::once(crate::state::InvoiceDocumentTarget::invoice(
+                &input.invoice_id,
+            ))
+            .chain(
+                (0..invoice.supplemental_documents.len()).map(|position| {
+                    crate::state::InvoiceDocumentTarget::supplemental(&input.invoice_id, position)
+                }),
+            );
+            let addresses: Vec<(crate::state::InvoiceDocumentTarget, String)> = targets
+                .map(|target| {
+                    let token = store.document_token(&target);
+                    (target, token)
+                })
+                .collect();
+            (invoice, addresses)
+        };
+
+        // A read owes an address the caller can fetch the document from, so an address that
+        // cannot be signed is the modelled server error rather than a success reporting no
+        // address.
+        let unsignable = || {
+            GetInvoicePDFErrorModeled::InternalServerException(
+                crate::state::document_url_unsignable(),
+            )
+        };
+        let mut addresses = addresses.into_iter();
+        let (invoice_target, invoice_token) = addresses.next().ok_or_else(unsignable)?;
+        let (document_url, document_url_expiration_date) =
+            crate::state::signed_document_url(ctx, &invoice_target, &invoice_token)
+                .ok_or_else(unsignable)?;
+        let supplemental_documents: Vec<SupplementalDocument> = invoice
+            .supplemental_documents
+            .iter()
+            .zip(addresses)
+            .map(|(document, (target, token))| {
+                let (url, expires_at) = crate::state::signed_document_url(ctx, &target, &token)
+                    .ok_or_else(unsignable)?;
+                Ok(SupplementalDocument {
+                    // "The type of supplemental document" and "the ID of the supplemental
+                    // document": the stored document's own, reported as stored.
+                    document_type: document.document_type.clone(),
+                    document_id: document.document_id.clone(),
+                    document_url: Some(url),
+                    document_url_expiration_date: Some(expires_at),
+                })
+            })
+            .collect::<Result<Vec<_>, GetInvoicePDFErrorModeled>>()?;
+
+        Ok(GetInvoicePDFOutput {
+            invoice_pdf: Some(InvoicePDF {
+                // "Your unique invoice ID": the stored invoice's own, which is the id the
+                // registry keys it under for every invoice that carries the member.
+                invoice_id: invoice
+                    .summary
+                    .invoice_id
+                    .clone()
+                    .or_else(|| Some(input.invoice_id.clone())),
+                document_url: Some(document_url),
+                // "The pre-signed URL expiration date of the invoice document": the
+                // instant the signature on the URL just reported stops verifying, so the
+                // reported expiry is that URL's own rather than a span computed beside it.
+                document_url_expiration_date: Some(document_url_expiration_date),
+                // "List of supplemental documents associated with the invoice": the ones
+                // issued with this invoice, in the stored order. An invoice issued with
+                // none reports an empty list, never a document nothing issued.
+                supplemental_documents: Some(supplemental_documents),
+            }),
+        })
     }
 }

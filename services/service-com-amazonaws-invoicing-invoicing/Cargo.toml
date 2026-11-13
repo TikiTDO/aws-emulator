@@ -30,6 +30,14 @@ sha2 = { workspace = true }
 # The calendar `ListInvoiceSummaries`' documented temporal rules are stated in: a
 # maintained proleptic Gregorian calendar, rather than month arithmetic written here.
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+# `service-common` carries `page_tokens`: the one secret a store authenticates a value it
+# hands out and takes back under, which is what makes a document address `GetInvoicePDF`
+# minted one no caller could have assembled.
+service-common = { path = "../common" }
+# Writes the PDF invoice documents this service's document plane serves, so a document a
+# `GetInvoicePDF` URL leads to is produced by a PDF writer rather than hand-assembled
+# bytes.
+pdf-writer = "0.13"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

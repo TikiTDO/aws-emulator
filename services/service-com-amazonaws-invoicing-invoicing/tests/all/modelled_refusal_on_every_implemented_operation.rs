@@ -12,9 +12,7 @@
 //! 1. A request a modelled input constraint rejects is answered HTTP 400
 //!    `ValidationException` carrying `reason` = `fieldValidationFailed` and a `fieldList`
 //!    entry naming the rejected member and the constraint it failed — for EVERY operation
-//!    this emulator implements, whichever plane it belongs to. The one exclusion is an
-//!    operation still scaffolded, which answers the message envelope alone because it
-//!    asserts nothing about its own behaviour.
+//!    this emulator implements, whichever plane it belongs to.
 //! 2. What is refused is what falls OUTSIDE a constraint: a value ON a published bound, and
 //!    a request every modelled constraint admits, are not answered as a field-validation
 //!    failure at all — whatever the handler behind them then answers.
@@ -155,6 +153,8 @@ fn cases() -> Vec<Case> {
                 "MaxResults": INVOICE_SUMMARIES_MAX_RESULTS_RANGE.1 + 1,
             }),
         ),
+        // A `@required` member absent on the invoice-document reader.
+        Case::new("GetInvoicePDF", "invoiceId", json!({})),
         // The invoice-profile plane: a violation on a LIST ELEMENT.
         Case::new(
             "BatchGetInvoiceProfile",
@@ -304,48 +304,14 @@ async fn every_implemented_operation_states_a_rejected_member_in_the_modelled_sh
     }
 
     // Every operation this emulator implements is covered: the model binds 21 operations
-    // (`smithy_query(query="digest")`) and `GetInvoicePDF` is the only one still
-    // scaffolded, which the test below asserts of it.
+    // (`smithy_query(query="digest")`) and this service implements every one of them.
     let mut covered: Vec<&str> = cases.iter().map(|case| case.operation).collect();
     covered.sort_unstable();
     covered.dedup();
     assert_eq!(
         covered.len(),
-        20,
+        21,
         "the table must refuse every implemented operation, got {covered:?}"
-    );
-}
-
-/// RULE 1's one exclusion: a SCAFFOLDED operation's refusal is worded the same way but
-/// carries the message alone — it asserts nothing about its own behaviour, so it claims
-/// no modelled detail either.
-#[tokio::test]
-async fn a_scaffolded_operation_keeps_the_message_envelope_alone() {
-    let router = emulator();
-
-    // `GetInvoicePDF` is the operation of this model that still answers 501; `InvoiceId`
-    // is its one `@required` member.
-    let answer = call(&router, "GetInvoicePDF", &json!({})).await;
-    assert_eq!(
-        answer.status, 400,
-        "case GetInvoicePDF with no InvoiceId: expected HTTP 400, got {answer:?}"
-    );
-    assert_eq!(
-        answer.error_code(),
-        "ValidationException",
-        "case GetInvoicePDF with no InvoiceId: expected a ValidationException, got {answer:?}"
-    );
-    assert!(
-        answer
-            .member("message")
-            .is_some_and(|text| text.contains("invoiceId")),
-        "case GetInvoicePDF with no InvoiceId: the envelope must name the member, got \
-         {answer:?}"
-    );
-    assert!(
-        answer.body.get("fieldList").is_none() && answer.member("reason").is_none(),
-        "case GetInvoicePDF with no InvoiceId: a scaffolded operation's refusal carries \
-         the message alone, got {answer:?}"
     );
 }
 
@@ -389,7 +355,8 @@ async fn a_request_inside_every_constraint_is_not_a_field_validation_failure() {
         ),
         // An account id of the modelled form, and a list at its own length minimum.
         ("BatchGetInvoiceProfile", json!({"AccountIds": ["123456789012"]})),
-        // The scaffolded operation too: its refusals are the boundary's, not its own.
+        // The invoice-document reader too: a well-formed id the registry holds no invoice
+        // for is refused by the handler, not by the boundary.
         ("GetInvoicePDF", json!({"InvoiceId": "INV-0001"})),
     ];
 

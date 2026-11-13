@@ -22,10 +22,11 @@
 //!   services, or routing that keys on the access-key id.
 //! - `override_operation` — serve a request the model's routing key cannot name
 //!   correctly. The default returns `None`, so every request resolves through the
-//!   generated routing table. This service returns `Some` for the operations it
-//!   implements, so that a refused input is stated in the modelled
+//!   generated routing table. This service returns `Some` for every operation it
+//!   serves, so that a refused input is stated in the modelled
 //!   `ValidationException` and the tag plane announces its own media type (see
-//!   [`FrontDoor`]).
+//!   [`FrontDoor`]), and for a fetch of an invoice document, which is not an API
+//!   call at all (see [`invoice_document`]).
 //! - `override_refusal` — how this service words a request the framework refused
 //!   before any handler ran. The default returns `None`, keeping the framework's
 //!   wording; this service words it itself, through the one formatter in
@@ -70,6 +71,7 @@
 //! is the one seam `override_protocol` deliberately does not reach, and which is the
 //! media type the recorded refusals carry too.
 
+pub(crate) mod invoice_document;
 pub(crate) mod validation;
 
 use smithy_server_runtime::{
@@ -93,6 +95,10 @@ pub struct EmulatedService<Eng: Send + Sync + 'static> {
     /// Answers the operations this service serves in front of the generated walk; see
     /// [`FrontDoor`].
     front_door: FrontDoor<Eng>,
+    /// Serves a download of an invoice's documents; [`Service::override_operation`] hands
+    /// it the requests it claims. Held in a field because that seam hands back a borrow
+    /// of it.
+    invoice_document: invoice_document::InvoiceDocumentRoute<Eng>,
 }
 
 /// The HTTP status the model gives `ValidationException`
@@ -151,14 +157,13 @@ struct ServedOperation {
 ///    the whole service, so the per-plane part is stamped here, on everything those
 ///    operations answer — a success and a modelled failure alike.
 ///
-/// EVERY operation this emulator implements is served here, whichever plane it belongs
+/// EVERY operation this service serves is served here, whichever plane it belongs
 /// to: the modelled refusal body is a property of the REFUSAL — the model gives
 /// `ValidationException` the same `reason` and `fieldList` members for every operation —
-/// so leaving an implemented operation out would answer one class of refusal two ways,
+/// so leaving an operation out would answer one class of refusal two ways,
 /// with the member detail for some operations and the message envelope alone for the
-/// rest. A scaffolded operation is the one exclusion: it answers HTTP 501 and asserts
-/// nothing about its behaviour, so restating its refusals or its media type would claim a
-/// fidelity it does not have; each of those is its own stub issue.
+/// rest. This service implements every operation its model binds, so the table below is
+/// that whole surface.
 ///
 /// Generic over the engine type for the same reason the rest of this file is: the
 /// operations whose schemas and routing keys it reads are, so naming a concrete engine
@@ -167,10 +172,10 @@ struct FrontDoor<Eng>(::std::marker::PhantomData<Eng>);
 
 impl<Eng: Send + Sync + 'static> FrontDoor<Eng> {
     /// Every operation this seam serves: EVERY operation this crate implements, which is
-    /// every operation of the model but the one still scaffolded. Each entry names the
+    /// every operation this service's model binds. Each entry names the
     /// operation through its own `Operation` impl, so the routing key and the input schema
     /// come from the model.
-    fn operations() -> [ServedOperation; 20] {
+    fn operations() -> [ServedOperation; 21] {
         use crate::ops;
         [
             // The invoice-unit plane.
@@ -180,6 +185,7 @@ impl<Eng: Send + Sync + 'static> FrontDoor<Eng> {
             Self::served::<ops::update_invoice_unit::UpdateInvoiceUnit<Eng>>(None),
             Self::served::<ops::delete_invoice_unit::DeleteInvoiceUnit<Eng>>(None),
             Self::served::<ops::list_invoice_summaries::ListInvoiceSummaries<Eng>>(None),
+            Self::served::<ops::get_invoice_pdf::GetInvoicePDF<Eng>>(None),
             // The invoice-profile plane.
             Self::served::<ops::batch_get_invoice_profile::BatchGetInvoiceProfile<Eng>>(None),
             // The procurement-portal plane.
@@ -340,9 +346,10 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// operation's behaviour lives in that operation's own `impl Operation`.
     pub fn new(engine: Arc<Eng>) -> Self {
         Self {
-            entry: crate::ServiceDefinition::new(engine),
+            entry: crate::ServiceDefinition::new(Arc::clone(&engine)),
             protocol: aws_smithy_schema_server::rpc::AwsJson11(),
             front_door: FrontDoor(::std::marker::PhantomData),
+            invoice_document: invoice_document::InvoiceDocumentRoute::new(engine),
         }
     }
 }
@@ -369,13 +376,19 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         &self,
         req: &aws_smithy_runtime_api::http::Request,
     ) -> Option<&dyn ErasedOperation> {
-        // Every implemented operation needs it: a refused input is stated in this
+        // The download of an invoice document, which is not an API call at all: it is the
+        // artifact `GetInvoicePDF` hands out a pre-signed URL for, served by the route
+        // that owns it (see [`invoice_document`]). Claimed first, because such a request
+        // names no operation for the routing key below to resolve.
+        if self.invoice_document.claims(req).is_some() {
+            return Some(&self.invoice_document as &dyn ErasedOperation);
+        }
+        // Every operation needs it: a refused input is stated in this
         // service's own modelled `ValidationException` — with the modelled `reason` and
         // `fieldList` — instead of the framework's generic refusal body, and the tag
         // plane announces its own media type. See [`FrontDoor`] for why neither can be
         // done from inside `handle`. The operation names are read from the model, not
-        // spelled out, and a request naming an operation that is still scaffolded is left
-        // to the generated routing table.
+        // spelled out.
         let routing_key = self.definition().protocol().routing_key(req).ok()?;
         FrontDoor::<Eng>::operations()
             .iter()
@@ -384,15 +397,16 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     }
 
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {
-        // A refusal of an IMPLEMENTED operation never reaches this seam — [`FrontDoor`]
-        // answers it BEFORE the framework renders it, because the generic refusal body
-        // cannot carry the modelled `reason`/`fieldList` members at all and `Refused` is
-        // only a code and a message. What does reach it is a refusal of a request for a
-        // scaffolded operation, whose modelled constraints the framework validates
-        // before it ever reaches the 501. Its `message` is worded by the same formatter
-        // the modelled body uses ([`validation`]), so one constraint violation is stated
-        // one way wherever this service refuses it: the member path and the requirement,
-        // never the rejected value, and a `@pattern` without its anchors.
+        // A refusal of an operation this service serves never reaches this seam —
+        // [`FrontDoor`] answers it BEFORE the framework renders it, because the generic
+        // refusal body cannot carry the modelled `reason`/`fieldList` members at all and
+        // `Refused` is only a code and a message. What does reach it is a refusal the
+        // front door has no structured violation to restate — a request whose body the
+        // codec cannot read as the operation's input at all. Its `message` is worded by
+        // the same formatter the modelled body uses ([`validation`]), so one constraint
+        // violation is stated one way wherever this service refuses it: the member path
+        // and the requirement, never the rejected value, and a `@pattern` without its
+        // anchors.
         validation::refused(refusal)
     }
 

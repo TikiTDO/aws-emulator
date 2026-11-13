@@ -74,6 +74,16 @@
 //! which is the answer a reader owes for an account that has no invoices — and a
 //! reader reports exactly what it holds rather than synthesising amounts for charges
 //! nothing incurred.
+//!
+//! A registry entry is one [`StoredInvoice`]: the invoice as a reader reports it, plus
+//! the DOCUMENTS issued with it, which `GetInvoicePDF` hands out pre-signed download URLs
+//! for and `crate::service`'s document plane serves. Where those URLs lead and what is
+//! served there lives in [`invoice_documents`], beside the registry the documents are
+//! rendered from.
+
+mod invoice_documents;
+
+pub use invoice_documents::*;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -106,15 +116,15 @@ pub struct ComAmazonawsInvoicingInvoicingState {
     /// [`StoredInvoiceUnit::version_as_of`], which answers `None` for an instant the
     /// unit did not exist at — before it was created or at or after it was deleted.
     pub invoice_units: BTreeMap<String, StoredInvoiceUnit>,
-    /// Every invoice this emulator holds, keyed by its `InvoiceId`, as the modelled
-    /// `InvoiceSummary` a reader reports it with — one copy, so two readers of one
-    /// invoice cannot disagree. A `BTreeMap` so `ListInvoiceSummaries` walks a stable,
-    /// deterministic order and a pagination token (a position in that order) stays
-    /// meaningful across calls.
+    /// Every invoice this emulator holds, keyed by its `InvoiceId`: the modelled
+    /// `InvoiceSummary` a reader reports it with, and the documents issued with it
+    /// ([`StoredInvoice`]) — one copy, so two readers of one invoice cannot disagree. A
+    /// `BTreeMap` so `ListInvoiceSummaries` walks a stable, deterministic order and a
+    /// pagination token (a position in that order) stays meaningful across calls.
     ///
     /// Empty until something puts an invoice here, because nothing in this service's
     /// API issues one — see the module docs.
-    pub invoices: BTreeMap<String, InvoiceSummary>,
+    pub invoices: BTreeMap<String, StoredInvoice>,
     /// `ResourceTags` per resource ARN, as a create or `TagResource` persisted them and
     /// `ListTagsForResource` reports them, for every resource kind this service mints.
     /// One tag per key: a later write of a key already set replaces that key's value.
@@ -150,6 +160,12 @@ pub struct ComAmazonawsInvoicingInvoicingState {
     next_procurement_portal_preference_id: u64,
     /// Source of the validation codes `SendProcurementPortalValidation` issues.
     next_portal_validation_code: u64,
+    /// The secret this store authenticates the DOCUMENT ADDRESSES it hands out under, so an
+    /// address `GetInvoicePDF` minted is one no caller could have assembled and no other
+    /// process can produce (see [`invoice_documents`] and [`Self::document_token`]). Drawn
+    /// from the system's randomness when the store is created, held only in memory, never
+    /// reported and never logged.
+    document_address_key: ::service_common::page_tokens::PageTokenKey,
 }
 
 /// What an `@idempotent` replay record is keyed by: the operation, the request's target

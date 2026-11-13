@@ -32,9 +32,8 @@
 //! declares (`@pattern`, both `@length` bounds, both `@range` bounds, an enum value set,
 //! a `@required` member absent), the member's type (string, integer, list, a structure's
 //! member, a list element), how many violations one request carries, and which operation
-//! refuses it — an implemented one, whose refusal is answered in the modelled
-//! `ValidationException` with its `fieldList`, and a scaffolded one, whose refusal the
-//! framework renders in the generic envelope this service words the same way.
+//! refuses it, every refusal being answered in the modelled `ValidationException` with
+//! its `fieldList`.
 
 use std::sync::Arc;
 
@@ -196,11 +195,6 @@ struct Case {
     rejected: Vec<String>,
     /// The anchored model expressions that must appear nowhere in it either.
     anchored: Vec<&'static str>,
-    /// Does this operation's refusal carry the modelled `reason`/`fieldList`? Only the
-    /// operations this emulator implements are answered in the modelled shape; a
-    /// scaffolded one keeps the framework's generic envelope, which has room for the
-    /// message alone.
-    modelled: bool,
 }
 
 impl std::fmt::Debug for Case {
@@ -218,7 +212,6 @@ impl Case {
             expected,
             rejected: Vec::new(),
             anchored: Vec::new(),
-            modelled: true,
         }
     }
 
@@ -229,13 +222,6 @@ impl Case {
 
     fn anchored(mut self, pattern: &'static str) -> Self {
         self.anchored.push(pattern);
-        self
-    }
-
-    /// A scaffolded operation: the refusal is the framework's generic envelope, worded
-    /// by this service, with no modelled members to carry detail in.
-    fn scaffolded(mut self) -> Self {
-        self.modelled = false;
         self
     }
 
@@ -543,16 +529,14 @@ fn cases() -> Vec<Case> {
                 "Member must have value less than or equal to 100",
             )],
         ),
-        // A SCAFFOLDED operation's refusal is worded the same way, but carries the
-        // message alone: the framework validates its modelled constraints before the
-        // 501, and this service words what it refuses once.
+        // The invoice-document reader's own `@required` member, absent: the same wording,
+        // in the same modelled shape as every other operation of this service.
         Case::new(
             "GetInvoicePDF",
             "no InvoiceId at all",
             json!({}),
             vec![Expected::absent("invoiceId")],
-        )
-        .scaffolded(),
+        ),
     ]
 }
 
@@ -601,17 +585,6 @@ async fn a_refusal_states_the_member_and_the_constraint_and_nothing_of_the_value
                 "case {case:?}: the refusal must advertise the pattern without its \
                  anchors, got {answer:?}"
             );
-        }
-
-        if !case.modelled {
-            // A scaffolded operation keeps the generic envelope: there are no modelled
-            // members to carry the per-member detail in.
-            assert!(
-                answer.body.get("fieldList").is_none(),
-                "case {case:?}: a scaffolded operation's refusal carries the message \
-                 alone, got {answer:?}"
-            );
-            continue;
         }
 
         assert_eq!(

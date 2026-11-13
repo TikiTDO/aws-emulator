@@ -23,6 +23,8 @@ mod create_path_tag_quota;
 mod field_list_entry_message;
 #[path = "all/fresh_validation_code_fresh_attempt_budget.rs"]
 mod fresh_validation_code_fresh_attempt_budget;
+#[path = "all/invoice_pdf_documents.rs"]
+mod invoice_pdf_documents;
 #[path = "all/invoice_profile_membership.rs"]
 mod invoice_profile_membership;
 #[path = "all/invoice_profiles.rs"]

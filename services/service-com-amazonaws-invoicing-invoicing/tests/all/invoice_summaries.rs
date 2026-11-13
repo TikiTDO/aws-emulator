@@ -167,9 +167,12 @@ fn seed(engine: &engine::InMemoryEngine, seeds: &[Seed]) {
         .expect("the shared engine holds this service's state");
     let mut store = state.lock();
     for entry in seeds {
-        store
-            .invoices
-            .insert(entry.invoice_id.to_string(), entry.to_summary());
+        store.invoices.insert(
+            entry.invoice_id.to_string(),
+            service_com_amazonaws_invoicing_invoicing::state::StoredInvoice::new(
+                entry.to_summary(),
+            ),
+        );
     }
 }
 

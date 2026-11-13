@@ -177,11 +177,11 @@ fn seed_invoices(engine: &engine::InMemoryEngine) {
         let invoice_id = format!("INV-{index:03}");
         store.invoices.insert(
             invoice_id.clone(),
-            InvoiceSummary {
+            service_com_amazonaws_invoicing_invoicing::state::StoredInvoice::new(InvoiceSummary {
                 account_id: Some(INVOICE_ACCOUNT.to_string()),
                 invoice_id: Some(invoice_id),
                 ..Default::default()
-            },
+            }),
         );
     }
 }

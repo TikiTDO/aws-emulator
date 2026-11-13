@@ -84,7 +84,7 @@ fn seed(engine: &engine::InMemoryEngine) {
     let mut store = state.lock();
     store.invoices.insert(
         SEEDED_INVOICE_ID.to_string(),
-        InvoiceSummary {
+        service_com_amazonaws_invoicing_invoicing::state::StoredInvoice::new(InvoiceSummary {
             account_id: Some(ACCOUNT.to_string()),
             invoice_id: Some(SEEDED_INVOICE_ID.to_string()),
             issued_date: Some(::aws_smithy_types::DateTime::from_secs(secs(
@@ -102,7 +102,7 @@ fn seed(engine: &engine::InMemoryEngine) {
                 },
             ),
             ..Default::default()
-        },
+        }),
     );
 }
 
