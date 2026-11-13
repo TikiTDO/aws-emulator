@@ -18,8 +18,11 @@
 //! that is — before what the pool holds for that login is reported, so the refusal names no
 //! other identity — and where the identity is resolved from the logins themselves, logins
 //! proving different accounts cannot be linked. An identity an identity PROVIDER's login
-//! already proves is that provider's user, into which a developer user is not joined either;
-//! an unauthenticated (guest) identity and an identity of the same backend's other developer
+//! already proves is that provider's user, so a developer user is joined into it only by a
+//! call that has itself PROVEN that account: one of the logins it presents is a login of that
+//! identity, which is the documented way to associate a new login with an existing identity;
+//! a call that presents none of its logins cannot link a developer user into it. An
+//! unauthenticated (guest) identity and an identity of the same backend's other developer
 //! user identifiers are what the `IdentityId` member links a new one to. An identity no login
 //! has ever been linked to is named by its id alone, so nothing a request carries binds the
 //! call to it: a developer user identifier the pool has already registered keeps naming the
@@ -444,19 +447,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>
         // * a presented login the pool has already PROVEN for another identity is no login
         //   of this account;
         // * the identity the request NAMES is one an identity PROVIDER's login already
-        //   proves, and the developer user identifier presented is not one already
-        //   registered against it — so linking it would join a developer user to an account
-        //   that is already that provider's user. An UNAUTHENTICATED (guest) identity no
-        //   login proves is the case the member exists for, another developer user
-        //   identifier of a developer identity is one more login of the same backend's user,
-        //   and a developer login the pool has already registered against the named identity
-        //   is that identity's own, so none of those is refused here.
+        //   proves, the call presents NO login of it, and the developer user identifier
+        //   presented is not one already registered against it — so linking it would join a
+        //   developer user to an account that is already that provider's user, on a call that
+        //   has shown no login of that account. A call that DOES present a login of it has
+        //   proven the account it links into, which is the documented way to "associate a new
+        //   login with an existing authenticated/unauthenticated identity"; an
+        //   UNAUTHENTICATED (guest) identity no login proves is the case the member exists
+        //   for, another developer user identifier of a developer identity is one more login
+        //   of the same backend's user, and a developer login the pool has already registered
+        //   against the named identity is that identity's own, so none of those is refused
+        //   here.
         let proven = store.identities_proven_by(&input.identity_pool_id, &input.logins, now);
         let proves_another_account = proven
             .iter()
             .any(|named| Some(named) != resolved.as_ref());
+        // Whether one of the presented logins is a login OF the identity the request names —
+        // the same question every login-authorized call of this service is authorized by
+        // (`logins_name_identity`), answered from the identities just resolved.
+        let proves_the_named_identity = input
+            .identity_id
+            .as_ref()
+            .is_some_and(|named| proven.contains(named));
         let would_join_a_proven_identity = input.identity_id.as_deref().is_some_and(|named| {
-            named_identity_is_idp_proven && registered_to.as_deref() != Some(named)
+            named_identity_is_idp_proven
+                && !proves_the_named_identity
+                && registered_to.as_deref() != Some(named)
         });
         if proves_another_account || would_join_a_proven_identity {
             // A request that names an `IdentityId` and presents a developer user identifier
