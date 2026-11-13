@@ -254,17 +254,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 // The code generator: a schema document in, source files out.
 //
 // What a code binding IS, is the code a client builds its handler against — one
-// declaration per named schema the document declares, in the language asked for. So the
-// archive is COMPUTED from the stored document: the named schemas it declares decide
-// which files exist, each schema's own members decide what each file declares, and the
+// declaration per type the document IMPLIES, in the language asked for. So the archive
+// is COMPUTED from the stored document: the types it implies decide which files exist
+// (the named schemas it declares, and the nested structures its members declare inline,
+// which it never names), each type's own members decide what each file declares, and the
 // JSON Schema type of a member decides the type the declaration gives it. A document
-// that declares no named structure therefore generates no source file, and a document
-// that declares twenty generates twenty.
+// that implies no structure therefore generates no source file, and a document that
+// implies twenty generates twenty.
 //
 // The mapping below is this emulator's, stated once here: AWS publishes the bindings,
 // not the generator that writes them, so what is pinned is the mapping itself — JSON
 // Schema type to language type — and the layout a package of that language puts its
-// files in. `tests/all/code_binding_source.rs` asserts it over a table of documents.
+// files in. `tests/all/code_binding_source.rs` asserts it over a table of documents,
+// and `tests/all/code_binding_implied_types.rs` the set of types a document implies.
 // ---------------------------------------------------------------------------
 
 /// A code-binding language this operation generates source for.
@@ -366,11 +368,13 @@ const MAX_ALIAS_HOPS: usize = 8;
 /// over a document a caller wrote.
 const MAX_DECLARATION_DEPTH: usize = 8;
 
-/// One structure the generator renders a source file for: a named schema of the document
-/// that declares members.
+/// One structure the generator renders a source file for: a type the document implies,
+/// either by naming a schema that declares members or by declaring an object inline
+/// under one of a schema's members.
 #[derive(Debug, Clone)]
 struct Structure {
-    /// The name the document declares it under.
+    /// The name the document declares it under, or the name given to an inline
+    /// declaration the document leaves unnamed (see [`Hoisted`]).
     name: String,
     /// Its members, in the order the document declares them.
     members: Vec<Member>,
@@ -406,21 +410,21 @@ enum Declared {
     /// A reference to another structure of the same document.
     Named(String),
     /// A declaration that names no type above: an object with no members of its own (a
-    /// free-form map), a declaration with no `type` at all, or a reference out of the
-    /// document.
+    /// free-form map), a declaration with no `type` and no members, or a reference out
+    /// of the document.
     Unknown,
 }
 
 /// The archive `GetCodeBindingSource` answers: the source files generated from
-/// `document` for `target`, in the order the document declares them.
+/// `document` for `target`, in the order the document implies them.
 ///
-/// Infallible. A document that declares no named structure generates no source file,
-/// and so does one this service could not have stored (every stored document is a JSON
+/// Infallible. A document that implies no structure generates no source file, and so
+/// does one this service could not have stored (every stored document is a JSON
 /// object): the archive is then an empty one, rather than a failure of a binding whose
 /// generation the service reported complete.
 ///
-/// Its size is the stored document's: one declaration per named schema and a few lines
-/// per member of it. What a caller can grow is therefore the document, which
+/// Its size is the stored document's: one declaration per type the document implies and
+/// a few lines per member of it. What a caller can grow is therefore the document, which
 /// `crate::state::MAX_STORED_CONTENT_BYTES` and the model's own cap on `Content` bound
 /// before it is stored, and the nesting of one member's type, which
 /// [`MAX_DECLARATION_DEPTH`] bounds here.
@@ -457,15 +461,25 @@ fn code_binding_archive(
         .unwrap_or_default()
 }
 
-/// The named structures `document` declares, in its own order.
+/// The types a document IMPLIES, each as the structure a source file is generated for,
+/// in the order they are read.
 ///
-/// Where they are declared is the document's LANGUAGE: an OpenAPI 3 document declares
-/// them under `components/schemas`, and a JSON Schema draft-04 document is itself the
-/// root schema, with any further ones under [`DRAFT4_DEFINITIONS`].
+/// Where the document's own NAMES are declared is its language: an OpenAPI 3 document
+/// declares them under `components/schemas`, and a JSON Schema draft-04 document is
+/// itself the root schema, with any further ones under [`DRAFT4_DEFINITIONS`].
+///
+/// Those names are not the whole set. A member whose declaration is an object carrying
+/// members of its OWN declares a type the document never names — a nested structure
+/// written inline — and a client compiling against the binding needs a declaration for
+/// it exactly as it needs one for a named schema. Such a declaration is therefore given
+/// a name here ([`Hoisted`]) and read as a structure in its own right, however deeply
+/// the nesting goes and through the `items` of a list as well. So the structures are
+/// every type the document implies, not only the ones it happens to name.
 ///
 /// A named schema that declares no `properties` object declares no structure: it is an
 /// alias for the value it describes, so it gets no source file and a member that
-/// references it takes the type it describes.
+/// references it takes the type it describes. An object that declares no member of its
+/// own is free-form for the same reason, and stays [`Declared::Unknown`].
 fn declared_structures(document: &str, schema_type: &str, schema_name: &str) -> Vec<Structure> {
     let Some(parsed) = JsonNode::parse(document) else {
         return Vec::new();
@@ -492,43 +506,157 @@ fn declared_structures(document: &str, schema_type: &str, schema_name: &str) -> 
         }
     }
 
-    // Which names are structures, and what the rest stand for, before any member is
-    // read: a member's type may reference a name the document declares later.
-    let structure_names: BTreeSet<&str> = declared
+    // Which of the document's own NAMES are structures, and what the rest stand for,
+    // before any member is read: a member's type may reference a name the document
+    // declares later. A type hoisted out of a member's own declaration joins the
+    // structure set as it is read, below.
+    let mut structure_names: BTreeSet<String> = declared
         .iter()
         .filter(|(_, schema)| members_of(schema).is_some())
-        .map(|(name, _)| name.as_str())
+        .map(|(name, _)| name.clone())
         .collect();
-    let aliases: BTreeMap<&str, Declared> = declared
+    // Every name the document itself takes, so a hoisted type never takes one of them.
+    let mut hoisted = Hoisted::beside(declared.iter().map(|(name, _)| name.clone()));
+    let aliases: BTreeMap<String, Declared> = declared
         .iter()
-        .filter(|(name, schema)| members_of(schema).is_none() && !structure_names.contains(name.as_str()))
-        .map(|(name, schema)| (name.as_str(), declared_by(schema, 0)))
+        .filter(|(name, schema)| {
+            members_of(schema).is_none() && !structure_names.contains(name.as_str())
+        })
+        .map(|(name, schema)| {
+            let stands_for = declared_by(schema, name, name, 0, &mut hoisted);
+            (name.clone(), stands_for)
+        })
         .collect();
 
-    let mut structures: Vec<Structure> = Vec::new();
+    // Read every structure's members: the document's own named ones first, then each
+    // type hoisted out of a member's declaration, which may hoist further types itself.
+    // Terminates because each hoisted declaration is a distinct node of the parsed
+    // document and is queued once.
+    let mut queue: Vec<(String, &JsonNode)> = declared
+        .iter()
+        .filter(|(_, schema)| members_of(schema).is_some())
+        .map(|(name, schema)| (name.clone(), *schema))
+        .collect();
+    // A type hoisted out of an alias's own declaration is a structure too.
+    queue.append(&mut hoisted.pending);
+
+    let mut read: Vec<Structure> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    for (name, schema) in &declared {
+    let mut index = 0;
+    while index < queue.len() {
+        let (name, schema) = queue[index].clone();
+        index += 1;
         let Some(properties) = members_of(schema) else {
             continue;
         };
+        // Two declarations of one name are one file; a JSON object holds one member per
+        // name, so this is only reachable for a document that repeats a key.
         if !seen.insert(name.clone()) {
             continue;
         }
         let required = required_members(schema);
-        let members = properties
+        let members: Vec<Member> = properties
             .iter()
             .map(|(member, declaration)| Member {
                 name: member.clone(),
-                declared: resolve(declared_by(declaration, 0), &structure_names, &aliases, 0),
+                declared: declared_by(declaration, &name, member, 0, &mut hoisted),
                 required: required.contains(member.as_str()),
             })
             .collect();
-        structures.push(Structure {
-            name: name.clone(),
-            members,
-        });
+        structure_names.insert(name.clone());
+        read.push(Structure { name, members });
+        queue.append(&mut hoisted.pending);
     }
-    structures
+
+    // Only now is the whole set of structures known, so a reference is resolved against
+    // it last: a member may name a structure declared after it, named or hoisted.
+    read.into_iter()
+        .map(|structure| Structure {
+            name: structure.name,
+            members: structure
+                .members
+                .into_iter()
+                .map(|member| Member {
+                    declared: resolve(member.declared, &structure_names, &aliases, 0),
+                    ..member
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// The types a document implies without naming them: while a structure's members are
+/// read, a member whose declaration is an object carrying members of its own is given a
+/// name here and queued, so that declaration becomes a structure in its own right.
+///
+/// The queue is why the walk over a caller-written document is a LOOP rather than a
+/// recursion: a document may nest objects as deeply as its bytes allow
+/// (`crate::state::MAX_STORED_CONTENT_BYTES`), and nothing here grows the stack with
+/// that depth.
+#[derive(Debug)]
+struct Hoisted<'a> {
+    /// Declarations named and not read yet, each with the name given to it.
+    pending: Vec<(String, &'a JsonNode)>,
+    /// Every name a type of this document already holds, named or hoisted.
+    taken: BTreeSet<String>,
+    /// Per name, the next ordinal a further type of that name takes — so numbering the
+    /// nth declaration of one name is one step rather than a walk of every name taken.
+    ordinals: BTreeMap<String, usize>,
+}
+
+impl<'a> Hoisted<'a> {
+    /// The ordinal the first NUMBERED type of a name takes: the unnumbered name is the
+    /// first, so a second one of it is the second.
+    const FIRST_ORDINAL: usize = 2;
+
+    /// A collector that takes none of `taken` — the names the document declares itself.
+    fn beside(taken: impl Iterator<Item = String>) -> Self {
+        Self {
+            pending: Vec::new(),
+            taken: taken.collect(),
+            ordinals: BTreeMap::new(),
+        }
+    }
+
+    /// Name `declaration` — the inline object the member `member` of `context` declares
+    /// — and queue it to be read. The name answered is what a reference to that type is
+    /// declared as, and is the name of its source file.
+    fn declare(&mut self, context: &str, member: &str, declaration: &'a JsonNode) -> String {
+        let name = self.name_for(context, member);
+        self.taken.insert(name.clone());
+        self.pending.push((name.clone(), declaration));
+        name
+    }
+
+    /// The name an inline type takes: the member's own name, which is what the document
+    /// calls the value it holds; qualified by the structure the member belongs to where
+    /// that name is already some type's, and numbered after that — so two inline objects
+    /// declared under one member name in different structures stay two types.
+    fn name_for(&mut self, context: &str, member: &str) -> String {
+        let own = type_identifier(member);
+        if !self.taken.contains(&own) {
+            return own;
+        }
+        let qualified = format!("{}{own}", type_identifier(context));
+        if !self.taken.contains(&qualified) {
+            return qualified;
+        }
+        // Numbered on from where this name's last one stopped, and terminating because
+        // the names taken are finite while the candidates are not.
+        let mut ordinal = self
+            .ordinals
+            .get(&qualified)
+            .copied()
+            .unwrap_or(Self::FIRST_ORDINAL);
+        loop {
+            let candidate = format!("{qualified}{ordinal}");
+            ordinal += 1;
+            if !self.taken.contains(&candidate) {
+                self.ordinals.insert(qualified, ordinal);
+                return candidate;
+            }
+        }
+    }
 }
 
 /// The `properties` a named schema declares, for a schema that declares an object of
@@ -559,7 +687,18 @@ fn required_members(schema: &JsonNode) -> BTreeSet<&str> {
 /// A `type` the draft states as a union (which is how draft-04 says a value may be
 /// null) is read as the first type in it the generator has a type for. `depth` is how
 /// many list declarations this one is nested in; see [`MAX_DECLARATION_DEPTH`].
-fn declared_by(declaration: &JsonNode, depth: usize) -> Declared {
+///
+/// A declaration that carries members of its own is a type the document implies without
+/// naming: `hoisted` names it (after `member`, the member of `context` this declaration
+/// belongs to) and keeps it to be read as a structure of its own, and the value here
+/// holds that type.
+fn declared_by<'a>(
+    declaration: &'a JsonNode,
+    context: &str,
+    member: &str,
+    depth: usize,
+    hoisted: &mut Hoisted<'a>,
+) -> Declared {
     if depth > MAX_DECLARATION_DEPTH {
         return Declared::Unknown;
     }
@@ -597,14 +736,23 @@ fn declared_by(declaration: &JsonNode, depth: usize) -> Declared {
             "array" => Declared::List(Box::new(
                 declaration
                     .member("items")
-                    .map(|items| declared_by(items, depth + 1))
+                    // The items of a list are named for the member that holds the list:
+                    // the document gives the type it holds no other name.
+                    .map(|items| declared_by(items, context, member, depth + 1, hoisted))
                     .unwrap_or(Declared::Unknown),
             )),
-            // "object" with no `properties` of its own carries members this generator
-            // cannot name, and "null" says only that the member may be absent.
+            // "object" is decided below — it names a type of its own only where it
+            // declares members — and "null" says only that the member may be absent.
             _ => continue,
         };
         return declared;
+    }
+    // A declaration carrying members of its own is a nested structure the document
+    // writes inline: it becomes a type, and a file, like any the document names. One
+    // with no member of its own carries contents this generator cannot name, which is
+    // what an unconstrained object is.
+    if members_of(declaration).is_some() {
+        return Declared::Named(hoisted.declare(context, member, declaration));
     }
     Declared::Unknown
 }
@@ -613,8 +761,8 @@ fn declared_by(declaration: &JsonNode, depth: usize) -> Declared {
 /// for, so only references to structures the archive holds a file for survive.
 fn resolve(
     declared: Declared,
-    structures: &BTreeSet<&str>,
-    aliases: &BTreeMap<&str, Declared>,
+    structures: &BTreeSet<String>,
+    aliases: &BTreeMap<String, Declared>,
     hops: usize,
 ) -> Declared {
     if hops > MAX_ALIAS_HOPS {
@@ -1119,6 +1267,93 @@ mod tests {
                 "case {case:?}: expected no structure, got {structures:?}"
             );
         }
+    }
+
+    /// A member whose declaration is an object with members of its own declares a type
+    /// the document never names: it becomes a structure, named for the member, and so
+    /// does anything nested inside it. The naming falls back to the structure the member
+    /// belongs to, and then to a number, where the name is already some type's — so a
+    /// member name repeated across structures stays one type per declaration.
+    #[test]
+    fn an_inline_object_is_a_structure_of_its_own() {
+        for (case, document, expected) in [
+            (
+                "nested inline",
+                r##"{"components":{"schemas":{"AWSEvent":{"type":"object","properties":{
+                    "detail":{"type":"object","properties":{
+                        "userIdentity":{"type":"object","properties":{
+                            "arn":{"type":"string"}}}}}}}}}}"##,
+                vec!["AWSEvent", "Detail", "UserIdentity"],
+            ),
+            (
+                "inline list items",
+                r##"{"components":{"schemas":{"AWSEvent":{"type":"object","properties":{
+                    "resources":{"type":"array","items":{"type":"object","properties":{
+                        "ARN":{"type":"string"}}}}}}}}}"##,
+                vec!["AWSEvent", "Resources"],
+            ),
+            (
+                "the member's name is a named schema's",
+                r##"{"components":{"schemas":{"AWSEvent":{"type":"object","properties":{
+                    "detail":{"type":"object","properties":{"id":{"type":"string"}}}}},
+                    "Detail":{"type":"string"}}}}"##,
+                vec!["AWSEvent", "AWSEventDetail"],
+            ),
+            (
+                "one member name in three structures",
+                r##"{"components":{"schemas":{
+                    "A":{"type":"object","properties":{
+                        "detail":{"type":"object","properties":{"id":{"type":"string"}}}}},
+                    "B":{"type":"object","properties":{
+                        "detail":{"type":"object","properties":{"id":{"type":"string"}}}}},
+                    "C":{"type":"object","properties":{
+                        "detail":{"type":"object","properties":{"id":{"type":"string"}}}}}}}}"##,
+                vec!["A", "B", "C", "Detail", "BDetail", "CDetail"],
+            ),
+            (
+                "an object with no members of its own is no type",
+                r##"{"components":{"schemas":{"AWSEvent":{"type":"object","properties":{
+                    "metadata":{"type":"object"}}}}}}"##,
+                vec!["AWSEvent"],
+            ),
+        ] {
+            let structures = declared_structures(document, "OpenApi3", "demo");
+            let names: Vec<&str> = structures
+                .iter()
+                .map(|structure| structure.name.as_str())
+                .collect();
+            assert_eq!(
+                names, expected,
+                "case {case:?}: expected the types the document implies, got {names:?}"
+            );
+        }
+    }
+
+    /// A member that declares an inline object holds THAT type, so the declaration a
+    /// client compiles against is reachable from the structure that declares it.
+    #[test]
+    fn a_member_holding_an_inline_object_is_declared_as_its_type() {
+        let document = r##"{"components":{"schemas":{"AWSEvent":{"type":"object","properties":{
+            "detail":{"type":"object","properties":{"id":{"type":"string"}}},
+            "resources":{"type":"array","items":{"type":"object","properties":{
+                "ARN":{"type":"string"}}}}}}}}}"##;
+        let structures = declared_structures(document, "OpenApi3", "demo");
+        let declared: Vec<(&str, Declared)> = structures[0]
+            .members
+            .iter()
+            .map(|member| (member.name.as_str(), member.declared.clone()))
+            .collect();
+        assert_eq!(
+            declared,
+            vec![
+                ("detail", Declared::Named("Detail".to_string())),
+                (
+                    "resources",
+                    Declared::List(Box::new(Declared::Named("Resources".to_string())))
+                ),
+            ],
+            "the inline declarations must be the members' types, got {declared:?}"
+        );
     }
 
     /// The identifier cases: one tokenisation, three joinings.

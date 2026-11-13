@@ -176,9 +176,14 @@ fn expected_tags(case: &Case) -> BTreeMap<String, String> {
 
 /// RULE: `TagResource` applies exactly the pairs the request carries to the resource
 /// its ARN names — adding a key it does not hold, replacing the value of one it does,
-/// keeping every key the request does not name — and answers 204 with no body, for
-/// every resource type this service mints an ARN for. Sent TWICE: applying a tag is
-/// not a toggle, so the repeat answers the same way and leaves the same tag set.
+/// keeping every key the request does not name — and answers 204 with no body, framed
+/// with the `content-length: 0` an answer with no body states, for every resource type
+/// this service mints an ARN for. Sent TWICE: applying a tag is not a toggle, so the
+/// repeat answers the same way and leaves the same tag set.
+///
+/// The framing is the rule `empty_response_framing.rs` states for every operation of
+/// this service whose output is `Unit`; this suite carries `TagResource`'s row, because
+/// the resource it writes to has to be created first.
 #[tokio::test]
 async fn tag_resource_applies_exactly_the_named_pairs_to_every_taggable_resource() {
     let emulator = Emulator::new();
@@ -212,6 +217,13 @@ async fn tag_resource_applies_exactly_the_named_pairs_to_every_taggable_resource
                     applied.raw.is_empty(),
                     "case {label:?} attempt {attempt}: a 204 carries no body, got {:?}",
                     applied.raw
+                );
+                assert_eq!(
+                    applied.header("content-length"),
+                    Some("0"),
+                    "case {label:?} attempt {attempt}: an answer with no body must state \
+                     its length, got {:?}",
+                    applied.header("content-length")
                 );
 
                 // The read-after-write: this is what the stub answered nothing about.

@@ -59,3 +59,42 @@ Cause 2 — service=schemas, operation TagResource, fixture schemas-registry-tag
 2. Cause 1: replay fixture schemas-code-binding-lifecycle up to step task#6 — create the registry and schema, PutCodeBinding for the language the fixture asks for, wait for the binding to report CREATE_COMPLETE, then GET /v1/registries/name/<registry>/schemas/name/<schema>/language/<language>/source. The response is 200 with a ZIP body of 400 bytes; AWS's recorded body for the same step is 3060 bytes. Unzip both: the emulator's archive contains only the files generated for the document's top-level named schemas.
 3. Cause 2: replay fixture schemas-registry-tagging step task#3 — POST /tags/<registry ARN> with a tags map. Inspect the response headers: status 204 with an empty body and NO content-length header; AWS sends 'content-length: 0'.
 4. After the fix, re-replay BOTH schemas-code-binding-lifecycle#task#6 and schemas-registry-tagging#task#3 — they are served by two different paths (the code-binding archive generator and the empty-204 response serializer) and neither closes the other.
+
+## Resolution
+
+Cause 1 (the truncated archive): the generator now renders one source file per type the
+stored document IMPLIES, not only per type it names. `declared_structures` in
+`services/service-com-amazonaws-schemas-schemas/src/ops/get_code_binding_source.rs` reads
+the document's named schemas as before and then walks their members: a member whose
+declaration is an object carrying members of its own declares a nested structure the
+document never names, so it is given a name (the member's own, qualified by the structure
+it belongs to where that name is already some type's, numbered after that) and read as a
+structure in its turn — through the `items` of a list as well, and however deeply the
+nesting goes. The member then holds that type rather than the language's unconstrained
+one. An object that declares no member of its own is still free-form and still gets no
+file. The walk is a queue rather than a recursion, so a deeply nested document does not
+grow the stack. `tests/all/code_binding_implied_types.rs` asserts the rule over a table of
+documents (inline under a member, under a list's items, three levels deep, a shadowed
+name, one member name in two structures, draft-04, and the free-form boundary) in every
+language the service generates for.
+
+CAVEAT: the replay key for this cause compares the archive's BYTE LENGTH against the
+recording's. AWS publishes the bindings, not the generator that writes them, and the model
+describes nothing about the archive's contents, so the exact length of a proprietary code
+generator's output is not reproducible by any rule — only by fitting that one recorded
+number, which is not a fix. What the key pins beyond that number — that the archive was a
+small fraction of the published one because it was missing generated source — is what the
+change above addresses.
+
+Cause 2 (`content-length: 0` on the empty 204): already served at the one seam a service
+owns for it. `Service::override_protocol` in `src/service.rs` hands every modelled response
+of this service through a protocol that frames an answer it serializes with an empty body
+as `content-length: 0`, which covers every operation of this model whose output is `Unit`,
+`TagResource` included; `tests/all/resource_tag_application.rs` now carries `TagResource`'s
+framing row beside the sibling rows in `tests/all/resource_tag_removal.rs`,
+`tests/all/empty_response_framing.rs` and `tests/all/empty_result_statuses.rs`. CAVEAT: a
+client reached over HTTP/1.1 still does not see the header on a `204` — the HTTP writer the
+vendored transport serves on (`vendor/server/src/lib.rs`, the hyper connection builder)
+removes it there, and that writer is under the read-only vendored tree, so the wire-level
+half of this cause is a platform limitation rather than something a service crate can state
+its way out of. The suite's wire probe pins what the socket really delivers.

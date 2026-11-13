@@ -57,13 +57,12 @@ async fn an_answer_with_no_body_states_its_length() {
     // Rows: one per implemented operation whose output is `Unit`, each reached after
     // the state it deletes was created, and each in the two shapes its resource comes
     // in — a schema deleted from a registry of its own, and the registry itself.
-    // `TagResource` is the same 204 in the
-    // model but is still a scaffold stub (it has its own stub issue), so it answers
-    // 501 with a body and is not a row here. `DeleteSchemaVersion` is implemented and
+    // `DeleteSchemaVersion` is implemented and
     // its own suite (`schema_version_deletion.rs`) carries its framing row, because the
-    // version it deletes has to be minted first; `UntagResource` is implemented and its
-    // own suite (`resource_tag_removal.rs`) carries its framing row for the same reason —
-    // the tag it removes has to be written first. `DeleteResourcePolicy` answers with no
+    // version it deletes has to be minted first; `UntagResource` and `TagResource` are
+    // implemented and their own suites (`resource_tag_removal.rs`,
+    // `resource_tag_application.rs`) carry their framing rows for the same reason — the
+    // resource whose tags they write has to exist first. `DeleteResourcePolicy` answers with no
     // body too, but at 200 rather than 204, and its row lives with the other statuses in
     // `empty_result_statuses.rs`.
     for (case, registry, schemas) in [

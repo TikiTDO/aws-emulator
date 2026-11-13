@@ -21,6 +21,8 @@ mod aws_managed_event_catalog;
 mod catalogue_publications;
 #[path = "all/catalogue_source_inventory.rs"]
 mod catalogue_source_inventory;
+#[path = "all/code_binding_implied_types.rs"]
+mod code_binding_implied_types;
 #[path = "all/code_binding_lifecycle.rs"]
 mod code_binding_lifecycle;
 #[path = "all/code_binding_source.rs"]
