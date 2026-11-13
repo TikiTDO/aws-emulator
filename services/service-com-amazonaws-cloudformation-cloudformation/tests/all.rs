@@ -113,6 +113,8 @@ mod denied_replacement_identity;
 mod detect_resource_drift;
 #[path = "all/drift_and_resource_reads.rs"]
 mod drift_and_resource_reads;
+#[path = "all/drift_resource_identity.rs"]
+mod drift_resource_identity;
 #[path = "all/duplicate_resource_identifiers.rs"]
 mod duplicate_resource_identifiers;
 #[path = "all/dynamic_reference_names.rs"]

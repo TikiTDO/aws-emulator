@@ -43,6 +43,12 @@
 //! configuration under other member names reports nothing comparable, and a resource of
 //! such a type is reported as existing rather than as modified on a name mismatch.
 //!
+//! One declared property is left out of the comparison: the one the declaration states the
+//! resource's own IDENTITY in ([`identity_property`]). The actual-state read is addressed BY
+//! that identity, so a read that answered resolved it to the resource it reported, and the
+//! form the owning service renders it back in says nothing about the resource's
+//! configuration; a resource the identity no longer resolves to is `DELETED`.
+//!
 //! ## What a MODIFIED resource differs IN
 //!
 //! A resource that differs carries the difference itself, not just the verdict: a
@@ -246,7 +252,7 @@ pub async fn detect(
                         Some(ResourceDriftDetail::default()),
                     ),
                     Ok(Some(actual)) => {
-                        let differences = differences(&resource.properties, &actual);
+                        let differences = resource_differences(resource, &actual);
                         let status = if differences.is_empty() {
                             resource_drift_status::IN_SYNC
                         } else {
@@ -375,7 +381,7 @@ pub async fn drifted(
         else {
             continue;
         };
-        let differences = differences(&resource.properties, &actual);
+        let differences = resource_differences(resource, &actual);
         if differences.is_empty() {
             continue;
         }
@@ -390,6 +396,41 @@ pub async fn drifted(
     drifted
 }
 
+/// Every property the ACTUAL configuration disagrees with the EXPECTED one about, for ONE
+/// resource its owning service reported — the comparison a drift check carries out.
+///
+/// The same walk as [`differences`], with the resource's own IDENTITY left out of it
+/// ([`identity_property`]), because the read that reported the resource was ADDRESSED by
+/// that identity.
+pub fn resource_differences(resource: &StoredResource, actual: &Value) -> Vec<PropertyDiff> {
+    differences_beside(
+        &resource.properties,
+        actual,
+        identity_property(resource).as_deref(),
+    )
+}
+
+/// The declared property that holds the resource's own IDENTITY — the identifier the
+/// actual-state read was ADDRESSED by — or `None` for a resource whose declaration names it
+/// nowhere, and for one whose owning service answers for it under an identifier IT minted.
+///
+/// A resource is read back from the service that owns it by its physical id
+/// ([`super::provisioner`]), so a read that ANSWERED resolved that very identifier to the
+/// resource it reported: the property the declaration states that identifier in names the
+/// resource that answered, whichever of the forms it resolves the service renders the
+/// identifier back in. Comparing it would read the identifier's FORM as a renamed resource,
+/// and a resource the identifier no longer resolves to is reported `DELETED` by the read
+/// itself rather than as a name that changed.
+///
+/// WHICH property a declaration names the resource in is
+/// [`super::template::name_property`], the one list of those properties this crate holds.
+fn identity_property(resource: &StoredResource) -> Option<String> {
+    let property =
+        super::template::name_property(&resource.resource_type, &resource.properties)?;
+    let declared = resource.properties.get(&property)?;
+    (scalar_text(declared)? == resource.physical_resource_id).then_some(property)
+}
+
 /// Every property the ACTUAL configuration disagrees with the EXPECTED one about, over the
 /// properties the template declared.
 ///
@@ -400,11 +441,24 @@ pub async fn drifted(
 /// reported is the fully-qualified path of every value the two sides disagree about rather
 /// than the whole property.
 pub fn differences(expected: &Value, actual: &Value) -> Vec<PropertyDiff> {
+    differences_beside(expected, actual, None)
+}
+
+/// [`differences`] over every declared property BESIDE `identity`, which is the one property
+/// the comparison does not establish anything about ([`identity_property`]).
+fn differences_beside(
+    expected: &Value,
+    actual: &Value,
+    identity: Option<&str>,
+) -> Vec<PropertyDiff> {
     let mut found = Vec::new();
     let (Some(declared), Some(reported)) = (expected.as_object(), actual.as_object()) else {
         return found;
     };
     for (property, declared) in declared {
+        if Some(property.as_str()) == identity {
+            continue;
+        }
         if let Some(reported) = reported.get(property) {
             compare(&format!("/{property}"), declared, reported, 0, &mut found);
         }
@@ -524,6 +578,116 @@ fn scalar_text(value: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A resource whose declaration states `properties` and whose owning service answers for
+    /// it under `physical_resource_id`.
+    fn stored(resource_type: &str, physical_resource_id: &str, properties: Value) -> StoredResource {
+        StoredResource {
+            logical_id: "Probe".to_string(),
+            resource_type: resource_type.to_string(),
+            physical_resource_id: physical_resource_id.to_string(),
+            attributes: ::std::collections::BTreeMap::new(),
+            metadata: None,
+            properties,
+            materialised: true,
+            deletion_policy: None,
+        }
+    }
+
+    /// The property a declaration states the resource's IDENTITY in is not compared when the
+    /// actual-state read was addressed BY that identity: the service resolved it to the
+    /// resource it reported, so the form it renders the identifier back in is not drift. A
+    /// resource the read is addressed by another identifier for has every declared property
+    /// compared, the name among them.
+    #[test]
+    fn the_identity_the_read_was_addressed_by_is_not_compared() {
+        for (case, resource, actual, expected_paths) in [
+            (
+                "a top-level parameter name the service reports without its separator",
+                stored(
+                    "AWS::SSM::Parameter",
+                    "/probe-top-level",
+                    serde_json::json!({
+                        "Name": "/probe-top-level", "Type": "String", "Value": "declared"
+                    }),
+                ),
+                serde_json::json!({
+                    "Name": "probe-top-level", "Type": "String", "Value": "changed"
+                }),
+                vec!["/Value"],
+            ),
+            (
+                "a hierarchical parameter name the service reports whole",
+                stored(
+                    "AWS::SSM::Parameter",
+                    "/probe/nested",
+                    serde_json::json!({
+                        "Name": "/probe/nested", "Type": "String", "Value": "declared"
+                    }),
+                ),
+                serde_json::json!({
+                    "Name": "/probe/nested", "Type": "String", "Value": "changed"
+                }),
+                vec!["/Value"],
+            ),
+            (
+                "nothing else of the resource changed",
+                stored(
+                    "AWS::SSM::Parameter",
+                    "/probe-in-sync",
+                    serde_json::json!({"Name": "/probe-in-sync", "Value": "declared"}),
+                ),
+                serde_json::json!({"Name": "probe-in-sync", "Value": "declared"}),
+                vec![],
+            ),
+            (
+                "a name the type spells with the resource's own noun",
+                stored(
+                    "AWS::S3::Bucket",
+                    "probe-bucket",
+                    serde_json::json!({
+                        "BucketName": "probe-bucket",
+                        "VersioningConfiguration": {"Status": "Enabled"}
+                    }),
+                ),
+                serde_json::json!({
+                    "BucketName": "probe-bucket",
+                    "VersioningConfiguration": {"Status": "Suspended"}
+                }),
+                vec!["/VersioningConfiguration/Status"],
+            ),
+            (
+                "a resource the read is addressed by an identifier the service minted",
+                stored(
+                    "AWS::Bedrock::KnowledgeBase",
+                    "KB0123456789",
+                    serde_json::json!({"Name": "declared-name", "Description": "declared"}),
+                ),
+                serde_json::json!({"Name": "renamed", "Description": "declared"}),
+                vec!["/Name"],
+            ),
+            (
+                "a resource whose declaration names it nowhere",
+                stored(
+                    "AWS::SQS::Queue",
+                    "https://queue/probe",
+                    serde_json::json!({"VisibilityTimeout": 30}),
+                ),
+                serde_json::json!({"VisibilityTimeout": "60"}),
+                vec!["/VisibilityTimeout"],
+            ),
+        ] {
+            let found = resource_differences(&resource, &actual);
+            let paths: Vec<&str> = found
+                .iter()
+                .map(|difference| difference.property_path.as_str())
+                .collect();
+            assert_eq!(
+                paths, expected_paths,
+                "case {case:?}: expected the differences at {expected_paths:?}, got {found:?}"
+            );
+        }
+    }
 
     /// A declared property the owning service reports with the same value is not drift,
     /// whichever spelling each side carries it in; one it reports differently is.
