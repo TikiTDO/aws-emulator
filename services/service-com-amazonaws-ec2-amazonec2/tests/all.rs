@@ -1950,6 +1950,12 @@ mod create_coip_pool;
 // cannot resolve, and how much capacity a source has to give. Declared beside `prefix_lists`
 #[path = "all/capacity_reservation_split_refusals.rs"]
 mod capacity_reservation_split_refusals;
+// `DeleteLocalGatewayRouteTable`: the stored local gateway route table a delete answers in
+// `deleting`, the terminal `deleted` the clock then owes it, and the ids, absent parameters,
+// standing associations, dry runs and already-deleted tables it refuses without touching a
+// stored record. Declared at the tail of this file, which is where every new ec2 suite lands.
+#[path = "all/delete_local_gateway_route_table.rs"]
+mod delete_local_gateway_route_table;
 // The tag keys EC2 Capacity Manager monitors for the account: what
 // `UpdateCapacityManagerMonitoredTagKeys` activates and deactivates, the statuses the clock
 // carries a key through, and what `GetCapacityManagerMonitoredTagKeys` reports and pages over

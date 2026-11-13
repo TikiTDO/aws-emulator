@@ -1783,6 +1783,17 @@ pub const LOCAL_GATEWAY_ROUTE_TABLE_STATE_PENDING: &str = "pending";
 /// table one [`TRANSITION_DELAY`] after the call that created it.
 pub const LOCAL_GATEWAY_ROUTE_TABLE_STATE_AVAILABLE: &str = "available";
 
+/// A local gateway route table whose delete is under way: `deleting`, the non-terminal state
+/// `DeleteLocalGatewayRouteTable` answers the table it took down in, out of the same
+/// lifecycle [`LOCAL_GATEWAY_ROUTE_TABLE_STATE_PENDING`] names (the model leaves
+/// `LocalGatewayRouteTable$State` an unconstrained string).
+pub const LOCAL_GATEWAY_ROUTE_TABLE_STATE_DELETING: &str = "deleting";
+
+/// A local gateway route table whose delete has finished: the terminal `deleted` of that
+/// same lifecycle, the state the clock owes a `deleting` table one [`TRANSITION_DELAY`]
+/// after the call that deleted it.
+pub const LOCAL_GATEWAY_ROUTE_TABLE_STATE_DELETED: &str = "deleted";
+
 /// The mode of a local gateway route table that routes straight into the VPCs associated
 /// with it: the `LocalGatewayRouteTableMode` enum's `direct-vpc-routing` member
 /// (`smithy_query(query="shape",shape="LocalGatewayRouteTableMode")`, whose only other
@@ -2044,6 +2055,44 @@ pub(super) fn require_known_local_gateway_route_table_worded<E>(
     require_well_formed_local_gateway_route_table_id_worded(id, malformed)?;
     if !store.local_gateway_route_tables.contains_key(id) {
         return Err(invalid_local_gateway_route_table_id_not_found(id));
+    }
+    Ok(())
+}
+
+/// Resolve a local gateway route table an operation is about to TAKE DOWN: the id has to be
+/// well formed and name a route table of the account — the two refusals
+/// [`require_known_local_gateway_route_table`] answers, in that order — AND that table must
+/// not be one a delete has already taken down.
+///
+/// A table a delete answered is still reported, moving from
+/// [`LOCAL_GATEWAY_ROUTE_TABLE_STATE_DELETING`] to the terminal
+/// [`LOCAL_GATEWAY_ROUTE_TABLE_STATE_DELETED`], so it still RESOLVES — but there is nothing
+/// left to take down, and what the caller would have to change is the state of the table
+/// itself, which is what EC2's `IncorrectState` names ([`incorrect_state_of`]). The ONE place
+/// that guard lives, so the operations that act on a route table cannot disagree about which
+/// ones admit a call; the contract [`require_live_route_server`] writes out for the resource
+/// whose own state enum carries the same two delete members.
+///
+/// The record is resolved ONCE here, for the reason that guard resolves its own once: the
+/// state the refusal names is the state the lookup read.
+pub fn require_live_local_gateway_route_table<E>(
+    store: &ComAmazonawsEc2Amazonec2State,
+    id: &str,
+) -> Result<(), Scaffolded<E>> {
+    require_well_formed_local_gateway_route_table_id(id)?;
+    let Some(record) = store.local_gateway_route_tables.get(id) else {
+        return Err(invalid_local_gateway_route_table_id_not_found(id));
+    };
+    let state = record.view.state.as_deref().unwrap_or_default();
+    if matches!(
+        state,
+        LOCAL_GATEWAY_ROUTE_TABLE_STATE_DELETING | LOCAL_GATEWAY_ROUTE_TABLE_STATE_DELETED
+    ) {
+        return Err(incorrect_state_of(
+            RESOURCE_TYPE_LOCAL_GATEWAY_ROUTE_TABLE,
+            id,
+            state,
+        ));
     }
     Ok(())
 }

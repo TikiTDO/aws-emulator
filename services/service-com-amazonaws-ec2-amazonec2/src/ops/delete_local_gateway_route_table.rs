@@ -3,10 +3,10 @@
 //! @op DeleteLocalGatewayRouteTable
 //!
 //! "Deletes a local gateway route table": it resolves the route table the request names,
-//! refuses one an association still holds, and leaves the table in the non-terminal
-//! `deleting` state with the clock owing it `deleted` — so a caller reading straight after
-//! the call still sees the delete in progress and `DescribeLocalGatewayRouteTables` reports
-//! the very state this call answered with.
+//! refuses one an association still holds and one a delete already took down, and leaves the
+//! table in the non-terminal `deleting` state with the clock owing it `deleted` — so a caller
+//! reading straight after the call still sees the delete in progress and
+//! `DescribeLocalGatewayRouteTables` reports the very state this call answered with.
 //!
 //! ## Shape of an operation
 //!
@@ -170,8 +170,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The table the request names, refused with the resource's own `NotFound` code when
         // the account holds none under that id — by the one resolver every operation of this
         // crate reads a `LocalGatewayRouteTableId` with, so a delete and a describe cannot
-        // disagree about which ids exist.
-        state::require_known_local_gateway_route_table(&store, route_table_id)?;
+        // disagree about which ids exist. A table a delete already took down is still
+        // REPORTED in its delete states, so it still resolves: there is nothing left for a
+        // second delete to take down, which is what the state guard refuses.
+        state::require_live_local_gateway_route_table(&store, route_table_id)?;
 
         // A route table that still holds a VPC association or a virtual interface group
         // association is in use, so taking it away would leave those associations pointing
@@ -213,9 +215,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                  not in the store any more"
             )));
         };
-        record.view.state = Some(ROUTE_TABLE_STATE_DELETING.to_string());
+        record.view.state = Some(state::LOCAL_GATEWAY_ROUTE_TABLE_STATE_DELETING.to_string());
         record.pending = Some(state::PendingStateMove::starting_now(
-            ROUTE_TABLE_STATE_DELETED,
+            state::LOCAL_GATEWAY_ROUTE_TABLE_STATE_DELETED,
         ));
 
         // "Information about the local gateway route table"
@@ -227,11 +229,3 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     }
 }
 
-/// A local gateway route table whose delete is under way: the
-/// `LocalGatewayRouteTableState` enum's `deleting` member
-/// (`smithy_query(query="shape",shape="LocalGatewayRouteTableState")`, whose members are
-/// `pending`, `available`, `deleting` and `deleted`).
-const ROUTE_TABLE_STATE_DELETING: &str = "deleting";
-
-/// A local gateway route table whose delete has finished: that same enum's `deleted` member.
-const ROUTE_TABLE_STATE_DELETED: &str = "deleted";
