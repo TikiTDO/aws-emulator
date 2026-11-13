@@ -1831,6 +1831,33 @@ pub(super) fn return_values(
             attributes.insert("VdmAttributesResourceId".to_string(), name.to_string());
             (name.to_string(), attributes)
         }
+        "AWS::CE::AnomalyMonitor" => {
+            let arn = ::emulator_server::emulator_arn("ce", "", &format!("anomalymonitor/{name}"));
+            attributes.insert(
+                "CreationCommitDateTime".to_string(),
+                "2026-01-01T00:00:00Z".to_string(),
+            );
+            attributes.insert(
+                "LastEvaluatedDateTime".to_string(),
+                "2026-01-01T00:00:00Z".to_string(),
+            );
+            attributes.insert(
+                "LastUpdatedDateTime".to_string(),
+                "2026-01-01T00:00:00Z".to_string(),
+            );
+            attributes.insert("MonitorArn".to_string(), arn.clone());
+            (arn, attributes)
+        }
+        "AWS::CE::AnomalySubscription" => {
+            let arn =
+                ::emulator_server::emulator_arn("ce", "", &format!("anomalysubscription/{name}"));
+            attributes.insert(
+                "AccountId".to_string(),
+                ::emulator_server::emulator_account_id().to_string(),
+            );
+            attributes.insert("SubscriptionArn".to_string(), arn.clone());
+            (arn, attributes)
+        }
         _ => (name.to_string(), attributes),
     }
 }
@@ -2079,6 +2106,16 @@ pub fn published_attribute_names(resource_type: &str) -> &'static [&'static str]
         STEP_FUNCTIONS_STATE_MACHINE => &["Arn", "Name"],
         SCHEDULER_SCHEDULE_GROUP | SCHEDULER_SCHEDULE => &["Arn"],
         RESOURCE_GROUPS_GROUP => &["Arn"],
+        "AWS::CE::AnomalyMonitor" => &[
+            "CreationCommitDateTime",
+            "LastEvaluatedDateTime",
+            "LastUpdatedDateTime",
+            "MonitorArn",
+        ],
+        "AWS::CE::AnomalySubscription" => &[
+            "AccountId",
+            "SubscriptionArn",
+        ],
         _ => &[],
     }
 }

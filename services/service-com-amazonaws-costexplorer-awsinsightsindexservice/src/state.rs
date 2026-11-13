@@ -844,6 +844,13 @@ impl ComAmazonawsCostexplorerAwsinsightsindexserviceState {
         true
     }
 
+    /// Delete the subscription `subscription_arn` names.
+    ///
+    /// `false` when the account holds no subscription under that ARN.
+    pub fn delete_anomaly_subscription(&mut self, subscription_arn: &str) -> bool {
+        self.anomaly_subscriptions.remove(subscription_arn).is_some()
+    }
+
     /// The id for the next resource this service mints, advancing the shared sequence.
     pub fn next_resource_id(&mut self) -> String {
         self.resources_minted = self.resources_minted.wrapping_add(1);

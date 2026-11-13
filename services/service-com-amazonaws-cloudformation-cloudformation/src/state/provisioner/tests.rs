@@ -487,3 +487,16 @@ fn policy_documents_render_as_text() {
         );
     }
 }
+
+/// Cost Explorer anomaly monitors and subscriptions resolve to their provisioner variants.
+#[test]
+fn cost_explorer_resources_resolve_provisioners() {
+    assert_eq!(
+        provisioner_for("AWS::CE::AnomalyMonitor"),
+        Some(Provisioner::CostExplorerAnomalyMonitor)
+    );
+    assert_eq!(
+        provisioner_for("AWS::CE::AnomalySubscription"),
+        Some(Provisioner::CostExplorerAnomalySubscription)
+    );
+}

@@ -625,6 +625,10 @@ pub(super) enum Provisioner {
     KinesisStream,
     CloudWatchMetricStream,
     CloudWatchDashboard,
+    /// `AWS::CE::AnomalyMonitor`: a cost anomaly monitor of AWS Cost Explorer.
+    CostExplorerAnomalyMonitor,
+    /// `AWS::CE::AnomalySubscription`: a cost anomaly subscription of AWS Cost Explorer.
+    CostExplorerAnomalySubscription,
     EcrPublicRepository,
     /// `AWS::ECR::Repository`: a repository of the PRIVATE Amazon ECR registry — a
     /// different service from the public one above — which `CreateRepository` creates
@@ -956,6 +960,8 @@ pub(super) fn provisioner_for(resource_type: &str) -> Option<Provisioner> {
         KINESIS_STREAM => Some(Provisioner::KinesisStream),
         CLOUDWATCH_METRIC_STREAM => Some(Provisioner::CloudWatchMetricStream),
         CLOUDWATCH_DASHBOARD => Some(Provisioner::CloudWatchDashboard),
+        "AWS::CE::AnomalyMonitor" => Some(Provisioner::CostExplorerAnomalyMonitor),
+        "AWS::CE::AnomalySubscription" => Some(Provisioner::CostExplorerAnomalySubscription),
         ECR_PUBLIC_REPOSITORY => Some(Provisioner::EcrPublicRepository),
         ECR_REPOSITORY => Some(Provisioner::EcrRepository),
         EC2_VPC => Some(Provisioner::Ec2Vpc),
@@ -1135,6 +1141,12 @@ impl Provisioner {
             }
             Self::CloudWatchDashboard => {
                 put_dashboard(ctx, region, resource, propagated).await
+            }
+            Self::CostExplorerAnomalyMonitor => {
+                create_anomaly_monitor(ctx, region, resource, propagated).await
+            }
+            Self::CostExplorerAnomalySubscription => {
+                create_anomaly_subscription(ctx, region, resource, propagated).await
             }
             Self::EmrCluster => run_job_flow(ctx, region, resource, propagated).await,
             Self::EcrPublicRepository => {
@@ -2114,6 +2126,12 @@ impl Provisioner {
                     .await
                     .map(Some)
             }
+            Self::CostExplorerAnomalyMonitor => {
+                update_anomaly_monitor(ctx, region, resource, declared).await.map(Some)
+            }
+            Self::CostExplorerAnomalySubscription => {
+                update_anomaly_subscription(ctx, region, resource, declared).await.map(Some)
+            }
             // `PutRule` is documented "Creates or updates the specified rule", so the call
             // that created the rule is the call that applies a changed declaration to it,
             // with the declared target list reconciled against the one it carries.
@@ -2392,6 +2410,8 @@ impl Provisioner {
             Self::CloudWatchDashboard => {
                 retag_dashboard(ctx, region, resource, declared, propagated).await
             }
+            Self::CostExplorerAnomalyMonitor => Ok(()),
+            Self::CostExplorerAnomalySubscription => Ok(()),
             // A role's tags are IAM's own `TagRole`/`UntagRole`, which is also why
             // [`update_role`] does not carry them: this is the one place the tag set a role
             // is to end up with is reconciled.
@@ -2480,6 +2500,12 @@ impl Provisioner {
             }
             Self::CloudWatchDashboard => {
                 delete_dashboard(ctx, region, physical_resource_id).await
+            }
+            Self::CostExplorerAnomalyMonitor => {
+                delete_anomaly_monitor(ctx, region, physical_resource_id).await
+            }
+            Self::CostExplorerAnomalySubscription => {
+                delete_anomaly_subscription(ctx, region, physical_resource_id).await
             }
             Self::EcrPublicRepository => {
                 delete_public_repository(ctx, region, physical_resource_id).await
@@ -2940,6 +2966,12 @@ impl Provisioner {
             Self::CloudWatchDashboard => {
                 describe_dashboard(ctx, region, physical_resource_id).await
             }
+            Self::CostExplorerAnomalyMonitor => {
+                describe_anomaly_monitor(ctx, region, physical_resource_id).await
+            }
+            Self::CostExplorerAnomalySubscription => {
+                describe_anomaly_subscription(ctx, region, physical_resource_id).await
+            }
             Self::EcrPublicRepository => {
                 describe_public_repository(ctx, region, physical_resource_id).await
             }
@@ -3388,6 +3420,7 @@ mod bedrock_knowledge_bases;
 mod braket_spending_limits;
 mod mwaa_environments;
 mod data_and_storage;
+mod cost_explorer;
 mod iam_identities;
 mod application_services;
 mod platform_services;
@@ -3417,6 +3450,7 @@ use bedrock_guardrails::*;
 use bedrock_knowledge_bases::*;
 use braket_spending_limits::*;
 use mwaa_environments::*;
+use cost_explorer::*;
 use iam_identities::*;
 use data_and_storage::*;
 

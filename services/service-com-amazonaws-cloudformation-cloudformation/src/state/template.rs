@@ -2919,6 +2919,8 @@ pub const IMPLEMENTED_RESOURCE_TYPES: &[&str] = &[
     "AWS::BedrockAgentCore::Memory",
     "AWS::BedrockAgentCore::Runtime",
     "AWS::BedrockAgentCore::WorkloadIdentity",
+    "AWS::CE::AnomalyMonitor",
+    "AWS::CE::AnomalySubscription",
     CLOUDFRONT_CACHE_POLICY,
     CLOUDFRONT_DISTRIBUTION,
     CLOUDFRONT_ORIGIN_ACCESS_CONTROL,
