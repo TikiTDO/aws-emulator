@@ -75,6 +75,7 @@ pub mod pg_server;
 pub mod pg_sessions;
 pub mod pg_wire;
 pub mod read_only;
+pub mod real_engine;
 pub mod row_locks;
 pub mod server_statements;
 pub mod session_transactions;
@@ -602,6 +603,45 @@ pub async fn open_engine_endpoint<Eng: Send + Sync + 'static>(
         generation,
         _listener: listener,
         _reader_listener: reader_listener,
+    })
+}
+
+/// Open the endpoint of a REAL ENGINE instance ([`real_engine`]): a listener the core binds and
+/// reports, as [`open_engine_endpoint`]'s is, that relays every session to the engine container
+/// at `upstream`.
+///
+/// The returned endpoint's in-process database is empty and never served: the instance's data
+/// is the container's.
+pub async fn open_relayed_endpoint<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    upstream: std::net::SocketAddr,
+) -> Result<DbEngineEndpoint, String> {
+    let listeners = shared_engine(engine)
+        .ok_or_else(|| "this emulator's engine has no listener surface".to_string())?
+        .listeners();
+    let upgrader = listeners
+        .tls_upgrader()
+        .map_err(|error| format!("the engine endpoint's TLS could not be prepared: {error}"))?;
+    let listener = listeners
+        .tcp_plaintext(real_engine::PgRelay::new(upstream, upgrader))
+        .await
+        .map_err(|error| format!("the engine endpoint could not be opened: {error}"))?;
+    let database = Arc::new(sql_engine::InstanceDatabase::open().map_err(|error| {
+        format!("the SQL engine could not be started: {}", error.message)
+    })?);
+    let (generation, _) = watch::channel(0u64);
+    Ok(DbEngineEndpoint {
+        endpoint: ServedEndpoint {
+            host: listener.host(),
+            port: i32::from(listener.port()),
+        },
+        reader: None,
+        wire: EngineWire::Postgres,
+        database,
+        sessions: pg_sessions::SessionRegistry::default(),
+        generation,
+        _listener: listener,
+        _reader_listener: None,
     })
 }
 
