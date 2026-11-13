@@ -438,7 +438,7 @@ Issue-Key: service-quotas|ListAWSDefaultServiceQuotas|2xx->2xx|$.Quotas[QuotaCod
 Issue-Key: service-quotas|ListAWSDefaultServiceQuotas|2xx->2xx|$.Quotas[QuotaCode="L-E49825CC"].Description
 Issue-Commit: dff6e291e5e6489707888b0049fa49b367909ca3
 
-# ListAWSDefaultServiceQuotas events firehose fms fsx gamelift glacier glue groundstation guardduty imagebuilder default rows misbound and re-authored
+# ListAWSDefaultServiceQuotas events firehose fms fsx gamelift glacier glue groundstation guardduty imagebuilder default rows misbound and re-authored (PARTIAL CLOSE: glacier, groundstation and guardduty replay clean; the rows of the other seven ServiceCodes whose recorded values the corpus withholds are filed as `issues/things-that-do-not-work/20261111T000000Z-service-quotas-listawsdefaultservicequotas-residual-misbound-rows-events-firehose-fms-fsx-gamelift-glue-imagebuilder.md`)
 
 > _Note: this issue was identified against the code base at commit `dff6e291e5e6489707888b0049fa49b367909ca3`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
 
@@ -446,6 +446,16 @@ Issue-Commit: dff6e291e5e6489707888b0049fa49b367909ca3
 ListAWSDefaultServiceQuotas
 
 ## Description
+PARTIAL CLOSE (added by the fixer). Causes 6 (`glacier`), 8 (`groundstation`) and 9
+(`guardduty`) replay clean, and in the other seven ServiceCodes every row whose AWS-published
+facts this report QUOTES is now published under the QuotaCode the recording binds it to. The
+rows this report lists WITHOUT quoting their recorded values still diverge; they are filed,
+code by code and ServiceCode by ServiceCode, as
+`issues/things-that-do-not-work/20261111T000000Z-service-quotas-listawsdefaultservicequotas-residual-misbound-rows-events-firehose-fms-fsx-gamelift-glue-imagebuilder.md`,
+which also records what closing them needs (the recorded rows themselves — the corpus
+withholds the values, so no source available in the checkout states them). Read the
+`Issue-Key` list above as the keys of the ORIGINAL sweep, not as keys that now all match.
+
 BUNDLE OF 10 CAUSES, one per ServiceCode whose default-quota catalog diverges. All ten share one root cause in the emulator's ListAWSDefaultServiceQuotas default-quota catalog: for a given ServiceCode the emulator answers 200 with a Quotas list whose per-row metadata does not belong to the row's own QuotaCode (QuotaName, Description, Value, Unit, Adjustable, Period and UsageMetric are taken from a different quota — typically an API-throttle row), and whose Descriptions are re-authored paraphrases of AWS's text rather than AWS's text. A fixer must close all 10 before submitting.
 
 SHARED AWS REFERENCE (applies to every cause). Smithy: service-quotas / ServiceQuotasV20190624, operation ListAWSDefaultServiceQuotas; input ListAWSDefaultServiceQuotasRequest.ServiceCode is required (@length 1..63, @pattern ^[a-zA-Z][a-zA-Z0-9-]{1,63}$); output ListAWSDefaultServiceQuotasResponse.Quotas targets ServiceQuotaListDefinition (list of ServiceQuota). Smithy ServiceQuota members: ServiceCode, ServiceName, QuotaArn, QuotaCode (@length 1..128), QuotaName, Value (QuotaValue double, @range 0..10000000000), Unit, Adjustable (boolean, default false), GlobalQuota (boolean, default false), UsageMetric (MetricInfo), Period (QuotaPeriod), QuotaContext (QuotaContextInfo), Description (@length 0..350). AWS returns HTTP 200 with the complete AWS-published default-quota set for the requested ServiceCode, and each ServiceQuota carries the quota name, description, value, unit, adjustability, period and usage metric that AWS publishes FOR THAT QuotaCode. The quota text and values themselves are AWS catalog data, so the requirement is "the value AWS publishes for this QuotaCode", never a paraphrase of it; the recorded responses are the AWS reference for each code. Status/shape are modeled; the per-row content is recorded behavior only (an AWS-maintained catalog, not a modeled enum).

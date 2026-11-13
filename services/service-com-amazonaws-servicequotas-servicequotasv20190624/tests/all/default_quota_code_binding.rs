@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{json, Value};
 
 use crate::quota_workflow::{client, default_quotas as defaults, emulator};
+use crate::recorded_rows_events_through_imagebuilder::PUBLISHED_WITHOUT_A_DESCRIPTION;
 
 /// One published default-quota row, as the recorded default-quota listing of its
 /// `ServiceCode` reports it.
@@ -711,8 +712,10 @@ async fn a_quota_code_is_bound_to_the_quota_aws_publishes_under_it() {
     }
 }
 
-/// Every row of every covered service's catalog carries a published `Description`, and
-/// no two rows of one service share a `QuotaName`.
+/// Every row of every covered service's catalog carries a published `Description` —
+/// except the rows no source available here states a sentence for, which carry none
+/// rather than one this catalog would word itself ([`PUBLISHED_WITHOUT_A_DESCRIPTION`])
+/// — and no two rows of one service share a `QuotaName`.
 #[tokio::test]
 async fn every_published_row_is_described_once_under_its_own_name() {
     let engine = emulator();
@@ -730,10 +733,12 @@ async fn every_published_row_is_described_once_under_its_own_name() {
             let code = quota["QuotaCode"].as_str().unwrap_or_default();
             let case = format!("{service_code}/{code}");
             let description = quota["Description"].as_str().unwrap_or_default();
-            assert!(
+            let stated = !PUBLISHED_WITHOUT_A_DESCRIPTION.contains(&(*service_code, code));
+            assert_eq!(
                 !description.is_empty(),
+                stated,
                 "case {case}: every published row carries the description AWS publishes for \
-                 it, got {quota}"
+                 it, and a row no source states one for carries none, got {quota}"
             );
             let name = quota["QuotaName"].as_str().unwrap_or_default();
             assert!(
@@ -777,7 +782,15 @@ async fn a_request_rate_row_names_the_operation_it_throttles() {
             // Each service words the rate class the way its own recorded rows word it:
             // EventBridge publishes a number of requests per second FOR THAT API, and
             // every other covered service a number of requests the account may make.
-            let expected = if *service_code == "events" {
+            // EventBridge's own INVOCATION series is the one row of the class metered by a
+            // call count that is not one API's rate, and its recorded listing describes it
+            // by what an invocation IS.
+            let expected = if *service_code == "events" && api == "Invocations" {
+                "An invocation is an event matching a rule and being sent on to the rule's \
+                 targets. After the limit is reached, the invocations are throttled; that \
+                 is, they still happen but they are delayed."
+                    .to_string()
+            } else if *service_code == "events" {
                 format!(
                     "The maximum number of requests per second for {api} API. Additional \
                      requests are throttled."

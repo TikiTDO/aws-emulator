@@ -36,6 +36,7 @@
 use serde_json::{json, Value};
 
 use crate::quota_workflow::{client, default_quotas as defaults, emulator};
+use crate::recorded_rows_events_through_imagebuilder::PUBLISHED_WITHOUT_A_DESCRIPTION;
 
 /// The `AWS/Usage` metric a row is metered by, where usage is published for it.
 enum Meter {
@@ -183,17 +184,14 @@ const ROWS: &[Row] = &[
     },
     Row {
         service_code: "events",
-        quota_code: "L-D082A4F6",
+        quota_code: "L-658A4FD9",
         quota_name: "Event buses",
         value: 100.0,
         unit: "None",
         adjustable: true,
-        description: None,
-        period: Some((5, "MINUTE")),
-        meter: Some(Meter::Resources {
-            usage_service: "EventBridge",
-            resource: "EventBus",
-        }),
+        description: Some("Maximum event buses per account."),
+        period: None,
+        meter: None,
     },
     Row {
         service_code: "events",
@@ -274,10 +272,13 @@ const ROWS: &[Row] = &[
         service_code: "fms",
         quota_code: "L-0E131699",
         quota_name: "Custom managed application lists per account",
-        value: 100.0,
+        value: 10.0,
         unit: "None",
         adjustable: true,
-        description: None,
+        description: Some(
+            "The maximum number of custom managed application lists that you can define \
+             for an account.",
+        ),
         period: None,
         meter: None,
     },
@@ -325,17 +326,6 @@ const ROWS: &[Row] = &[
     },
     Row {
         service_code: "fsx",
-        quota_code: "L-4EDE4065",
-        quota_name: "Windows throughput capacity",
-        value: 10_240.0,
-        unit: "None",
-        adjustable: true,
-        description: None,
-        period: None,
-        meter: None,
-    },
-    Row {
-        service_code: "fsx",
         quota_code: "L-C431DBA3",
         quota_name: "ONTAP backups",
         value: 10_000.0,
@@ -351,8 +341,8 @@ const ROWS: &[Row] = &[
     Row {
         service_code: "fsx",
         quota_code: "L-B7391FCE",
-        quota_name: "Lustre Intelligent-Tiering provisioned SSD read cache storage capacity",
-        value: 262_144.0,
+        quota_name: "Lustre Persistent Intelligent-Tiering SSD read cache storage capacity",
+        value: 100_800.0,
         unit: "None",
         adjustable: true,
         description: Some(
@@ -425,9 +415,8 @@ const ROWS: &[Row] = &[
         period: None,
         meter: None,
     },
-    // glue — the Data Catalog's database plane, whose description is the catalog's own
-    // wording of the quota's name, beside two planes the service publishes under
-    // sentence-form names and the Ray compute plane it publishes as not adjustable.
+    // glue — the Data Catalog's database plane, beside two planes the service publishes
+    // under sentence-form names and the Ray compute plane it publishes as not adjustable.
     Row {
         service_code: "glue",
         quota_code: "L-A57B5BCE",
@@ -435,7 +424,7 @@ const ROWS: &[Row] = &[
         value: 10_000.0,
         unit: "None",
         adjustable: true,
-        description: Some("Catalog: max databases per catalog"),
+        description: Some("The maximum number of databases per catalog."),
         period: None,
         meter: None,
     },
@@ -446,7 +435,9 @@ const ROWS: &[Row] = &[
         value: 10.0,
         unit: "None",
         adjustable: true,
-        description: None,
+        description: Some(
+            "The maximum number of in-flight completion requests allowed per account",
+        ),
         period: None,
         meter: None,
     },
@@ -583,7 +574,344 @@ const ROWS: &[Row] = &[
         value: 64.0,
         unit: "Kilobytes",
         adjustable: true,
+        description: Some("The maximum size of the data field of an image workflow."),
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "imagebuilder",
+        quota_code: "L-D9EF98D9",
+        quota_name: "Infrastructure configurations",
+        value: 1000.0,
+        unit: "None",
+        adjustable: true,
+        description: Some(
+            "The maximum number of infrastructure configurations that you can create in \
+             an account in the current Region.",
+        ),
+        period: None,
+        meter: None,
+    },
+    // The rows the recorded listings bind to a code this catalog had published another
+    // quota under: an endpoint-API rate and the invocation rate of EventBridge, the
+    // data-plane rates and the partition plane of one Firehose delivery stream, a counted
+    // plane of one Firewall Manager policy, two FSx capacity planes, a GameLift map
+    // attribute and a timeout published in seconds, the three Glacier rows whose text the
+    // recording states, two Glue planes, the Ground Station scheduling rows and the four
+    // GuardDuty rows, and an Image Builder size plane.
+    Row {
+        service_code: "events",
+        quota_code: "L-5425B7E9",
+        quota_name: "DeleteEndpoint throttle limit in transactions per second",
+        value: 5.0,
+        unit: "None",
+        adjustable: false,
+        description: Some(
+            "The maximum number of requests per second for DeleteEndpoint API. Additional \
+             requests are throttled.",
+        ),
+        period: Some((1, "SECOND")),
+        meter: Some(Meter::Calls {
+            usage_service: "EventBridge",
+            api: "DeleteEndpoint",
+        }),
+    },
+    Row {
+        service_code: "events",
+        quota_code: "L-FC354966",
+        quota_name: "Event bus policy size",
+        value: 10_240.0,
+        unit: "None",
+        adjustable: true,
+        description: Some(
+            "Maximum policy size, in characters. You can view the current policy size for \
+             an event bus by using the DescribeEventBus API.",
+        ),
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "firehose",
+        quota_code: "L-17D4EADE",
+        quota_name: "Rate of records",
+        value: 500_000.0,
+        unit: "None",
+        adjustable: false,
         description: None,
+        period: Some((1, "SECOND")),
+        meter: None,
+    },
+    Row {
+        service_code: "firehose",
+        quota_code: "L-7681C790",
+        quota_name: "Rate of Put requests",
+        value: 2000.0,
+        unit: "None",
+        adjustable: false,
+        description: None,
+        period: Some((1, "SECOND")),
+        meter: None,
+    },
+    Row {
+        service_code: "firehose",
+        quota_code: "L-937C879B",
+        quota_name: "Rate of data",
+        value: 5.0,
+        unit: "None",
+        adjustable: false,
+        description: None,
+        period: Some((1, "SECOND")),
+        meter: None,
+    },
+    Row {
+        service_code: "firehose",
+        quota_code: "L-23F03908",
+        quota_name: "Dynamic Partitions",
+        value: 500.0,
+        unit: "None",
+        adjustable: false,
+        description: Some(
+            "The maximum number of dynamic partitions for a delivery stream in the current \
+             Region.",
+        ),
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "fms",
+        quota_code: "L-25F99602",
+        quota_name: "Amazon VPC instances in scope of a common security group policy",
+        value: 100.0,
+        unit: "None",
+        adjustable: true,
+        description: None,
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "fsx",
+        quota_code: "L-FD89CA8A",
+        quota_name: "Windows throughput capacity",
+        value: 10_240.0,
+        unit: "None",
+        adjustable: true,
+        description: None,
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "fsx",
+        quota_code: "L-C28C1403",
+        quota_name: "ONTAP file systems",
+        value: 100.0,
+        unit: "None",
+        adjustable: true,
+        description: None,
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "gamelift",
+        quota_code: "L-A8C1B434",
+        quota_name: "Key-value pairs per string to double map matchmaking player attribute",
+        value: 10.0,
+        unit: "None",
+        adjustable: false,
+        description: None,
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "gamelift",
+        quota_code: "L-24BE0A39",
+        quota_name: "Player session timeout",
+        value: 60.0,
+        unit: "Seconds",
+        adjustable: true,
+        description: None,
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "glacier",
+        quota_code: "L-153F5D45",
+        quota_name: "Number of vault tags.",
+        value: 50.0,
+        unit: "None",
+        adjustable: false,
+        description: Some("The maximum number of tags that can be applied to a vault."),
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "glacier",
+        quota_code: "L-4BF4C362",
+        quota_name: "Multipart parts size.",
+        value: 4.0,
+        unit: "Gigabytes",
+        adjustable: false,
+        description: Some("The maximum size (in GB) of parts allowed in a multipart upload."),
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "glacier",
+        quota_code: "L-F127DF29",
+        quota_name: "Provisioned capacity units",
+        value: 2.0,
+        unit: "None",
+        adjustable: false,
+        description: Some(
+            "The maximum number of provisioned capacity units available to purchase per \
+             account.",
+        ),
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "glue",
+        quota_code: "L-11FA2C1A",
+        quota_name: "Number of crawlers per account",
+        value: 1000.0,
+        unit: "None",
+        adjustable: true,
+        description: None,
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "glue",
+        quota_code: "L-1DD415D5",
+        quota_name: "Max functions per database",
+        value: 100.0,
+        unit: "None",
+        adjustable: true,
+        description: None,
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "groundstation",
+        quota_code: "L-98A63A85",
+        quota_name: "Dataflow endpoints per group limit",
+        value: 20.0,
+        unit: "None",
+        adjustable: true,
+        description: Some("The maximum number of dataflow endpoints per group allowed."),
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "groundstation",
+        quota_code: "L-09DEC198",
+        quota_name: "Contact Lead Time Maximum",
+        value: 7.0,
+        unit: "None",
+        adjustable: true,
+        description: Some("Maximum lead time allowed for scheduling a contact in days"),
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "groundstation",
+        quota_code: "L-DE376FC5",
+        quota_name: "Ephemeris Validation limit",
+        value: 10.0,
+        unit: "None",
+        adjustable: true,
+        description: Some(
+            "Maximum number of customer-provided ephemerides that be validated \
+             simultaneously.",
+        ),
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "groundstation",
+        quota_code: "L-DF7B6DEC",
+        quota_name: "Scheduled Contacts Limit",
+        value: 100.0,
+        unit: "None",
+        adjustable: true,
+        description: Some("Maximum number of scheduled contacts allowed"),
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "groundstation",
+        quota_code: "L-FED20749",
+        quota_name: "Scheduled Minutes Limit",
+        value: 1000.0,
+        unit: "None",
+        adjustable: true,
+        description: Some("The maximum number of scheduled minutes allowed"),
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "guardduty",
+        quota_code: "L-FA6D6E3D",
+        quota_name: "Detectors",
+        value: 1.0,
+        unit: "None",
+        adjustable: false,
+        description: Some(
+            "The maximum number of detector resources that you can create per AWS account \
+             per region.",
+        ),
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "guardduty",
+        quota_code: "L-F51A2830",
+        quota_name: "Member accounts by invitation",
+        value: 5000.0,
+        unit: "None",
+        adjustable: false,
+        description: Some(
+            "The maximum number of member accounts that can be associated with a GuardDuty \
+             administrator account by invitation.",
+        ),
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "guardduty",
+        quota_code: "L-2C0E14B9",
+        quota_name: "Threat intel sets",
+        value: 6.0,
+        unit: "None",
+        adjustable: false,
+        description: Some(
+            "The maximum number of Threat intel sets that you can add per AWS account per \
+             region.",
+        ),
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "guardduty",
+        quota_code: "L-AFBA2260",
+        quota_name: "Trusted IP sets",
+        value: 1.0,
+        unit: "None",
+        adjustable: false,
+        description: Some(
+            "The maximum number of Trusted IP sets that you can add per AWS account per \
+             region.",
+        ),
+        period: None,
+        meter: None,
+    },
+    Row {
+        service_code: "imagebuilder",
+        quota_code: "L-D5DC1FB3",
+        quota_name: "Component size",
+        value: 64.0,
+        unit: "Kilobytes",
+        adjustable: true,
+        description: Some("The maximum size of the data field of a component."),
         period: None,
         meter: None,
     },
@@ -690,6 +1018,14 @@ async fn a_description_belongs_to_the_row_that_carries_it() {
         ]
     };
 
+    // The one series a covered catalog meters with a call count that is NOT one API's
+    // rate: EventBridge's invocations, which its recorded listing describes by what an
+    // invocation IS rather than with the rate class's sentence.
+    let invocation_wording = "An invocation is an event matching a rule and being sent on \
+                             to the rule's targets. After the limit is reached, the \
+                             invocations are throttled; that is, they still happen but \
+                             they are delayed.";
+
     let mut rates = 0_usize;
     let mut planes = 0_usize;
     for service_code in SERVICE_CODES {
@@ -697,11 +1033,16 @@ async fn a_description_belongs_to_the_row_that_carries_it() {
             let code = quota["QuotaCode"].as_str().unwrap_or_default();
             let case = format!("{service_code}/{code}");
             let description = quota["Description"].as_str().unwrap_or_default().to_string();
-            assert!(
+            let stated = !PUBLISHED_WITHOUT_A_DESCRIPTION.contains(&(*service_code, code));
+            assert_eq!(
                 !description.is_empty(),
-                "case {case}: every published row carries its published description, got \
-                 {quota}"
+                stated,
+                "case {case}: every published row carries its published description, and a \
+                 row no source states one for carries none, got {quota}"
             );
+            if !stated {
+                continue;
+            }
 
             let per_second = quota["Period"] == json!({"PeriodValue": 1, "PeriodUnit": "SECOND"});
             if per_second {
@@ -714,7 +1055,11 @@ async fn a_description_belongs_to_the_row_that_carries_it() {
                         .unwrap_or_default()
                         .to_string();
                     assert!(
-                        rate_wordings(&api).contains(&description),
+                        if *service_code == "events" && api == "Invocations" {
+                            description == invocation_wording
+                        } else {
+                            rate_wordings(&api).contains(&description)
+                        },
                         "case {case}: a rate row is described as the rate of the API it \
                          meters, got {description:?}"
                     );

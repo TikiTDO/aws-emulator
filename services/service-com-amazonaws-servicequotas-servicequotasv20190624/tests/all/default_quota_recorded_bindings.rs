@@ -37,6 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{json, Value};
 
 use crate::quota_workflow::{client, default_quotas as defaults, emulator};
+use crate::recorded_rows_events_through_imagebuilder::PUBLISHED_WITHOUT_A_DESCRIPTION;
 
 /// The `UsageMetric` a published row carries, as the recorded listing reports it.
 enum Metered {
@@ -655,7 +656,9 @@ async fn a_published_row_reports_the_quota_bound_to_its_code() {
 
 /// Over the WHOLE catalog of each covered service: a code resolves exactly one row, the
 /// row the listing reports is the row the single read returns, and every row carries a
-/// `Description` — so no code can carry two quotas' facts and none carries none.
+/// `Description` except the rows no source states a sentence for
+/// ([`PUBLISHED_WITHOUT_A_DESCRIPTION`]) — so no code can carry two quotas' facts, none
+/// carries a sentence of this catalog's own wording, and none carries another row's.
 #[tokio::test]
 async fn a_code_resolves_one_described_row_of_its_service() {
     let engine = emulator();
@@ -679,10 +682,13 @@ async fn a_code_resolves_one_described_row_of_its_service() {
                  row under it in {listed:?}"
             );
             let description = quota["Description"].as_str().unwrap_or_default();
-            assert!(
+            let stated =
+                !PUBLISHED_WITHOUT_A_DESCRIPTION.contains(&(*service_code, code.as_str()));
+            assert_eq!(
                 !description.is_empty(),
-                "case {case}: every published row carries its published description, got \
-                 {quota}"
+                stated,
+                "case {case}: every published row carries its published description, and a \
+                 row no source states one for carries none, got {quota}"
             );
             let read = client
                 .ok(

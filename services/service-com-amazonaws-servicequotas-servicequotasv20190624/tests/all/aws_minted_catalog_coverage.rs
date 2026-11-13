@@ -43,6 +43,12 @@ struct CatalogService {
     service_name: &'static str,
     /// How many quotas the service's published catalog holds.
     quota_count: usize,
+    /// The `QuotaCode`s of that published catalog this emulator does NOT serve: the
+    /// codes whose quota no source available here states, which the catalog leaves to
+    /// the default-quota-set gap rather than serving another quota's row under (see the
+    /// row tables in `src/state/quota_rows.rs`). Named here so the shortfall against
+    /// AWS's own count is reported by a check rather than absorbed into it.
+    gap_codes: &'static [&'static str],
 }
 
 /// The services this suite covers.
@@ -58,53 +64,70 @@ const SERVICES: &[CatalogService] = &[
         service_code: "events",
         service_name: "Amazon EventBridge (CloudWatch Events)",
         quota_count: 21,
+        gap_codes: &["L-D082A4F6"],
     },
     CatalogService {
         service_code: "firehose",
         service_name: "Amazon Kinesis Data Firehose",
         quota_count: 15,
+        gap_codes: &[],
     },
     CatalogService {
         service_code: "fms",
         service_name: "AWS Firewall Manager",
         quota_count: 30,
+        gap_codes: &[],
     },
     CatalogService {
         service_code: "fsx",
         service_name: "Amazon FSx",
         quota_count: 30,
+        gap_codes: &["L-4EDE4065", "L-7D5FDD38", "L-8F1B9C74"],
     },
     CatalogService {
         service_code: "gamelift",
         service_name: "Amazon GameLift Servers",
         quota_count: 27,
+        gap_codes: &[],
     },
     CatalogService {
         service_code: "glacier",
         service_name: "Amazon Glacier",
         quota_count: 8,
+        gap_codes: &[],
     },
     CatalogService {
         service_code: "glue",
         service_name: "AWS Glue",
         quota_count: 47,
+        gap_codes: &["L-337244C9"],
     },
     CatalogService {
         service_code: "groundstation",
         service_name: "AWS Ground Station",
         quota_count: 10,
+        gap_codes: &[],
     },
     CatalogService {
         service_code: "guardduty",
         service_name: "Amazon GuardDuty",
         quota_count: 7,
+        gap_codes: &[],
     },
     CatalogService {
         service_code: "imagebuilder",
         service_name: "EC2 Image Builder",
         quota_count: 23,
+        gap_codes: &["L-10D22E0D"],
     },
 ];
+
+/// How many `(ServiceCode, QuotaCode)` pairs of these catalogs are published under no row
+/// at all — the whole of the `gap_codes` above.
+///
+/// Pinned as ONE number so that leaving a further code to the default-quota-set gap is a
+/// deliberate, visible edit rather than one more entry in a list nothing counts.
+const GAP_CODE_COUNT: usize = 6;
 
 /// A code this catalog used to derive from a quota NAME for one of these services, which
 /// the service answers to nothing under.
@@ -218,7 +241,7 @@ const PROBES: &[Probe] = &[
     },
     Probe {
         service_code: "fsx",
-        quota_code: "L-4EDE4065",
+        quota_code: "L-FD89CA8A",
         quota_name: "Windows throughput capacity",
         value: 10_240.0,
         unit: "None",
@@ -358,18 +381,31 @@ async fn every_covered_service_serves_its_published_catalog() {
             let case = format!("{region} {}", service.service_code);
             let quotas = defaults(&client, service.service_code).await;
 
+            // The published catalog, less the codes whose quota no source available here
+            // states: those are named per service, so a row that went missing for any
+            // other reason is still reported here, and AWS's own count stays pinned.
             assert_eq!(
-                quotas.len(),
+                quotas.len() + service.gap_codes.len(),
                 service.quota_count,
-                "case {case}: expected the whole published catalog ({} quotas), got {} \
-                 ({:?})",
+                "case {case}: expected the whole published catalog ({} quotas) less the {} \
+                 code(s) left to the default-quota-set gap, got {} ({:?})",
                 service.quota_count,
+                service.gap_codes.len(),
                 quotas.len(),
                 quotas
                     .iter()
                     .filter_map(|quota| quota["QuotaCode"].as_str())
                     .collect::<Vec<_>>()
             );
+            for gap_code in service.gap_codes {
+                assert!(
+                    !quotas
+                        .iter()
+                        .any(|quota| quota["QuotaCode"] == json!(gap_code)),
+                    "case {case}: a code whose quota no source states is published under no \
+                     row, got one for {gap_code:?}"
+                );
+            }
 
             for quota in &quotas {
                 let code = quota["QuotaCode"].as_str().unwrap_or_default();
@@ -409,6 +445,21 @@ async fn every_covered_service_serves_its_published_catalog() {
                 inventory.get(service.service_code)
             );
         }
+
+        // The whole of the default-quota-set gap across these catalogs, pinned as one
+        // number. This one compares the table above against a constant rather than
+        // against a served response — an EDIT TRIPWIRE, so that leaving a further code to
+        // the gap is a deliberate change; what the served catalogs are held to is the
+        // count equation and the absence of each gap code above.
+        assert_eq!(
+            SERVICES
+                .iter()
+                .map(|service| service.gap_codes.len())
+                .sum::<usize>(),
+            GAP_CODE_COUNT,
+            "case {region}: expected {GAP_CODE_COUNT} code(s) published under no row across \
+             these catalogs"
+        );
     }
 }
 
