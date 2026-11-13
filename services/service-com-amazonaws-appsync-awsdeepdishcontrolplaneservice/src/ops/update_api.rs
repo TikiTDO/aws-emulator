@@ -154,6 +154,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the request's metadata (its ARN and endpoints were minted by the create).
         let _ = ctx;
 
+        // The name has to be one `ApiName` admits, on the same grounds and with the same
+        // report as on the create (`crate::state::api_name_refusal`). Checked FIRST — ahead
+        // of the id's own form and of resolving the API — because this is the request-form
+        // check the boundary would have taken before the handler ran at all, so a malformed
+        // name is refused whatever the rest of the request names.
+        if let Some(message) = crate::state::api_name_refusal(&input.name) {
+            return Err(crate::scaffolded::Scaffolded::validation(message));
+        }
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(UpdateApiErrorModeled::InternalFailureException(
                 InternalFailureException {

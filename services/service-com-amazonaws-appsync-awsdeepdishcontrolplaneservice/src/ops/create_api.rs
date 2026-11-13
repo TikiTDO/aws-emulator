@@ -149,6 +149,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // The name has to be one `ApiName` admits. Checked FIRST, before anything else of
+        // the request is read, because this is the request-form check the boundary would
+        // have taken ahead of the handler — and it is taken HERE, with the framework's own
+        // constraint report under the framework's `ValidationException` (400), because
+        // this surface's recordings show that error for this member where the rest of the
+        // service answers its own `BadRequestException`
+        // (`crate::state::api_name_refusal`, shared with `UpdateApi`).
+        if let Some(message) = crate::state::api_name_refusal(&input.name) {
+            return Err(crate::scaffolded::Scaffolded::validation(message));
+        }
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(CreateApiErrorModeled::InternalFailureException(
                 InternalFailureException {

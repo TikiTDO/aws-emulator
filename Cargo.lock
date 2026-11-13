@@ -9286,6 +9286,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rand 0.9.5",
+ "regex",
  "rquickjs",
  "serde_json",
  "service-com-amazonaws-cloudwatch-graniteserviceversion20100801",

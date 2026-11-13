@@ -83,6 +83,8 @@ mod event_api_data_plane;
 mod event_api_delete;
 #[path = "all/event_api_gauge_sampling.rs"]
 mod event_api_gauge_sampling;
+#[path = "all/event_api_name_form.rs"]
+mod event_api_name_form;
 #[path = "all/event_api_update.rs"]
 mod event_api_update;
 #[path = "all/free_text_members.rs"]

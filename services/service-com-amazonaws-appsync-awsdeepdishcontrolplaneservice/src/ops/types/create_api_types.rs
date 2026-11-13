@@ -11,7 +11,15 @@ use super::*;
 
 smithy_macros::smithy_model!("smithy-model/com-amazonaws-appsync-awsdeepdishcontrolplaneservice.json");
 
-#[smithy_macros::smithy(shape = "com.amazonaws.appsync#CreateApiRequest")]
+// `skip_validation = ["name"]`: `ApiName`'s `@length` and `@pattern` are checked in the
+// handler instead (`crate::state::api_name_refusal`), because this surface answers a name
+// outside them with the FRAMEWORK-level constraint error (400 `ValidationException`) where
+// the boundary's refusal seam can only answer the one code this service words for every
+// member at once — see that module for why the choice belongs to the operation.
+#[smithy_macros::smithy(
+    shape = "com.amazonaws.appsync#CreateApiRequest",
+    skip_validation = ["name"]
+)]
 #[derive(Debug, Clone, Default)]
 pub struct CreateApiInput {
     pub name: String,

@@ -11,7 +11,13 @@ use super::*;
 
 smithy_macros::smithy_model!("smithy-model/com-amazonaws-appsync-awsdeepdishcontrolplaneservice.json");
 
-#[smithy_macros::smithy(shape = "com.amazonaws.appsync#UpdateApiRequest")]
+// `skip_validation = ["name"]`: the same member of the same shape as `CreateApi` carries,
+// checked in this operation's handler for the same reason
+// (`crate::state::api_name_refusal`).
+#[smithy_macros::smithy(
+    shape = "com.amazonaws.appsync#UpdateApiRequest",
+    skip_validation = ["name"]
+)]
 #[derive(Debug, Clone, Default)]
 pub struct UpdateApiInput {
     pub api_id: String,

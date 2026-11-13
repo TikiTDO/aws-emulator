@@ -600,30 +600,38 @@ async fn an_enum_clause_names_the_value_set_and_withholds_the_rejected_value() {
 /// Withholding the value is the ENUM clause's rule, not every clause's: a `@pattern`
 /// violation still echoes what the caller sent, so a client can see which value was
 /// rejected.
+///
+/// Asserted on a member whose refusal this SERVICE words — `CreateDomainName`'s
+/// `certificateArn` — rather than on the Event API's `name`: the v2 `Api` surface answers
+/// its own `name` with the framework's constraint error, whose clauses for that member
+/// quote no value at all (`crate::event_api_name_form`).
 #[tokio::test]
 async fn a_pattern_clause_still_echoes_the_rejected_value() {
     let router = router();
-    // `CreateApiRequest$name` targets `ApiName`, @length 1..50 @pattern
-    // `^[A-Za-z0-9_\-\ ]+$` (`smithy_query(query="operation", operation="CreateApi")`).
-    let rejected = "bad*name";
+    // `CreateDomainNameRequest$certificateArn` targets `CertificateArn`, whose `@pattern`
+    // admits only an ACM or IAM certificate ARN
+    // (`smithy_query(query="shape", shape="CertificateArn")`).
+    let rejected = "arn:aws:s3:::held/certificate/one";
     let answer = call(
         &router,
         "POST",
-        "/v2/apis",
-        Some(create_event_api_body(
-            rejected, "API_KEY", "API_KEY", "API_KEY",
-        )),
+        "/v1/domainnames",
+        Some(json!({
+            "domainName": "echoed.example.com",
+            "certificateArn": rejected,
+        })),
     )
     .await;
     assert_eq!(
         answer.status, 400,
-        "case a name outside ApiName's pattern: expected status 400, got {answer:?}"
+        "case an ARN outside CertificateArn's pattern: expected status 400, got {answer:?}"
     );
     assert!(
         answer
             .message
-            .contains(&format!("Value '{rejected}' at 'name'")),
-        "case a name outside ApiName's pattern: expected the echoed value, got {answer:?}"
+            .contains(&format!("Value '{rejected}' at 'certificateArn'")),
+        "case an ARN outside CertificateArn's pattern: expected the echoed value, \
+         got {answer:?}"
     );
 }
 

@@ -82,6 +82,13 @@ apollo-parser = "0.8"
 # Parses an `associationId` to decide whether it has the UUID form the AppSync service
 # issues its source-API association references in.
 uuid = "1"
+# Evaluates the one modelled `@pattern` this crate checks outside the request boundary —
+# `ApiName`'s expression, which `CreateApi` and `UpdateApi` check in their handlers
+# (`src/state/api_name.rs`) — through the same linear-time engine the boundary's own
+# constraint walk uses, rather than a hand-coded character test. The expression is a
+# constant of the model and is compiled once, never per request and never from request
+# text.
+regex = "1.13"
 # The two services this one's authorization gate reads the caller and its permissions
 # through: STS resolves the access key id a request presents to the principal it speaks for
 # (`src/service/authorization.rs`), and IAM holds the identity-based policy documents and

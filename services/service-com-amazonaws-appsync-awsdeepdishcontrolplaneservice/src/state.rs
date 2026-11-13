@@ -49,6 +49,11 @@ pub use resolvers::*;
 mod free_text;
 pub use free_text::*;
 
+/// The `name` an Event API carries: the form `ApiName` declares for it, and the
+/// framework-level constraint report a value outside that form is refused with.
+mod api_name;
+pub use api_name::*;
+
 /// What inside one API still uses one of its resources, and the refusal a delete that
 /// would break that use answers with.
 mod dependencies;
@@ -988,11 +993,37 @@ pub fn unconfigured_auth_mode<'a>(
 /// The text a `BadRequestException` (HTTP 400) carries for an authorization mode that
 /// names a type the API's authorization providers do not set up: the member that
 /// carried it and the type, so the caller can fix the request from the message alone.
+///
+/// The wording of a CHANNEL NAMESPACE's own overrides
+/// ([`channel_namespace_auth_modes_refusal`]). The API's own configuration states the
+/// refusal differently — a fixed sentence naming the call the list authorizes
+/// ([`invalid_event_config_auth_message`]) — because that is what the two surfaces'
+/// recordings show.
 pub fn unconfigured_auth_mode_message(member: &str, auth_type: &str) -> String {
     format!(
         "{member} specifies authorization mode {auth_type}, which is not configured as an \
          authorization provider for this API."
     )
+}
+
+/// The text a `BadRequestException` (HTTP 400) carries for an `EventConfig` authorization
+/// mode list that names a type the API's own providers do not set up: a FIXED sentence
+/// naming the CALL that list authorizes — connecting, publishing or subscribing — and
+/// nothing of the request, so neither the member nor the rejected type is echoed.
+///
+/// AppSync states this one refusal for all three lists, distinguished only by the call:
+/// the recorded refusal of an Event API whose connect list names an unconfigured type
+/// reads `Event API configuration connect auth contains an invalid auth type.`, and the
+/// other two lists name their own call in its place — RECORDED for `connect` only, so a
+/// later recording of either of the other two is checked against this template and, if it
+/// words them differently, corrected on the one table that pairs a list with its call
+/// ([`event_config_refusal`]). The three calls, in the order the configuration is checked
+/// in, are `connect` (`connectionAuthModes`), `publish` (`defaultPublishAuthModes`) and
+/// `subscribe` (`defaultSubscribeAuthModes`) — the model's three mode lists
+/// (`smithy_query(query="shape", shape="EventConfig")`), each "a list of valid
+/// authorization modes" for one call on the API.
+pub fn invalid_event_config_auth_message(call: &str) -> String {
+    format!("Event API configuration {call} auth contains an invalid auth type.")
 }
 
 /// Why the Event API configuration a request carries is not well formed, as the text a
@@ -1009,7 +1040,8 @@ pub fn unconfigured_auth_mode_message(member: &str, auth_type: &str) -> String {
 /// * an OIDC provider is identified by its issuer, an absolute URL;
 /// * `connectionAuthModes`, `defaultPublishAuthModes` and `defaultSubscribeAuthModes`
 ///   are each "a list of VALID authorization modes", i.e. modes the API's own
-///   authorization providers set up.
+///   authorization providers set up — refused by the CALL the list authorizes
+///   ([`invalid_event_config_auth_message`]).
 pub fn event_config_refusal(event_config: &EventConfig) -> Option<String> {
     let mut configured: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (position, provider) in event_config.auth_providers.iter().enumerate() {
@@ -1041,22 +1073,17 @@ pub fn event_config_refusal(event_config: &EventConfig) -> Option<String> {
         }
     }
 
-    // Source: the three `EventConfig` members, each "a list of valid authorization
-    // modes" for connecting to, publishing on and subscribing to the Event API.
+    // One table of the three `EventConfig` mode lists, each beside the CALL it
+    // authorizes ([`invalid_event_config_auth_message`]), in the order the configuration
+    // is checked in — so a list and the call its refusal names cannot drift apart.
     let mode_lists = [
-        ("connectionAuthModes", &event_config.connection_auth_modes),
-        (
-            "defaultPublishAuthModes",
-            &event_config.default_publish_auth_modes,
-        ),
-        (
-            "defaultSubscribeAuthModes",
-            &event_config.default_subscribe_auth_modes,
-        ),
+        ("connect", &event_config.connection_auth_modes),
+        ("publish", &event_config.default_publish_auth_modes),
+        ("subscribe", &event_config.default_subscribe_auth_modes),
     ];
-    for (member, modes) in mode_lists {
-        if let Some(auth_type) = unconfigured_auth_mode(modes, &configured) {
-            return Some(unconfigured_auth_mode_message(member, auth_type));
+    for (call, modes) in mode_lists {
+        if unconfigured_auth_mode(modes, &configured).is_some() {
+            return Some(invalid_event_config_auth_message(call));
         }
     }
 

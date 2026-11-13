@@ -448,16 +448,22 @@ async fn an_identical_request_creates_a_second_independent_api() {
 /// Rule 2a: an auth-mode list is "a list of valid authorization modes" — a mode whose
 /// type the API's own providers do not set up is refused, on every one of the three
 /// lists, and the refused create persists nothing.
+///
+/// The refusal is AppSync's own fixed sentence naming the CALL that list authorizes
+/// (`state::invalid_event_config_auth_message`), so it states neither the member nor the
+/// type the request named.
 #[tokio::test]
 async fn an_auth_mode_outside_the_configured_providers_is_refused() {
     let router = router();
 
-    // The rows differ along the member that carries the offending mode and along the
-    // type it names: every modelled type the one configured provider does not set up.
-    for member in [
-        "connectionAuthModes",
-        "defaultPublishAuthModes",
-        "defaultSubscribeAuthModes",
+    // The rows differ along the member that carries the offending mode — with the call
+    // its refusal names, as the model's three lists map onto AppSync's sentence — and
+    // along the type it names: every modelled type the one configured provider does not
+    // set up.
+    for (member, call) in [
+        ("connectionAuthModes", "connect"),
+        ("defaultPublishAuthModes", "publish"),
+        ("defaultSubscribeAuthModes", "subscribe"),
     ] {
         for unconfigured in AUTHENTICATION_TYPES.iter().filter(|ty| **ty != "API_KEY") {
             let case = format!("{member} naming {unconfigured}");
@@ -480,9 +486,14 @@ async fn an_auth_mode_outside_the_configured_providers_is_refused() {
                 answer.error_type, "BadRequestException",
                 "case {case}: expected error type BadRequestException, got {answer:?}"
             );
+            assert_eq!(
+                answer.message,
+                format!("Event API configuration {call} auth contains an invalid auth type."),
+                "case {case}: expected the sentence naming the {call} call, got {answer:?}"
+            );
             assert!(
-                answer.message.contains(member) && answer.message.contains(*unconfigured),
-                "case {case}: expected the refusal to name the member and the mode, \
+                !answer.message.contains(member) && !answer.message.contains(*unconfigured),
+                "case {case}: expected the sentence to state nothing of the request, \
                  got {answer:?}"
             );
             assert!(
