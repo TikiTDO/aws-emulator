@@ -1219,6 +1219,11 @@ mod eks_control_plane_logs;
 // is observable only with EKS and CloudWatch Logs on one engine.
 #[path = "all/eks_control_plane_log_suppression.rs"]
 mod eks_control_plane_log_suppression;
+// Declared in this same head region, for the reason the note above records: the WORKFLOW half
+// of a cluster's control plane logging — the update reaching `Successful` before the logs are
+// read — is observable only with EKS and CloudWatch Logs on one engine.
+#[path = "all/eks_logging_update_reaches_cloudwatch_logs.rs"]
+mod eks_logging_update_reaches_cloudwatch_logs;
 // Declared in this same head region, for the reason the note above records.
 #[path = "all/bedrock_agentcore_data_plane_parent_resources.rs"]
 mod bedrock_agentcore_data_plane_parent_resources;
