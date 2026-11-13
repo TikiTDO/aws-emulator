@@ -246,3 +246,47 @@ fn published_attribute_names_are_the_catalogued_return_values() {
         );
     }
 }
+
+
+#[test]
+fn generated_lambda_permission_ids_fit_the_service_without_losing_the_unique_suffix() {
+    let stack_name = "SyntheticStack".repeat(9);
+    let logical_a = format!("{}A", "SharedLogicalPrefix".repeat(10));
+    let logical_b = format!("{}B", "SharedLogicalPrefix".repeat(10));
+    let name = |resource_type: &str, stack_id: &str, logical_id: &str| {
+        generated_name(
+            resource_type,
+            logical_id,
+            StackScope {
+                region: "us-east-1",
+                stack_name: &stack_name,
+                stack_id,
+                notification_arns: &[],
+            },
+            "",
+        )
+    };
+    let permission = "AWS::Lambda::Permission";
+    let fitted = name(permission, "synthetic-stack-generation-a", &logical_a);
+    let unfitted = name("Custom::SyntheticUnbounded", "synthetic-stack-generation-a", &logical_a);
+    assert!(unfitted.len() > 100, "the fixture must exceed Lambda's bound");
+    assert!(fitted.len() <= 100);
+    assert!(fitted.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    let original_suffix = unfitted.rsplit('-').next().expect("the unique segment");
+    assert_eq!(original_suffix.len(), 12);
+    assert!(fitted.ends_with(original_suffix));
+    assert_eq!(fitted, name(permission, "synthetic-stack-generation-a", &logical_a));
+    assert_ne!(fitted, name(permission, "synthetic-stack-generation-a", &logical_b));
+    assert_ne!(fitted, name(permission, "synthetic-stack-generation-b", &logical_a));
+    // Names already inside the bound retain the exact existing representation.
+    let short_scope = StackScope {
+        region: "us-east-1",
+        stack_name: "short-stack",
+        stack_id: "synthetic-short-generation",
+        notification_arns: &[],
+    };
+    assert_eq!(
+        generated_name(permission, "Invoke", short_scope, ""),
+        generated_name("Custom::SyntheticUnbounded", "Invoke", short_scope, ""),
+    );
+}

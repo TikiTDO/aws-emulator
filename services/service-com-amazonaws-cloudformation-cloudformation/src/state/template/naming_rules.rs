@@ -111,6 +111,10 @@ pub(super) fn naming_rules(resource_type: &str) -> Option<NameRules> {
         // full ARN — "If you specify only the function name, it is limited to 64 characters
         // in length" (`FunctionName`, AWS Lambda API reference).
         "AWS::Lambda::Function" => rules(64, Characters::AsGenerated),
+        // Lambda AddPermission.StatementId: `StatementId`, @length(min: 1, max: 100)
+        // and pattern `^([a-zA-Z0-9-_]+)$` in Lambda's own Smithy model. This generated
+        // physical id is also the Ref value and the RemovePermission/update lookup key.
+        "AWS::Lambda::Permission" => rules(100, Characters::AsGenerated),
         // AppConfig `CreateApplication.Name`, `CreateEnvironment.Name` and
         // `CreateDeploymentStrategy.Name`: each `Name`, `@length(min: 1, max: 64)`
         // (AppConfig's own Smithy model), which a generated name is already inside
