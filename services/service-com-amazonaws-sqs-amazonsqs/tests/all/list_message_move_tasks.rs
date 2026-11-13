@@ -17,14 +17,17 @@
 //! Each table spans the class the rule generalises over rather than one example: the
 //! listing rows walk the recorded task count (none, one, several) crossed with the
 //! `MaxResults` forms (absent, below the recorded count, at the published upper limit),
-//! and the refusal rows walk each published bound of `MaxResults` and one value past it
-//! plus every way a `SourceArn` can fail to name a queue of this account.
+//! the refusal rows walk each published bound of `MaxResults` and one value past it
+//! plus every way a `SourceArn` can fail to name a queue of this account, and the progress
+//! rows walk the size a task is started over against how much of it the source queue can
+//! hand over, the order those messages were sent in, and each form the movement rate takes.
 
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{json, Value};
 use service_com_amazonaws_sqs_amazonsqs::state::{
-    DEFAULT_MESSAGE_MOVE_TASK_RESULTS, MAX_MESSAGE_MOVE_TASKS_PER_QUEUE,
+    DEFAULT_MESSAGE_MOVE_TASK_RESULTS, MAX_MESSAGE_MOVE_TASKS_PER_QUEUE, MAX_MESSAGES_PER_SECOND,
+    MIN_MESSAGES_PER_SECOND,
 };
 
 use super::support::{
@@ -41,11 +44,25 @@ const DEADLINE: Duration = Duration::from_secs(20);
 /// How long a polling loop pauses between two attempts.
 const PAUSE: Duration = Duration::from_millis(50);
 
+/// A task's status while it still has messages to move, and the one it reports once it has
+/// moved everything its source queue had to give.
+const RUNNING: &str = "RUNNING";
+const COMPLETED: &str = "COMPLETED";
+
 /// The statuses a task this store records can be in: "Possible values are: RUNNING,
 /// COMPLETED, CANCELLING, CANCELLED, and FAILED"
 /// (`ListMessageMoveTasksResultEntry$Status`) — of those, a task that takes its messages
 /// when it starts and is never cancelled reaches only these two.
-const REACHABLE_STATUSES: &[&str] = &["RUNNING", "COMPLETED"];
+const REACHABLE_STATUSES: &[&str] = &[RUNNING, COMPLETED];
+
+/// For how long a message a progress row keeps BACK from its task is hidden from it: the
+/// longest delay a send may ask for ("Valid values: 0 to 900. Maximum: 15 minutes",
+/// `SendMessageRequest$DelaySeconds`).
+///
+/// It outlasts [`DEADLINE`] many times over, which is what lets a row hold a task in
+/// `RUNNING` for as long as the row runs: the source queue still holds a message the task
+/// may not take, so the task cannot have finished, however fast or slow the host is.
+const HIDDEN_DELAY_SECONDS: i64 = 900;
 
 /// The `Results` of a listing reply, as a list — empty when the member is absent, which
 /// is how a reply that reports no task answers.
@@ -138,7 +155,7 @@ fn now_millis() -> i64 {
 fn assert_reported_handle(case: &str, entry: &Value, started_handle: &str) {
     let reported = entry.get("TaskHandle").and_then(Value::as_str);
     let status = text(entry, "Status");
-    if status == "RUNNING" {
+    if status == RUNNING {
         assert_eq!(
             reported,
             Some(started_handle),
@@ -386,101 +403,243 @@ async fn a_listing_naming_no_queue_or_asking_outside_the_result_range_is_refused
     }
 }
 
-/// A running task's rate and progress are reported from its record and the clock: the
-/// number to move is the size the task was started over and stays there, the moved count
-/// never goes backwards, and it reaches that size exactly when the task is `COMPLETED` —
-/// and reporting them neither delivers a message nor frees the source queue for a second
-/// task.
+/// One row of the progress table: the case, how many messages the source queue holds
+/// visibly when the task starts, how many more of them a delay hides from it, whether those
+/// hidden ones were sent AHEAD of the visible ones, and the `MaxNumberOfMessagesPerSecond`
+/// the start fixes.
+struct ProgressRow {
+    case: &'static str,
+    visible: usize,
+    hidden: usize,
+    hidden_first: bool,
+    rate: Option<i64>,
+}
+
+/// Send `count` messages to the queue at `url` that no reader may take for
+/// [`HIDDEN_DELAY_SECONDS`]: "messages with a positive `DelaySeconds` value become available
+/// for processing after the delay period is finished" (`SendMessageRequest$DelaySeconds`),
+/// so until then the queue holds them and neither a consumer nor a message movement task
+/// can be handed one.
+async fn send_hidden(router: &MultiServiceRouter, case: &str, url: &str, count: usize) {
+    for number in 0..count {
+        ok(
+            router,
+            "SendMessage",
+            json!({
+                "QueueUrl": url,
+                "MessageBody": format!("{case}: hidden #{number}"),
+                "DelaySeconds": HIDDEN_DELAY_SECONDS,
+            }),
+        )
+        .await;
+    }
+}
+
+/// A task's rate and progress are reported from its record and the clock: the number to
+/// move is the size the task was started over and stays there, the moved count never goes
+/// backwards and never passes what the source queue can hand over, a task that still holds
+/// messages reports `RUNNING` and keeps its source queue busy, and the moved count reaches
+/// the size the task was started over exactly when the task is `COMPLETED` — and reporting
+/// any of it neither delivers a message nor frees the source queue for a second task.
 #[tokio::test]
 async fn a_tasks_reported_progress_follows_the_record_and_the_clock() {
-    let router = emulator();
-    let (dead_letter_url, dead_letter_arn, _) = dead_letter_queue(&router, "progress").await;
-    // Three messages at one message per second, so the task is still running — with
-    // messages left to move — for a whole two seconds after the start call.
-    let bodies: Vec<String> = (0..3).map(|number| format!("message #{number}")).collect();
-    send_all(&router, &dead_letter_url, &bodies).await;
-    let taken = i64::try_from(bodies.len()).expect("a small count");
-    let rate = 1;
-    let handle = start_task(&router, "the running task", &dead_letter_arn, Some(rate)).await;
+    // The rows walk what the rule generalises over: the size the task is sized over, how
+    // much of that size the source queue can hand over at all, the order those messages
+    // were sent in, and each form the rate takes — absent ("if this field is left blank,
+    // the system will optimize the rate"), at the lowest rate that moves anything, and at
+    // the published maximum of 500
+    // (`StartMessageMoveTaskRequest$MaxNumberOfMessagesPerSecond`).
+    //
+    // A row that hides a message from its task is the row where `RUNNING` is a state and
+    // not a race: a task is COMPLETED only over a source queue with nothing left, so one
+    // whose source still holds a message it may not take keeps running for as long as the
+    // row runs, whatever the host's speed.
+    let rows: &[ProgressRow] = &[
+        ProgressRow {
+            case: "three visible messages at the lowest fixed rate",
+            visible: 3,
+            hidden: 0,
+            hidden_first: false,
+            rate: Some(i64::from(MIN_MESSAGES_PER_SECOND)),
+        },
+        ProgressRow {
+            case: "two visible messages at the rate the service optimizes",
+            visible: 2,
+            hidden: 0,
+            hidden_first: false,
+            rate: None,
+        },
+        ProgressRow {
+            case: "one visible message at the published maximum rate",
+            visible: 1,
+            hidden: 0,
+            hidden_first: false,
+            rate: Some(i64::from(MAX_MESSAGES_PER_SECOND)),
+        },
+        ProgressRow {
+            case: "two visible messages and one a delay hides, at the lowest fixed rate",
+            visible: 2,
+            hidden: 1,
+            hidden_first: false,
+            rate: Some(i64::from(MIN_MESSAGES_PER_SECOND)),
+        },
+        ProgressRow {
+            case: "a message a delay hides sent ahead of two visible ones",
+            visible: 2,
+            hidden: 1,
+            hidden_first: true,
+            rate: None,
+        },
+        ProgressRow {
+            case: "a source queue holding nothing but a message a delay hides",
+            visible: 0,
+            hidden: 1,
+            hidden_first: true,
+            rate: Some(i64::from(MIN_MESSAGES_PER_SECOND)),
+        },
+    ];
 
-    let deadline = Instant::now() + DEADLINE;
-    let mut moved_before = 0;
-    let mut saw_running = false;
-    loop {
-        let listed = list(&router, &dead_letter_arn, None).await;
-        let entry = listed
-            .first()
-            .cloned()
-            .unwrap_or_else(|| panic!("case the running task: expected one entry, got {listed:?}"));
-        assert_reported_handle("the running task", &entry, &handle);
-        assert_eq!(
-            entry.get("MaxNumberOfMessagesPerSecond").and_then(Value::as_i64),
-            Some(rate),
-            "case the running task: expected the rate the start fixed, got {entry}"
-        );
-        let moved = number(&entry, "ApproximateNumberOfMessagesMoved");
-        let to_move = number(&entry, "ApproximateNumberOfMessagesToMove");
-        // "This number is obtained at the time of starting the message movement task"
-        // (ListMessageMoveTasksResultEntry$ApproximateNumberOfMessagesToMove): it is the
-        // size the task was started over, so it does not fall as the task delivers.
-        assert_eq!(
-            to_move, taken,
-            "case the running task: expected the {taken} messages the task was started \
-             over, got {entry}"
-        );
-        assert!(
-            moved <= taken,
-            "case the running task: expected at most the {taken} messages taken to have \
-             moved, got {entry}"
-        );
-        assert!(
-            moved >= moved_before,
-            "case the running task: expected the moved count never to go backwards, got \
-             {moved} after {moved_before}"
-        );
-        moved_before = moved;
-
-        let status = text(&entry, "Status");
-        if status == "RUNNING" {
-            saw_running = true;
-            assert!(
-                moved < taken,
-                "case a RUNNING task: expected messages still to move, got {entry}"
-            );
-            // A listing is a report, not a turn of the crank: while the task runs, the
-            // source queue is still busy, whoever has read it.
-            let (refused, parsed) = call(
-                &router,
-                "StartMessageMoveTask",
-                &json!({"SourceArn": dead_letter_arn}),
-            )
-            .await;
-            assert_eq!(
-                (refused, error_code(&parsed).as_str()),
-                (400, "InvalidParameterValue"),
-                "case a start while the listed task runs: expected HTTP 400 \
-                 InvalidParameterValue, got {refused} with {parsed}"
-            );
+    for (index, row) in rows.iter().enumerate() {
+        let case = row.case;
+        let router = emulator();
+        let (dead_letter_url, dead_letter_arn, _) =
+            dead_letter_queue(&router, &format!("progress-{index}")).await;
+        let visible: Vec<String> = (0..row.visible)
+            .map(|number| format!("{case}: message #{number}"))
+            .collect();
+        if row.hidden_first {
+            send_hidden(&router, case, &dead_letter_url, row.hidden).await;
+            send_all(&router, &dead_letter_url, &visible).await;
         } else {
+            send_all(&router, &dead_letter_url, &visible).await;
+            send_hidden(&router, case, &dead_letter_url, row.hidden).await;
+        }
+        // "The number of messages to be moved from the source queue. This number is
+        // obtained at the time of starting the message movement task"
+        // (ListMessageMoveTasksResultEntry$ApproximateNumberOfMessagesToMove): every
+        // message the queue holds when the task starts, whether a delay hides it or not.
+        let sized = i64::try_from(row.visible + row.hidden).expect("a small count");
+        // What the task can ever hand over while this row runs: a message still inside its
+        // delay is not the queue's to give away.
+        let movable = i64::try_from(row.visible).expect("a small count");
+        let handle = start_task(&router, case, &dead_letter_arn, row.rate).await;
+
+        // The loop waits for the state the CLOCK owes — every message the task can take
+        // handed over — rather than for a span of its own, so no row's outcome depends on
+        // how fast the host got there.
+        let deadline = Instant::now() + DEADLINE;
+        let mut moved_before = 0;
+        let mut saw_running = false;
+        loop {
+            let listed = list(&router, &dead_letter_arn, None).await;
+            let entry = listed
+                .first()
+                .cloned()
+                .unwrap_or_else(|| panic!("case {case}: expected one entry, got {listed:?}"));
+            assert_reported_handle(case, &entry, &handle);
             assert_eq!(
-                (status.as_str(), moved, to_move),
-                ("COMPLETED", taken, taken),
-                "case a finished task: expected every message it was started over to have \
-                 moved, got {entry}"
+                entry.get("MaxNumberOfMessagesPerSecond").and_then(Value::as_i64),
+                row.rate,
+                "case {case}: expected the rate the start fixed, got {entry}"
             );
-            break;
+            let moved = number(&entry, "ApproximateNumberOfMessagesMoved");
+            let to_move = number(&entry, "ApproximateNumberOfMessagesToMove");
+            // The size the task was started over does not fall as the task delivers.
+            assert_eq!(
+                to_move, sized,
+                "case {case}: expected the {sized} messages the task was started over, got \
+                 {entry}"
+            );
+            assert!(
+                moved <= movable,
+                "case {case}: expected at most the {movable} messages its source queue can \
+                 hand over to have moved, got {entry}"
+            );
+            assert!(
+                moved >= moved_before,
+                "case {case}: expected the moved count never to go backwards, got {moved} \
+                 after {moved_before}"
+            );
+            moved_before = moved;
+
+            let status = text(&entry, "Status");
+            if status == RUNNING {
+                saw_running = true;
+                assert!(
+                    moved < to_move,
+                    "case a RUNNING task ({case}): expected messages still to move, got {entry}"
+                );
+                if row.hidden > 0 {
+                    // A listing is a report, not a turn of the crank: while the task runs,
+                    // the source queue is still busy, whoever has read it. The rows asked
+                    // here are the ones whose task cannot finish, so the source queue is
+                    // busy at this second call too however long the host took to make it.
+                    let (refused, parsed) = call(
+                        &router,
+                        "StartMessageMoveTask",
+                        &json!({"SourceArn": dead_letter_arn}),
+                    )
+                    .await;
+                    assert_eq!(
+                        (refused, error_code(&parsed).as_str()),
+                        (400, "InvalidParameterValue"),
+                        "case a start while the listed task runs ({case}): expected HTTP 400 \
+                         InvalidParameterValue, got {refused} with {parsed}"
+                    );
+                }
+            } else {
+                assert_eq!(
+                    row.hidden, 0,
+                    "case {case}: a task whose source queue still holds a message a delay \
+                     hides has not moved everything that queue had to give, got {entry}"
+                );
+                assert_eq!(
+                    (status.as_str(), moved, to_move),
+                    (COMPLETED, sized, sized),
+                    "case a finished task ({case}): expected every message it was started \
+                     over to have moved, got {entry}"
+                );
+                break;
+            }
+            // A task that may never take the rest of its source queue is as far on as it
+            // will ever get once everything it CAN take has moved, so that — and not a
+            // status it cannot reach — is the condition such a row waits for.
+            if row.hidden > 0 && moved == movable {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "case {case}: expected the task's own schedule to be done within \
+                 {DEADLINE:?}, last saw {moved} of {sized} moved"
+            );
+            tokio::time::sleep(PAUSE).await;
         }
         assert!(
-            Instant::now() < deadline,
-            "case the running task: expected it to complete within {DEADLINE:?}"
+            row.hidden == 0 || saw_running,
+            "case {case}: expected to observe the task RUNNING over a source queue it \
+             cannot drain"
         );
-        tokio::time::sleep(PAUSE).await;
+        if row.hidden > 0 {
+            // A task that has handed over everything it may take is still not finished,
+            // and the listings above have not carried it one message further: the hidden
+            // message is its source queue's until the clock makes it available, so a
+            // second reading of the task says exactly what the last one did.
+            let again = list(&router, &dead_letter_arn, None).await;
+            let entry = again.first().cloned().unwrap_or_else(|| {
+                panic!("case {case}: expected the task still listed, got {again:?}")
+            });
+            assert_eq!(
+                (
+                    text(&entry, "Status"),
+                    number(&entry, "ApproximateNumberOfMessagesMoved"),
+                    number(&entry, "ApproximateNumberOfMessagesToMove"),
+                ),
+                (RUNNING.to_string(), movable, sized),
+                "case {case}: expected the task still running over the message a delay \
+                 hides, with the {movable} it could take moved, got {entry}"
+            );
+        }
     }
-    assert!(
-        saw_running,
-        "case the running task: expected to observe it RUNNING at a rate of {rate} message \
-         per second"
-    );
 }
 
 /// One row of the per-source-queue table: the case, the queue listed, and the
