@@ -92,6 +92,9 @@ pub mod data_plane;
 
 pub mod lambda_target;
 
+/// A `forward` to a target whose workload runs on the host: the request is proxied to it.
+pub mod host_target;
+
 pub mod target_group_selection;
 
 pub mod web_acl;
