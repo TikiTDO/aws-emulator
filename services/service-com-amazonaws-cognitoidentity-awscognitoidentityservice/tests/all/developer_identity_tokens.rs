@@ -36,6 +36,11 @@ use crate::identity_pool_flow::{
 /// The operation under test, spelled once.
 const OPERATION: &str = "GetOpenIdTokenForDeveloperIdentity";
 
+/// The fixed sentence AWS words the refusal of a link that would have to fuse two identities
+/// the pool already holds with, spelled out here so the wire-visible text is pinned by the
+/// test rather than read back out of the crate.
+const CANNOT_MERGE_IDENTITIES: &str = "Cannot merge these identities.";
+
 /// The issuer of an Amazon Cognito Identity OIDC token, as this service's state module
 /// names it (`crate::state::OIDC_TOKEN_ISSUER`) — asserted here against the literal so
 /// the wire-visible value is pinned by the test, not by the code under test.
@@ -462,9 +467,9 @@ async fn a_developer_login_resolves_one_identity_and_mints_a_token_per_call() {
 
 /// RULE: a developer user identifier belongs to ONE identity, and this call links only
 /// logins the pool has proven for no identity — so presenting an identifier already
-/// registered under another identity for an identity logins have been linked to is refused
-/// 400 `NotAuthorizedException`, naming the login mismatch rather than the identity that
-/// holds it, and changes nothing.
+/// registered under another identity for an identity logins have been linked to names two
+/// identities the pool already holds and is refused 400 `ResourceConflictException` with the
+/// fixed merge sentence, naming neither identity, and changes nothing.
 #[tokio::test]
 async fn a_developer_identifier_registered_under_another_identity_is_refused() {
     let emulator = Emulator::new();
@@ -542,9 +547,12 @@ async fn a_developer_identifier_registered_under_another_identity_is_refused() {
             "case {case:?}: expected HTTP 400, got {status} with {body}"
         );
         assert_eq!(
-            error_code(&body),
-            "NotAuthorizedException",
-            "case {case:?}: expected NotAuthorizedException, got {body}"
+            (
+                error_code(&body).as_str(),
+                body["message"].as_str().unwrap_or_default()
+            ),
+            ("ResourceConflictException", CANNOT_MERGE_IDENTITIES),
+            "case {case:?}: expected the merge conflict, got {body}"
         );
         assert!(
             !body["message"]

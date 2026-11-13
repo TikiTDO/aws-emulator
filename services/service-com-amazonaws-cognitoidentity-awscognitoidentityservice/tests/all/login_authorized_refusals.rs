@@ -63,6 +63,7 @@ const UNMATCHED_LOGINS: &str = "Logins don't match. Please include at least one 
 const CANNOT_UNLINK_UNAUTHENTICATED: &str = "Cannot unlink unauthenticated user.";
 const UNAUTHENTICATED_ACCESS: &str = "Unauthenticated access is not supported for this identity pool.";
 const CANNOT_LINK_LOGINS: &str = "Cannot link these logins.";
+const CANNOT_MERGE_IDENTITIES: &str = "Cannot merge these identities.";
 const CUSTOM_ROLE_ARN_UNSUPPORTED: &str =
     "Only SAML providers and providers with RoleMappings support custom role ARN.";
 const NO_DEVELOPER_ACCESS: &str = "You do not have access to this identity";
@@ -513,12 +514,14 @@ async fn a_custom_role_arn_is_only_for_a_provider_that_offered_several_roles() {
     }
 }
 
-/// RULE: the logins `GetOpenIdTokenForDeveloperIdentity` links name ONE account — a developer
-/// user identifier the pool has registered against another identity is not a login of the
-/// identity the request names, and an identity an identity PROVIDER's login already proves is
-/// that provider's user, so a developer user is not joined to it — and `LookupDeveloperIdentity`
-/// resolves a developer-identity mapping of the pool, so an identity it has registered none
-/// against resolves nothing.
+/// RULE: the logins `GetOpenIdTokenForDeveloperIdentity` links name ONE account, and a call
+/// whose logins cannot all name one is refused as the link CONFLICT it is — a developer user
+/// identifier the pool has registered against another identity than the one the request names
+/// makes the link a merge of two stored identities, and an identity an identity PROVIDER's
+/// login already proves is that provider's user, so a developer user not yet registered
+/// anywhere is not linked into it — and `LookupDeveloperIdentity` resolves a
+/// developer-identity mapping of the pool, so an identity it has registered none against
+/// resolves nothing.
 #[tokio::test]
 async fn a_developer_login_links_only_logins_that_name_one_account() {
     let emulator = Emulator::new();
@@ -558,7 +561,7 @@ async fn a_developer_login_links_only_logins_that_name_one_account() {
             "an identifier registered against another identity",
             provider_proven.as_str(),
             "the-backends-user",
-            Some(("NotAuthorizedException", UNMATCHED_LOGINS)),
+            Some(("ResourceConflictException", CANNOT_MERGE_IDENTITIES)),
         ),
         (
             "a new identifier, for an identity a provider's login proves",

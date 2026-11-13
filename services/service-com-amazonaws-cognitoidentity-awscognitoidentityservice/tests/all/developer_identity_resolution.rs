@@ -42,9 +42,9 @@ const NO_LOGIN_PROVIDER: &str = "Please specify at least one login provider";
 const UNSUPPORTED_DEVELOPER_PROVIDER: &str =
     "This identity pool does not support the specified developer provider.";
 
-/// How AWS words a call presenting no valid login of the identity it names.
-const UNMATCHED_LOGINS: &str = "Logins don't match. Please include at least one valid login \
-                                for this identity or identity pool.";
+/// How AWS words the refusal of a link that would have to fuse two identities the pool
+/// already holds.
+const CANNOT_MERGE_IDENTITIES: &str = "Cannot merge these identities.";
 
 /// How AWS words a developer-identity lookup that names neither member it resolves from.
 const NO_IDENTITY_OR_DEVELOPER_USER: &str =
@@ -308,8 +308,10 @@ async fn an_identity_no_login_binds_is_ignored_and_the_registered_identity_answe
 }
 
 /// RULE: an identity logins HAVE been linked to is a federated user's, so a presented login
-/// the pool has proven for ANOTHER identity is not one of its own and the call is refused as
-/// the authorization failure that is — the boundary of the rule above.
+/// the pool has proven for ANOTHER identity is not one of its own, and a call naming such an
+/// identity while presenting a developer user identifier the pool has already registered
+/// names two identities the pool holds: it is refused as the merge conflict that is — the
+/// boundary of the rule above.
 #[tokio::test]
 async fn an_identity_a_login_binds_is_not_ignored_but_refused() {
     let emulator = Emulator::new();
@@ -362,14 +364,14 @@ async fn an_identity_a_login_binds_is_not_ignored_but_refused() {
             .await;
         assert_eq!(
             (status, error_code(&body).as_str()),
-            (REFUSED_STATUS, "NotAuthorizedException"),
-            "case {case:?}: expected ({REFUSED_STATUS}, NotAuthorizedException), got ({status}, \
-             {body})"
+            (REFUSED_STATUS, "ResourceConflictException"),
+            "case {case:?}: expected ({REFUSED_STATUS}, ResourceConflictException), got \
+             ({status}, {body})"
         );
         assert_eq!(
             error_message(case, &body),
-            UNMATCHED_LOGINS,
-            "case {case:?}: expected the fixed login-mismatch sentence, got {body}"
+            CANNOT_MERGE_IDENTITIES,
+            "case {case:?}: expected the fixed merge-conflict sentence, got {body}"
         );
         assert!(
             !error_message(case, &body).contains(registered.as_str()),

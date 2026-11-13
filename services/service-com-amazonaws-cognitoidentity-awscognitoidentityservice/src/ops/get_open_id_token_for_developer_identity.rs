@@ -13,11 +13,15 @@
 //!
 //! The logins one call presents name ONE account, and the call links every one of them to
 //! it. So a presented login the pool has already PROVEN for another identity is no login of
-//! this account: where the request NAMES an identity a login has been linked to, it has
-//! presented a login that is not that identity's and is refused as the authorization failure
-//! that is — before what the pool holds for that login is reported, so the refusal names no
-//! other identity — and where the identity is resolved from the logins themselves, logins
-//! proving different accounts cannot be linked. An identity an identity PROVIDER's login
+//! this account, and such a call is refused as the CONFLICT between stored identities that
+//! is — never as a failure of the caller's authority, which no login the caller could send
+//! would clear. Which sentence the conflict carries follows how many of its two sides the
+//! pool already holds: where the request NAMES an identity and the developer user identifier
+//! it presents is one the pool has already registered, both sides are identities the pool
+//! holds and the link the call asks for is a MERGE of the two; where one side does not exist
+//! yet, what cannot be done is the link of the logins presented. Neither refusal reports
+//! what the pool holds, so neither names an identity the caller did not send. An identity an
+//! identity PROVIDER's login
 //! already proves is that provider's user, so a developer user is joined into it only by a
 //! call that has itself PROVEN that account: one of the logins it presents is a login of that
 //! identity, which is the documented way to associate a new login with an existing identity;
@@ -475,28 +479,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>
                 && registered_to.as_deref() != Some(named)
         });
         if proves_another_account || would_join_a_proven_identity {
-            // A request that names an `IdentityId` and presents a developer user identifier
-            // the pool has registered against ANOTHER identity presented a login that is
-            // not one of that identity's, which is the authorization failure the
-            // unmatched-logins refusal states — and it is decided before what the pool holds
-            // for that identifier is reported, so such a caller is never told which other
-            // identity holds it. Every other case is logins that cannot be linked into one
-            // account, which is what the modelled `ResourceConflictException` states ("a
-            // user tries to use a login which is already linked to another account").
-            if input.identity_id.is_some() && registered_to.is_some() {
-                return Err(
-                    GetOpenIdTokenForDeveloperIdentityErrorModeled::NotAuthorizedException(
-                        NotAuthorizedException {
-                            message: Some(crate::state::UNMATCHED_LOGINS_MESSAGE.to_string()),
-                        },
-                    )
-                    .into(),
-                );
-            }
+            // Either way this is a login already linked to another account, which is
+            // precisely what the modelled `ResourceConflictException` states ("Thrown when a
+            // user tries to use a login which is already linked to another account"): a
+            // condition of what the pool HOLDS, not of what the caller may do, so no login
+            // the caller could add would clear it and it is never answered as an
+            // authorization failure.
+            //
+            // Which sentence it carries follows how many of the link's two sides are
+            // identities the pool already holds. A request that NAMES an identity and
+            // presents a developer user identifier the pool has already registered names
+            // both sides: the link it asks for would have to fuse two stored identities into
+            // one, which is the MERGE this service refuses in the same words wherever it is
+            // asked for and cannot be done ([`crate::state::CANNOT_MERGE_IDENTITIES_MESSAGE`],
+            // as `MergeDeveloperIdentities` answers a pair that cannot become one user).
+            // Where one side does not exist yet — a developer user identifier the pool has
+            // registered against nothing, or no identity named at all — there is no pair to
+            // merge and what cannot be done is the LINK of the logins presented
+            // ([`crate::state::CANNOT_LINK_LOGINS_MESSAGE`]). Both sentences are fixed text,
+            // so neither tells a caller which other identity holds the login it presented.
+            let message = if input.identity_id.is_some() && registered_to.is_some() {
+                crate::state::CANNOT_MERGE_IDENTITIES_MESSAGE
+            } else {
+                crate::state::CANNOT_LINK_LOGINS_MESSAGE
+            };
             return Err(
                 GetOpenIdTokenForDeveloperIdentityErrorModeled::ResourceConflictException(
                     ResourceConflictException {
-                        message: Some(crate::state::CANNOT_LINK_LOGINS_MESSAGE.to_string()),
+                        message: Some(message.to_string()),
                     },
                 )
                 .into(),

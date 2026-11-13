@@ -52,9 +52,8 @@ const PUBLIC_PROVIDER: &str = "graph.facebook.com";
 
 /// The fixed sentences AWS words these two refusals with, spelled out here so the
 /// wire-visible text is pinned by the test rather than read back out of the crate.
-const UNMATCHED_LOGINS: &str = "Logins don't match. Please include at least one valid login for \
-                                this identity or identity pool.";
 const CANNOT_LINK_LOGINS: &str = "Cannot link these logins.";
+const CANNOT_MERGE_IDENTITIES: &str = "Cannot merge these identities.";
 
 /// One `Logins` entry as a row carries it: the provider name and the login (for the developer
 /// provider, the developer user identifier).
@@ -355,10 +354,12 @@ async fn a_developer_login_links_into_the_identity_the_call_names_or_proves() {
 }
 
 /// RULE: the link is refused only where a presented login is bound to a DIFFERENT identity
-/// than the one the call is about — answered as the authorization failure it is where the
-/// request names an identity and presents a developer user identifier registered elsewhere,
-/// and as the link conflict it is otherwise — or where it would join a developer user to an
-/// identity another provider's login proves while presenting no login of that identity. A
+/// than the one the call is about, or where it would join a developer user to an identity
+/// another provider's login proves while presenting no login of that identity — and every
+/// such refusal is the link CONFLICT it is, carrying the merge sentence where the request
+/// names an identity and presents a developer user identifier the pool has already
+/// registered (both sides of the link are identities the pool holds, so the link is a merge
+/// of the two) and the link sentence where one of the two sides does not exist yet. A
 /// refused call writes nothing.
 #[tokio::test]
 async fn a_login_bound_to_another_identity_is_what_refuses_the_link() {
@@ -389,8 +390,8 @@ async fn a_login_bound_to_another_identity_is_what_refuses_the_link() {
              login proves",
             Some(provider_proven.as_str()),
             vec![(DEVELOPER_PROVIDER, owner_user)],
-            "NotAuthorizedException",
-            UNMATCHED_LOGINS,
+            "ResourceConflictException",
+            CANNOT_MERGE_IDENTITIES,
         ),
         (
             "an identifier registered against another identity, presented beside a login of \
@@ -400,8 +401,8 @@ async fn a_login_bound_to_another_identity_is_what_refuses_the_link() {
                 (USER_POOL_PROVIDER, user_pool_login.as_str()),
                 (DEVELOPER_PROVIDER, owner_user),
             ],
-            "NotAuthorizedException",
-            UNMATCHED_LOGINS,
+            "ResourceConflictException",
+            CANNOT_MERGE_IDENTITIES,
         ),
         (
             "a provider login bound to another identity, for a guest identity",
