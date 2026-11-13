@@ -57,6 +57,10 @@ pub mod event_destination_targets;
 /// services' own stores rather than decided here.
 pub mod s3_action_authorization;
 
+/// What the account's ACTIVE receipt rule set does with a message this account has just
+/// accepted for one of its own recipients — the receiving half of this service.
+pub mod inbound_delivery;
+
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

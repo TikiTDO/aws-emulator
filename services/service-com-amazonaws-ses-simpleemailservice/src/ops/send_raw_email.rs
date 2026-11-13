@@ -5,7 +5,9 @@
 //! Accepts a message a caller composed itself: reads the sender and the
 //! recipients out of the raw MIME message (or the parameters that override
 //! them), checks them the way SES does, appends the message to this account's
-//! send log, and answers with the id it stored.
+//! send log, hands it to the receive path for every recipient this account holds
+//! an identity for ([`crate::state::inbound_delivery`]), and answers with the id
+//! it stored.
 //!
 //! ## Shape of an operation
 //!
@@ -739,6 +741,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The message is accepted: mint its id, log it, and answer with the id
         // that was stored — never one computed from the request.
         let message_id = state.new_message_id();
+        // And it is RECEIVED by this account too when one of its recipients is on
+        // an identity this account holds: what the active receipt rule set does
+        // with it is read here, while the store is held, and carried out below,
+        // on a task of its own.
+        let steps = crate::state::inbound_delivery::receipt_steps(&state, &destinations);
         state.log_sent_message(crate::state::SentMessage {
             message_id: message_id.clone(),
             source,
@@ -757,6 +764,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .collect(),
             sent_at: now,
         });
+        // The receive path runs behind the acceptance, on a task of its own: a
+        // message is RECEIVED after it has been accepted, so nothing a caller is
+        // told depends on it and this service's store is not held across it.
+        crate::state::inbound_delivery::deliver(ctx, &region, &message_id, raw, &steps);
 
         Ok(SendRawEmailOutput { message_id })
     }
