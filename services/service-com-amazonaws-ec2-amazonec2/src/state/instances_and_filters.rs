@@ -1777,17 +1777,24 @@ impl ComAmazonawsEc2Amazonec2State {
         // A NAT gateway address an association or an assignment left in a transient
         // `NatGatewayAddressStatus` reaches its terminal status once its instant has
         // passed, whether or not anybody called again — the same contract as the moves
-        // above. The address is reached through the gateway its `AssociationId` names, so
-        // this costs one lookup per owed move rather than a scan of every gateway.
+        // above. The address is reached through the gateway the move names, so this costs
+        // one lookup per owed move rather than a scan of every gateway.
         let nat_gateways = &mut self.nat_gateways;
         self.nat_gateway_address_transitions
-            .retain(|association_id, transition| {
+            .retain(|address_key, transition| {
                 if now < transition.due_at {
                     return true;
                 }
                 if let Some(gateway) = nat_gateways.get_mut(&transition.nat_gateway_id) {
                     for address in gateway.nat_gateway_addresses.iter_mut().flatten() {
-                        if address.association_id.as_deref() == Some(association_id.as_str()) {
+                        // The key names the address: its `AssociationId` when it associates
+                        // an Elastic IP address, and the private address it was assigned
+                        // when it associates none.
+                        let named = match address.association_id.as_deref() {
+                            Some(association_id) => association_id == address_key.as_str(),
+                            None => address.private_ip.as_deref() == Some(address_key.as_str()),
+                        };
+                        if named {
                             address.status = Some(transition.to.to_string());
                         }
                     }

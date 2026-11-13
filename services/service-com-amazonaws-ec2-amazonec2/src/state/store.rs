@@ -2948,8 +2948,12 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// gateway is a part of the gateway and not a resource of its own. Ordered by id, which
     /// is the order a report of them pages over.
     pub nat_gateways: BTreeMap<String, NatGateway>,
-    /// When the move the clock owes one NAT gateway address falls due, by the
-    /// `AssociationId` of the address it belongs to — see [`NatGatewayAddressTransition`].
+    /// When the move the clock owes one NAT gateway address falls due, by what NAMES that
+    /// address on its gateway — see [`NatGatewayAddressTransition`]: the `AssociationId` of
+    /// an address that associates an Elastic IP address, and the private IPv4 address itself
+    /// for an address that associates none (a private NAT gateway's), which carries no
+    /// association id. The two spellings cannot collide: one is an `eipassoc-…` id and the
+    /// other a dotted-quad address.
     ///
     /// Beside the gateway store rather than inside it for the same reason as
     /// [`Self::vpc_endpoint_connection_moves`]: that store holds the modelled shape itself,

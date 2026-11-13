@@ -3,7 +3,10 @@
 //! @op CreateNatGateway
 //! IMPLEMENTED: creates a ZONAL NAT gateway in a stored subnet — one network interface, a
 //! private address out of that subnet's block, the Elastic IP addresses the request names
-//! associated with it — and answers it in the `pending` state the clock owes `available`
+//! associated with it — and answers it in the `pending` state the clock owes `available`,
+//! with each of its addresses in the transient `NatGatewayAddressStatus` of the work that
+//! create started (`associating` an Elastic IP address, `assigning` a private one), which
+//! the clock owes `succeeded`
 //! (see [`crate::state::ComAmazonawsEc2Amazonec2State::insert_nat_gateway`]).
 //!
 //! This is the ONLY file to touch for this operation.
@@ -194,7 +197,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             system_time_to_date_time, tag_list_bytes, tags_from_specifications,
             AVAILABILITY_MODE_ZONAL, CONNECTIVITY_TYPE_PUBLIC,
             ELASTIC_IP_ASSOCIATION_ID_PREFIX, MAX_EIPS_PER_PUBLIC_NAT_GATEWAY,
-            MAX_STORED_BYTES, MAX_STORED_RECORDS_PER_STORE, NAT_GATEWAY_ADDRESS_STATUS_ASSOCIATING,
+            MAX_STORED_BYTES, MAX_STORED_RECORDS_PER_STORE, NAT_GATEWAY_ADDRESS_STATUS_ASSIGNING,
+            NAT_GATEWAY_ADDRESS_STATUS_ASSOCIATING,
             NAT_GATEWAY_ADDRESS_STATUS_SUCCEEDED, NAT_GATEWAY_ID_PREFIX,
             NAT_GATEWAY_STATE_AVAILABLE, NAT_GATEWAY_STATE_PENDING,
             NAT_GATEWAY_TAGGABLE_RESOURCE, NETWORK_INTERFACE_ID_PREFIX, PendingStateMove,
@@ -298,10 +302,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // through an Elastic IP address: a public gateway is created with one, and
         // "[Public NAT gateways only] … You cannot specify an Elastic IP address with a
         // private NAT gateway" (`$AllocationId`) is the other side of that.
+        // The requirement is CONDITIONAL on the connectivity type the request asks for, and
+        // EC2 says so rather than reporting an ordinary absent parameter: the message names
+        // the connectivity type the address is required for and what to do about it.
         if public && allocation_ids.is_empty() {
-            return Err(crate::state::missing_parameter(
-                "The request must contain the parameter allocationId",
-            ));
+            return Err(crate::state::missing_parameter(format!(
+                "AllocationId is required for a NAT Gateway with Connectivity Type \
+                 {connectivity_type}. Please provide the AllocationId and retry the request."
+            )));
         }
         if !public && !allocation_ids.is_empty() {
             return Err(Scaffolded::invalid_parameter_combination(
@@ -479,13 +487,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let nat_gateway_id = store.next_id(NAT_GATEWAY_ID_PREFIX);
         let interface_owner_id = ::engine::emulator_account_id().to_string();
         let mut addresses: Vec<NatGatewayAddress> = Vec::new();
-        let mut associating: Vec<String> = Vec::new();
+        let mut settling: Vec<String> = Vec::new();
         for (index, private_ip) in private_ips.iter().enumerate() {
             let allocation_id = allocation_ids.get(index).cloned();
             // An address that associates an Elastic IP address carries the association id
-            // that names it on both sides, and is `associating` until the clock says
-            // otherwise; a PRIVATE gateway associates nothing, so its own address is
-            // `succeeded` the moment it is assigned.
+            // that names it on both sides.
             let association_id = allocation_id
                 .as_ref()
                 .map(|_| store.next_id(ELASTIC_IP_ASSOCIATION_ID_PREFIX));
@@ -493,14 +499,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .as_deref()
                 .and_then(|allocation_id| store.addresses.get(allocation_id))
                 .and_then(|address| address.public_ip.clone());
+            // A create REPORTS the work it has just started, not the end of it: the address
+            // is in the transient `NatGatewayAddressStatus` of that work — `associating`
+            // while an Elastic IP address is being associated with the gateway's interface,
+            // and `assigning` while a private address alone is being put on it — and the
+            // clock owes each the terminal `succeeded` below.
             let status = if association_id.is_some() {
                 NAT_GATEWAY_ADDRESS_STATUS_ASSOCIATING
             } else {
-                NAT_GATEWAY_ADDRESS_STATUS_SUCCEEDED
+                NAT_GATEWAY_ADDRESS_STATUS_ASSIGNING
             };
-            if let Some(association_id) = association_id.as_deref() {
-                associating.push(association_id.to_string());
-            }
+            // What names this address in the move the clock owes it: its association id when
+            // it has one, and the private address it was assigned when it has none.
+            settling.push(
+                association_id
+                    .clone()
+                    .unwrap_or_else(|| private_ip.clone()),
+            );
             // The Elastic IP address is now held by the gateway, written onto the SAME
             // stored record every address report reads, so `DescribeAddresses` and the
             // gateway cannot disagree about who holds it.
@@ -561,16 +576,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let stored = gateway.clone();
         store.insert_nat_gateway(gateway);
-        // What the clock now owes the gateway and each of its associating addresses:
+        // What the clock now owes the gateway and each of its settling addresses:
         // recorded rather than slept for, so a caller that reads the gateway straight away
-        // still sees the `pending` state a create starts in.
+        // still sees the `pending` state and the transient address statuses a create starts
+        // in.
         store.nat_gateway_moves.insert(
             nat_gateway_id.clone(),
             PendingStateMove::starting_now(NAT_GATEWAY_STATE_AVAILABLE),
         );
-        for association_id in associating {
+        for address_key in settling {
             store.nat_gateway_address_transitions.insert(
-                association_id,
+                address_key,
                 crate::state::NatGatewayAddressTransition::starting_now(
                     &nat_gateway_id,
                     NAT_GATEWAY_ADDRESS_STATUS_SUCCEEDED,

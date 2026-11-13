@@ -1101,6 +1101,8 @@ mod malformed_before_lookup;
 mod modify_route_server;
 #[path = "all/modify_subnet_attribute.rs"]
 mod modify_subnet_attribute;
+#[path = "all/nat_gateway_address_settling.rs"]
+mod nat_gateway_address_settling;
 #[path = "all/nat_gateway_addresses.rs"]
 mod nat_gateway_addresses;
 #[path = "all/nat_gateway_lifecycle.rs"]

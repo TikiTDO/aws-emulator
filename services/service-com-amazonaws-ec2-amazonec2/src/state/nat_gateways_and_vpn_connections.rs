@@ -1038,6 +1038,15 @@ pub const AVAILABILITY_MODE_REGIONAL: &str = "regional";
 /// address in: `associating`.
 pub const NAT_GATEWAY_ADDRESS_STATUS_ASSOCIATING: &str = "associating";
 
+/// The transient `NatGatewayAddressStatus` of an address whose PRIVATE IPv4 address is
+/// being put on the gateway's network interface: `assigning`, the `NatGatewayAddressStatus`
+/// member that names an assignment rather than an association
+/// (`crate::ops::types::NAT_GATEWAY_ADDRESS_STATUS_VALUES`). An address that associates no
+/// Elastic IP address — a private NAT gateway's own address, and the address
+/// `AssignPrivateNatGatewayAddress` adds — is in it until the clock owes it
+/// [`NAT_GATEWAY_ADDRESS_STATUS_SUCCEEDED`].
+pub const NAT_GATEWAY_ADDRESS_STATUS_ASSIGNING: &str = "assigning";
+
 /// The terminal `NatGatewayAddressStatus` the clock owes an `associating` address:
 /// `succeeded`.
 pub const NAT_GATEWAY_ADDRESS_STATUS_SUCCEEDED: &str = "succeeded";
@@ -1088,7 +1097,11 @@ pub const MAX_EIPS_PER_PUBLIC_NAT_GATEWAY: usize = 2;
 ///
 /// `to` is a `&'static str` so only a word of the modelled `NatGatewayAddressStatus`
 /// catalog, out of this module's own constants, can ever be stored — never text from a
-/// request. Applied by [`ComAmazonawsEc2Amazonec2State::materialize_due_transitions`].
+/// request. Applied by [`ComAmazonawsEc2Amazonec2State::materialize_due_transitions`],
+/// which finds the address this move belongs to by the key it is stored under: the
+/// `AssociationId` of an address that associates an Elastic IP address, and the private
+/// address itself for one that associates none (see
+/// [`ComAmazonawsEc2Amazonec2State::nat_gateway_address_transitions`]).
 #[derive(Debug, Clone)]
 pub struct NatGatewayAddressTransition {
     /// The `NatGatewayId` of the gateway whose address this move belongs to.
