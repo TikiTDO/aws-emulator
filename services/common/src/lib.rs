@@ -2270,3 +2270,6 @@ pub mod host_runtime;
 /// What a service asks for when it runs something real on the host: desired and observed state,
 /// placed per kind of workload.
 pub mod workload;
+
+/// Shared bounded payload bytes and the single transactional reference catalog.
+pub mod payload_store;
