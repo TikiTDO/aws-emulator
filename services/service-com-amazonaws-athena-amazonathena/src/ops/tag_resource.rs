@@ -1,15 +1,24 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op TagResource
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `TagResource`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Adds one or more tags to an Athena resource, or replaces the value a tag key the
+//! resource already carries holds.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`TagResource::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The resource is the one the request's `ResourceARN` names
+//! ([`crate::state::tagged_resource`]) — a workgroup, a data catalog or a capacity
+//! reservation — and the tags are written into that resource's OWN record, the same list
+//! its create call persisted, so `ListTagsForResource` reports them back and nothing holds
+//! a second copy of them.
+//!
+//! Three kinds of refusal: a tag list outside the rules
+//! [`crate::state::tag_list_error`] states — too many tags, a tag with no key, a key in the
+//! namespace Amazon Web Services reserves, a character a tag may not use, a key listed
+//! twice — is a bad request, judged before the registry is walked because those are
+//! properties of the request alone; a `ResourceARN` naming ANOTHER account's resource is a
+//! bad request too ([`crate::state::ARN_ACCOUNT_MISMATCH`]); and one this service can
+//! resolve no held resource from is the modelled `ResourceNotFoundException`, whether it
+//! names another Region's resource, a type Athena holds no tags on, or a resource of a
+//! taggable type this account does not hold.
 //!
 //! ## Shape of an operation
 //!
@@ -148,18 +157,76 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `TagResource` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(TagResourceErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("TagResource"))
+        // An Athena resource is an IAM resource, and the one this call acts on is the ARN
+        // the REQUEST names, so the decision is taken on that ARN before anything is read,
+        // written or even parsed. See `crate::state::authorization`.
+        crate::state::authorization::authorize(&*self.engine, ctx, Self::NAME, &input.resource_arn)
+            .map_err(TagResourceError::AccessDenied)?;
+
+        // The caller-supplied list is judged FIRST, before any lock is taken: the rules a
+        // `TagList` carries are properties of the request alone, so a request that is going
+        // to be refused never walks a registry and no other Athena request waits behind it.
+        if let Some(message) = crate::state::tag_list_error(&input.tags) {
+            return Err(invalid_request(message));
+        }
+        // The resource a tagging call reaches is one of this account's, in the Region the
+        // call was addressed to; an ARN naming anything else resolves to no resource here.
+        let region = crate::state::authorization::region_from_request(ctx.parts());
+        let resource = match crate::state::addressed_resource(&input.resource_arn, &region) {
+            crate::state::AddressedResource::Taggable(resource) => resource,
+            crate::state::AddressedResource::AnotherAccount => {
+                return Err(invalid_request(crate::state::ARN_ACCOUNT_MISMATCH))
+            }
+            crate::state::AddressedResource::Unresolvable => {
+                return Err(not_found(&input.resource_arn))
+            }
+        };
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(TagResourceErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("Athena state is not reachable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+        let mut store = state.lock();
+
+        let now = ::std::time::SystemTime::now();
+        let Some(held) = store.tags_of_mut(&resource, now) else {
+            return Err(not_found(&input.resource_arn));
+        };
+        // The documented cap is on what the RESOURCE holds, so it is the resulting set that
+        // is measured rather than this request's list alone.
+        if let Some(message) = crate::state::written_tags_error(held, &input.tags) {
+            return Err(invalid_request(message));
+        }
+        crate::state::write_tags(held, input.tags);
+
+        // `TagResourceOutput` models no members: the tags written are read back through
+        // `ListTagsForResource`.
+        Ok(TagResourceOutput {})
     }
+}
+
+/// The miss this operation answers an ARN it resolved no held resource from with: the
+/// modelled `ResourceNotFoundException` (HTTP 400), stating the one sentence this service
+/// gives that whole class ([`crate::state::could_not_find_resource`]) and naming the
+/// resource the request addressed.
+fn not_found(resource_arn: &str) -> TagResourceError {
+    TagResourceErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+        message: Some(crate::state::could_not_find_resource(resource_arn)),
+        resource_name: Some(resource_arn.to_string()),
+    })
+    .into()
+}
+
+/// The operation's own client error (HTTP 400), carrying `message`.
+///
+/// Every refusal above that is not a miss is a bad request: a `ResourceARN` naming another
+/// account's resource, or a tag list outside the rules one resource's tags obey. That is
+/// the class [`crate::state::ERROR_CODE_INVALID_INPUT`] names, reported under both wire
+/// names the refusal's code travels by.
+fn invalid_request(message: impl Into<String>) -> TagResourceError {
+    TagResourceError::invalid_request(crate::state::ERROR_CODE_INVALID_INPUT, message)
 }

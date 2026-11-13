@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UntagResource
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UntagResource`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Removes one or more tags from an Athena resource.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UntagResource::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The resource is the one the request's `ResourceARN` names
+//! ([`crate::state::tagged_resource`]), and the keys are removed from that resource's OWN
+//! tag list — the one a create persisted and a tag write updated — so a later
+//! `ListTagsForResource` no longer reports them. A key the resource does not carry removes
+//! nothing: the request asks for that key not to be held, which is already so.
+//!
+//! A key inside the namespace Amazon Web Services reserves
+//! ([`crate::state::RESERVED_TAG_KEY_PREFIX`]) is not a caller's to delete, which is a bad
+//! request judged before the registry is walked; a `ResourceARN` naming ANOTHER account's
+//! resource is a bad request too ([`crate::state::ARN_ACCOUNT_MISMATCH`]); and one this
+//! service can resolve no held resource from is the modelled `ResourceNotFoundException`.
 //!
 //! ## Shape of an operation
 //!
@@ -139,18 +143,70 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UntagResource` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UntagResourceErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UntagResource"))
+        // An Athena resource is an IAM resource, and the one this call acts on is the ARN
+        // the REQUEST names, so the decision is taken on that ARN before anything is read,
+        // written or even parsed. See `crate::state::authorization`.
+        crate::state::authorization::authorize(&*self.engine, ctx, Self::NAME, &input.resource_arn)
+            .map_err(UntagResourceError::AccessDenied)?;
+
+        // The caller-supplied keys are judged FIRST, before any lock is taken: what a
+        // `TagKeyList` may name is a property of the request alone.
+        if let Some(message) = crate::state::tag_keys_error(&input.tag_keys) {
+            return Err(invalid_request(message));
+        }
+        // The resource a tagging call reaches is one of this account's, in the Region the
+        // call was addressed to; an ARN naming anything else resolves to no resource here.
+        let region = crate::state::authorization::region_from_request(ctx.parts());
+        let resource = match crate::state::addressed_resource(&input.resource_arn, &region) {
+            crate::state::AddressedResource::Taggable(resource) => resource,
+            crate::state::AddressedResource::AnotherAccount => {
+                return Err(invalid_request(crate::state::ARN_ACCOUNT_MISMATCH))
+            }
+            crate::state::AddressedResource::Unresolvable => {
+                return Err(not_found(&input.resource_arn))
+            }
+        };
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(UntagResourceErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("Athena state is not reachable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+        let mut store = state.lock();
+
+        let now = ::std::time::SystemTime::now();
+        let Some(held) = store.tags_of_mut(&resource, now) else {
+            return Err(not_found(&input.resource_arn));
+        };
+        crate::state::remove_tag_keys(held, &input.tag_keys);
+
+        // `UntagResourceOutput` models no members: what the resource still holds is read
+        // back through `ListTagsForResource`.
+        Ok(UntagResourceOutput {})
     }
+}
+
+/// The miss this operation answers an ARN it resolved no held resource from with: the
+/// modelled `ResourceNotFoundException` (HTTP 400), stating the one sentence this service
+/// gives that whole class ([`crate::state::could_not_find_resource`]) and naming the
+/// resource the request addressed.
+fn not_found(resource_arn: &str) -> UntagResourceError {
+    UntagResourceErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+        message: Some(crate::state::could_not_find_resource(resource_arn)),
+        resource_name: Some(resource_arn.to_string()),
+    })
+    .into()
+}
+
+/// The operation's own client error (HTTP 400), carrying `message`.
+///
+/// Every refusal above that is not a miss is a bad request: a `ResourceARN` naming another
+/// account's resource, or a key no caller may remove. That is the class
+/// [`crate::state::ERROR_CODE_INVALID_INPUT`] names, reported under both wire names the
+/// refusal's code travels by.
+fn invalid_request(message: impl Into<String>) -> UntagResourceError {
+    UntagResourceError::invalid_request(crate::state::ERROR_CODE_INVALID_INPUT, message)
 }

@@ -56,6 +56,9 @@ mod query_result_outputs;
 #[path = "all/refusal_bodies.rs"]
 mod refusal_bodies;
 
+#[path = "all/resource_tags.rs"]
+mod resource_tags;
+
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 

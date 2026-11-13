@@ -78,6 +78,10 @@ pub use capacity_reservations::*;
 /// Whether IAM lets a request perform the action it asks for on the workgroup it names.
 pub mod authorization;
 
+/// Which Athena resource an ARN names, and the tags that resource holds.
+mod resource_tags;
+pub use resource_tags::*;
+
 /// The prepared statements each workgroup holds, and the query string of each.
 mod prepared_statements;
 pub use prepared_statements::*;
@@ -283,11 +287,13 @@ pub fn first_duplicate_tag_key(tags: &[Tag]) -> Option<&str> {
 
 /// Why `tags` is not a tag list one Athena resource can carry, if it is not.
 ///
-/// The three rules `Tag` carries — the documented 50 tags per resource
-/// ([`MAX_TAGS_PER_RESOURCE`]), a key on every tag ([`tag_without_key`]) and keys unique
-/// within the list ([`first_duplicate_tag_key`]) — stated once, so every operation that
-/// takes a `TagList` refuses the same list with the same sentence and the wording of one
-/// create cannot drift from another's.
+/// The rules `Tag` carries — the documented 50 tags per resource
+/// ([`MAX_TAGS_PER_RESOURCE`]), a key on every tag ([`tag_without_key`]), no key inside the
+/// namespace Amazon Web Services reserves ([`is_reserved_tag_key`]), only the characters a
+/// key and a value may use ([`is_taggable_text`]) and keys unique within the list
+/// ([`first_duplicate_tag_key`]) — stated once, so every operation that takes a `TagList`
+/// refuses the same list with the same sentence and the wording of one create cannot drift
+/// from another's.
 pub fn tag_list_error(tags: &[Tag]) -> Option<String> {
     if tags.len() > MAX_TAGS_PER_RESOURCE {
         return Some(format!(
@@ -303,6 +309,26 @@ pub fn tag_list_error(tags: &[Tag]) -> Option<String> {
              characters."
                 .to_string(),
         );
+    }
+    // Athena's tag restrictions: the `aws:` namespace holds the tags Amazon Web Services
+    // generates itself, which a caller may neither write nor remove.
+    if tags
+        .iter()
+        .filter_map(|tag| tag.key.as_deref())
+        .any(is_reserved_tag_key)
+    {
+        return Some(reserved_tag_key_message());
+    }
+    // `Tag$Key` and `Tag$Value` both state which characters a tag may use.
+    for tag in tags {
+        for (member, text) in [
+            ("Tag key", tag.key.as_deref().unwrap_or_default()),
+            ("Tag value", tag.value.as_deref().unwrap_or_default()),
+        ] {
+            if !is_taggable_text(text) {
+                return Some(tag_text_message(member, text));
+            }
+        }
     }
     // `Tag$Key`: "Tag keys are case-sensitive and must be unique per resource."
     if let Some(key) = first_duplicate_tag_key(tags) {

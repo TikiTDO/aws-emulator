@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListTagsForResource
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListTagsForResource`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Lists the tags associated with an Athena resource.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListTagsForResource::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! A REPORTING operation: the tags come out of the record of the resource the request's
+//! `ResourceARN` names ([`crate::state::tagged_resource`]) — the same list a create
+//! persisted and a tag write updated — and nothing here changes what a later caller sees.
+//!
+//! A page carries at most `MaxResults` tags, whose modelled minimum (75) is already above
+//! the [`crate::state::MAX_TAGS_PER_RESOURCE`] tags one resource can hold, so in practice a
+//! listing answers with everything the resource carries and hands back no `NextToken`. A
+//! token this store did not mint for THAT resource names no page of this listing and is a
+//! bad request rather than an empty page, a `ResourceARN` naming ANOTHER account's resource
+//! is a bad request too ([`crate::state::ARN_ACCOUNT_MISMATCH`]), and one this service can
+//! resolve no held resource from is the modelled `ResourceNotFoundException`.
 //!
 //! ## Shape of an operation
 //!
@@ -148,18 +152,91 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListTagsForResource` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListTagsForResourceErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListTagsForResource"))
+        // An Athena resource is an IAM resource, and the one this read reports on is the
+        // ARN the REQUEST names, so the decision is taken on that ARN before the registry
+        // is read — a refused read reports nothing of the resource, not even whether this
+        // account holds it. See `crate::state::authorization`.
+        crate::state::authorization::authorize(&*self.engine, ctx, Self::NAME, &input.resource_arn)
+            .map_err(ListTagsForResourceError::AccessDenied)?;
+
+        // The resource a tagging call reports on is one of this account's, in the Region the
+        // call was addressed to; an ARN naming anything else resolves to no resource here.
+        let region = crate::state::authorization::region_from_request(ctx.parts());
+        let resource = match crate::state::addressed_resource(&input.resource_arn, &region) {
+            crate::state::AddressedResource::Taggable(resource) => resource,
+            crate::state::AddressedResource::AnotherAccount => {
+                return Err(invalid_request(crate::state::ARN_ACCOUNT_MISMATCH))
+            }
+            crate::state::AddressedResource::Unresolvable => {
+                return Err(not_found(&input.resource_arn))
+            }
+        };
+        // "The maximum number of results to be returned per request": a request naming none
+        // gets every tag the resource can hold, which is the most one page can carry.
+        let page_size = input
+            .max_results
+            .and_then(|requested| usize::try_from(requested).ok())
+            .unwrap_or(crate::state::MAX_TAGS_PER_RESOURCE);
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(ListTagsForResourceErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("Athena state is not reachable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+        // A read: the store is never written below, so what the next caller sees is exactly
+        // what it saw before this call.
+        let store = state.lock();
+
+        let now = ::std::time::SystemTime::now();
+        let Some(tags) = store.tags_of(&resource, now) else {
+            return Err(not_found(&input.resource_arn));
+        };
+
+        // "The token for the next set of results": a value this store did not mint for THIS
+        // resource names no page of this listing.
+        let position = match input.next_token.as_deref() {
+            None => 0,
+            Some(token) => {
+                let Some(position) = store.tags_page_position(&input.resource_arn, token) else {
+                    return Err(invalid_request(crate::state::INVALID_NEXT_TOKEN));
+                };
+                position
+            }
+        };
+
+        let end = position.saturating_add(page_size).min(tags.len());
+        let page = tags.get(position..end).unwrap_or_default().to_vec();
+        // A token only where this page reported something and tags remain behind it, so a
+        // caller following tokens always makes progress and the last page hands back none.
+        let more = !page.is_empty() && end < tags.len();
+        Ok(ListTagsForResourceOutput {
+            tags: Some(page),
+            next_token: more.then(|| store.tags_page_token(&input.resource_arn, end)),
+        })
     }
+}
+
+/// The miss this operation answers an ARN it resolved no held resource from with: the
+/// modelled `ResourceNotFoundException` (HTTP 400), stating the one sentence this service
+/// gives that whole class ([`crate::state::could_not_find_resource`]) and naming the
+/// resource the request addressed.
+fn not_found(resource_arn: &str) -> ListTagsForResourceError {
+    ListTagsForResourceErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+        message: Some(crate::state::could_not_find_resource(resource_arn)),
+        resource_name: Some(resource_arn.to_string()),
+    })
+    .into()
+}
+
+/// The operation's own client error (HTTP 400), carrying `message`.
+///
+/// Both refusals above are bad requests: a `ResourceARN` naming another account's resource,
+/// and a `NextToken` this store did not mint. That is the class
+/// [`crate::state::ERROR_CODE_INVALID_INPUT`] names, reported under both wire names the
+/// refusal's code travels by.
+fn invalid_request(message: impl Into<String>) -> ListTagsForResourceError {
+    ListTagsForResourceError::invalid_request(crate::state::ERROR_CODE_INVALID_INPUT, message)
 }

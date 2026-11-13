@@ -87,10 +87,11 @@ use crate::scaffolded::AccessDenied;
 /// `arnNamespace`, which is also its `sigv4Name` (`smithy_query(query="service_info")`).
 pub const ACTION_PREFIX: &str = "athena";
 
-/// The resource type an Athena workgroup is addressed by in an ARN, from the "Resource
-/// types defined by Amazon Athena" table of the IAM Service Authorization Reference:
-/// `arn:${Partition}:athena:${Region}:${Account}:workgroup/${WorkGroupName}`.
-const WORK_GROUP_RESOURCE_TYPE: &str = "workgroup";
+// The resource type an Athena workgroup is addressed by in an ARN, stated once beside the
+// other Athena resource types a caller-supplied ARN can name (see `super::resource_tags`),
+// so the spelling a decision is taken on and the spelling a tag write is resolved by cannot
+// drift apart.
+use super::resource_tags::WORK_GROUP_RESOURCE_TYPE;
 
 /// The Region an ARN this gate builds carries when the request carries no SigV4 credential
 /// scope to read one from: the Region an AWS SDK falls back to when none is configured.
