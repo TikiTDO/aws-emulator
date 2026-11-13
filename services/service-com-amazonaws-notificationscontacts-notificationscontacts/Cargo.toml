@@ -30,6 +30,9 @@ sha2 = { workspace = true }
 # the per-member envelope with every clause's value half withheld, the unanchored
 # `@pattern` expression, and the schema layer's property-count finding.
 service-common = { path = "../common" }
+# User Notifications holds the channel associations an email contact can be the
+# channel of, so deleting a contact drops them from the store that owns them.
+service-com-amazonaws-notifications-notifications = { path = "../service-com-amazonaws-notifications-notifications" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

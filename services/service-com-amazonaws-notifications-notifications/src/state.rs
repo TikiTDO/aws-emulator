@@ -1270,6 +1270,37 @@ impl ComAmazonawsNotificationsNotificationsState {
             .is_some_and(|record| record.channel_arns.remove(channel_arn).is_some())
     }
 
+    /// Remove `channel_arn` from EVERY configuration of this store that carries
+    /// it, and report how many records changed.
+    ///
+    /// A channel is a resource of ANOTHER service — the modelled `ChannelArn`
+    /// names a `chatbot`, `consoleapp` or `notifications-contacts` resource — and
+    /// an association only means something while that resource exists, so the
+    /// service that owns it calls this when it deletes one: the association goes
+    /// with the channel rather than outliving it as a reference to nothing. The
+    /// removal covers the published managed configurations' own channel
+    /// identifiers too, which are associated by arn in exactly the same way, so
+    /// no listing of either kind of configuration keeps reporting the deleted
+    /// channel.
+    ///
+    /// `0` means no configuration referenced it, which leaves the store
+    /// untouched — this is a removal of whatever is there, not an assertion that
+    /// something was.
+    pub fn remove_channel_everywhere(&mut self, channel_arn: &str) -> usize {
+        let mut changed = 0;
+        for record in self.configurations.values_mut() {
+            if record.channel_arns.remove(channel_arn).is_some() {
+                changed += 1;
+            }
+        }
+        for record in self.managed_configurations.values_mut() {
+            if record.channel_identifiers.remove(channel_arn).is_some() {
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     /// The channels associated with `configuration_arn` in association order,
     /// each with its association sequence — the order `ListChannels` reports and
     /// pages through. Empty for a configuration the store does not hold, which

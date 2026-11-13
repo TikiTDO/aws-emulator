@@ -40,6 +40,13 @@ pub(crate) struct Emulator {
     pub(crate) engine: Arc<engine::InMemoryEngine>,
 }
 
+/// This service's signing name, the routing key every request below carries.
+pub(crate) const CONTACTS_SIGNING_NAME: &str = "notifications-contacts";
+
+/// The signing name of the sibling User Notifications service, which
+/// [`emulator_with_notifications`] mounts beside this one.
+pub(crate) const NOTIFICATIONS_SIGNING_NAME: &str = "notifications";
+
 pub(crate) fn emulator() -> Emulator {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
@@ -52,17 +59,42 @@ pub(crate) fn emulator() -> Emulator {
     Emulator { router, engine }
 }
 
+/// One emulator with this service AND the sibling User Notifications service
+/// mounted on the SAME engine, exactly as the production router mounts the two —
+/// for a suite whose rule spans both, a contact of this service being a channel
+/// of a NotificationConfiguration of that one.
+pub(crate) fn emulator_with_notifications() -> Emulator {
+    let mut em = emulator();
+    em.router.register_service(
+        service_com_amazonaws_notifications_notifications::EmulatedService::new(Arc::clone(
+            &em.engine,
+        )),
+    );
+    em
+}
+
 /// A request signed for `notifications-contacts` in [`REGION`], the signal the router
 /// routes on.
 fn request(method: &str, uri: &str, body: Option<&Value>) -> http::Request<bytes::Bytes> {
+    request_signed_for(CONTACTS_SIGNING_NAME, method, uri, body)
+}
+
+/// A request signed for `signing_name` in [`REGION`] — the routing key the router
+/// resolves a request to a mounted service by.
+fn request_signed_for(
+    signing_name: &str,
+    method: &str,
+    uri: &str,
+    body: Option<&Value>,
+) -> http::Request<bytes::Bytes> {
     let mut builder = http::Request::builder()
         .method(method)
         .uri(uri)
-        .header("host", format!("notifications-contacts.{REGION}.amazonaws.com"))
+        .header("host", format!("{signing_name}.{REGION}.amazonaws.com"))
         .header(
             "authorization",
             format!(
-                "AWS4-HMAC-SHA256 Credential=AKIDCONTACTS/20260101/{REGION}/notifications-contacts/aws4_request, \
+                "AWS4-HMAC-SHA256 Credential=AKIDCONTACTS/20260101/{REGION}/{signing_name}/aws4_request, \
                  SignedHeaders=host, Signature=0000"
             ),
         );
@@ -94,7 +126,22 @@ pub(crate) async fn call(
     uri: &str,
     body: Option<&Value>,
 ) -> (u16, Value) {
-    let response = call_http(em, method, uri, body).await;
+    call_signed_for(em, CONTACTS_SIGNING_NAME, method, uri, body).await
+}
+
+/// Status and parsed body of one call signed for `signing_name` — the same walk as
+/// [`call`], for a suite that drives a service mounted beside this one.
+pub(crate) async fn call_signed_for(
+    em: &Emulator,
+    signing_name: &str,
+    method: &str,
+    uri: &str,
+    body: Option<&Value>,
+) -> (u16, Value) {
+    let response = em
+        .router
+        .dispatch(request_signed_for(signing_name, method, uri, body))
+        .await;
     let status = response.status().as_u16();
     let error_type = response
         .headers()

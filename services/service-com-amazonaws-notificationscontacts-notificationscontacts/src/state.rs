@@ -21,6 +21,10 @@ use crate::ops::types::{
     ValidationException, ValidationExceptionField,
 };
 
+/// The channel associations the sibling User Notifications store holds for a
+/// contact of this service — what a delete of the contact has to drop with it.
+pub mod notification_channels;
+
 /// Characters an email-contact id is built from.
 ///
 /// Taken from the modelled `EmailContactArn` pattern, whose last segment is

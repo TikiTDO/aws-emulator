@@ -4,7 +4,8 @@
 //! Deletes the stored email contact the request's ARN names: removes that record —
 //! with its tags and any outstanding activation code — from [`crate::state`], so a
 //! later `GetEmailContact` answers the modelled 404 and `ListEmailContacts` no longer
-//! reports it. The modelled 404 for an ARN the store does not hold.
+//! reports it, and drops the contact from every notification configuration that had
+//! it associated as a channel. The modelled 404 for an ARN the store does not hold.
 //!
 //! ## Shape of an operation
 //!
@@ -106,6 +107,22 @@ impl From<DeleteEmailContactErrorModeled> for DeleteEmailContactError {
     }
 }
 
+/// Record this state-changing call for attribution: the access key id the caller
+/// presented (a public identifier, never a secret), how the call ended, and how many
+/// channel associations the deletion removed from the sibling store. No contact ARN and
+/// no email address: a log sink needs neither to attribute the change, and the address
+/// is the contact's own data.
+fn audit(akid: &str, outcome: &str, associations_removed: usize) {
+    ::tracing::info!(
+        target: "emulator::audit",
+        operation = "DeleteEmailContact",
+        akid = %akid,
+        outcome = %outcome,
+        associations_removed = associations_removed,
+        "state-changing operation"
+    );
+}
+
 /// The `DeleteEmailContact` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -144,8 +161,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     ) -> Result<Self::Output, Self::Error> {
         // `arn`'s own pattern is modelled, so the centralized walk has already
         // refused a malformed one with a 400 before this body runs.
-        let _ = ctx;
+        //
+        // The credential scope's access key id is read only to ATTRIBUTE the change
+        // ([`audit`]); nothing about it reaches the answer or the store.
+        let akid = ::emulator_server::extract_akid(&ctx.parts().headers);
+
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            audit(&akid, "unavailable", 0);
             DeleteEmailContactErrorModeled::InternalServerException(InternalServerException {
                 message: "the email contact store is unavailable".to_string(),
             })
@@ -155,11 +177,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The whole record goes, so the tags and the activation code stored on it go
         // with it: a contact minted later under a fresh ARN starts with neither.
         store.remove_contact(&input.arn).ok_or_else(|| {
+            audit(&akid, "refused", 0);
             DeleteEmailContactErrorModeled::ResourceNotFoundException(
                 crate::state::contact_not_found(&input.arn),
             )
         })?;
+        // This store's lock goes before the sibling store's is taken, so the two
+        // are never held at once.
+        drop(store);
 
+        // "Deleting an email contact removes it from all associated notification
+        // configurations": the contact's ARN is a `ChannelArn` of User
+        // Notifications, so every channel association naming it goes with the
+        // contact rather than surviving as a reference to a resource that no
+        // longer exists.
+        let associations_removed =
+            crate::state::notification_channels::drop_channel_associations(&*self.engine, &input.arn);
+
+        audit(&akid, "deleted", associations_removed);
         Ok(DeleteEmailContactOutput {})
     }
 }
