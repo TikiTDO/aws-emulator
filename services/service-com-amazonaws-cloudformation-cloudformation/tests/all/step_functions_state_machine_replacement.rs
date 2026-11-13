@@ -30,7 +30,11 @@ use smithy_server_runtime::MultiServiceRouter;
 /// One Step Functions call through the same router, signed for `states` the way a client's
 /// SDK signs it (`awsJson1_0`, `X-Amz-Target: AWSStepFunctions.<Operation>`): the status
 /// and the parsed answer.
-async fn sfn_json(
+///
+/// `pub(crate)`: `tests/all.rs` is this binary's crate root, so a sibling suite that reads a
+/// stack's state machine back through that service's own wire reads THIS call rather than
+/// carrying a second copy of it.
+pub(crate) async fn sfn_json(
     router: &MultiServiceRouter,
     operation: &str,
     request: &Value,

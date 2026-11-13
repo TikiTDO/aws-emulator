@@ -50,9 +50,12 @@ use service_com_amazonaws_cloudformation_cloudformation::state::status;
 /// The tag keys CloudFormation records on every resource it provisions. Source: the
 /// `aws:cloudformation:*` tags CloudFormation's own documentation names
 /// (`crate::state::provisioning`'s `STACK_NAME_TAG` / `STACK_ID_TAG` / `LOGICAL_ID_TAG`).
-const STACK_NAME_TAG: &str = "aws:cloudformation:stack-name";
-const STACK_ID_TAG: &str = "aws:cloudformation:stack-id";
-const LOGICAL_ID_TAG: &str = "aws:cloudformation:logical-id";
+/// `pub(crate)`: `tests/all.rs` is this binary's crate root, so a sibling suite holding the
+/// same rule for another owning service reads THESE keys rather than carrying a second copy
+/// of them.
+pub(crate) const STACK_NAME_TAG: &str = "aws:cloudformation:stack-name";
+pub(crate) const STACK_ID_TAG: &str = "aws:cloudformation:stack-id";
+pub(crate) const LOGICAL_ID_TAG: &str = "aws:cloudformation:logical-id";
 
 /// The `{Key, Value}` pairs inside every `<block>…</block>` of an XML answer, as a map.
 ///
@@ -162,7 +165,10 @@ fn parameter_members(parameters: &[(&str, &str)]) -> Vec<(String, String)> {
 /// The whole tag set a provisioned resource must carry: the stack's own tags, the resource's
 /// own declaration winning any key collision, and the three CloudFormation records — which
 /// are CloudFormation's to set, so they are applied LAST and no declaration displaces them.
-fn expected_tags(
+///
+/// `pub(crate)` for the same reason the three keys above are: one reading of the rule serves
+/// every suite that asserts it of an owning service.
+pub(crate) fn expected_tags(
     stack_tags: &[(&str, &str)],
     declared: &[(&str, &str)],
     stack_name: &str,

@@ -223,7 +223,10 @@ async fn secretsmanager(
 }
 
 /// The `__type` discriminator of an awsJson error body, without its namespace.
-fn error_code(case: &str, parsed: &Value) -> String {
+///
+/// `pub(crate)`: `tests/all.rs` is this binary's crate root, so a sibling suite reading an
+/// awsJson refusal reads THIS split rather than carrying a second copy of it.
+pub(crate) fn error_code(case: &str, parsed: &Value) -> String {
     let raw = parsed
         .get("__type")
         .and_then(Value::as_str)
@@ -242,7 +245,14 @@ fn text(case: &str, parsed: &Value, pointer: &str) -> String {
 
 /// Read the stack until it reports a status that is no longer in progress, and answer that
 /// read's body. Waits for the CONDITION: each attempt looks again.
-async fn poll_to_terminal(router: &MultiServiceRouter, case: &str, stack: &str) -> String {
+///
+/// `pub(crate)`: a sibling suite that deploys and then tears down a stack waits for the same
+/// condition, so it reads this loop rather than carrying a second copy of it.
+pub(crate) async fn poll_to_terminal(
+    router: &MultiServiceRouter,
+    case: &str,
+    stack: &str,
+) -> String {
     let mut described = String::new();
     for _ in 0..POLL_ATTEMPTS {
         wait_for_the_transition().await;
