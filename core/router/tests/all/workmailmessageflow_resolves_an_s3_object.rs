@@ -6,9 +6,12 @@
 //! RULE: the MIME content an update installs is the bytes S3 holds for the object the
 //! request's `s3Reference` names ("Amazon S3 object representing the updated message
 //! content, in MIME format" — `S3Reference`'s own documentation), so the way a client
-//! makes a reference resolvable is to call S3 `PutObject`, and the two documented
+//! makes a reference resolvable is to call S3 `PutObject` and to attach the bucket
+//! policy that grants WorkMail the read ("for WorkMail to process an S3 object, it must
+//! have permission to access that object"), and the three documented
 //! `InvalidContentLocation` reasons are properties of the real bucket: a bucket in
-//! another Region than the request, and a bucket another account owns.
+//! another Region than the request, a bucket another account owns, and a bucket whose
+//! policy does not grant that read.
 //!
 //! No single crate's test target can ask this: the object has to be written through
 //! Amazon S3's own API and read back through WorkMail Message Flow's, so both
@@ -19,8 +22,8 @@
 //! there and this API does not model.
 //!
 //! The rows differ along what the rule generalises over: the bucket, the key, the
-//! bytes, whether the reference names a version S3 minted, and whether the bucket is
-//! in the Region the update was made in.
+//! bytes, whether the reference names a version S3 minted, whether the bucket is
+//! in the Region the update was made in, and whether its policy grants the read.
 
 use std::sync::Arc;
 
@@ -30,6 +33,10 @@ use smithy_server_runtime::MultiServiceRouter;
 
 /// The Region every call is signed for unless a row is exercising the Region rule.
 const REGION: &str = "us-east-1";
+
+/// The status Amazon S3 answers a stored `PutBucketPolicy` with: the write has no body to
+/// return, so S3 reports `204 No Content`.
+const BUCKET_POLICY_STORED: u16 = 204;
 
 /// One wire answer, reduced to what the next step branches on.
 struct Answer {
@@ -162,6 +169,32 @@ impl Emulator {
         .await
     }
 
+    /// S3 `PutBucketPolicy`: the grant a client has to attach before WorkMail can read
+    /// the object, since WorkMail fetches the content as its own service principal and no
+    /// identity-based policy of the calling account speaks for it. The document is the one
+    /// WorkMail's own instructions name — an `Allow` of `s3:GetObject` on the bucket's
+    /// objects to WorkMail's service principal.
+    async fn put_bucket_policy(&self, bucket: &str, region: &str) -> Answer {
+        let policy = json!({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Sid": "AllowWorkMailToReadMessageContent",
+                "Effect": "Allow",
+                "Principal": { "Service": "workmail.amazonaws.com" },
+                "Action": "s3:GetObject",
+                "Resource": format!("arn:aws:s3:::{bucket}/*"),
+            }],
+        });
+        self.call(
+            "PUT",
+            "s3",
+            region,
+            &format!("/{bucket}?policy"),
+            serde_json::to_vec(&policy).expect("serialize the bucket policy"),
+        )
+        .await
+    }
+
     /// S3 `PutObject`: the upload a client makes before it calls
     /// `PutRawMessageContent`.
     async fn put_object(&self, bucket: &str, key: &str, region: &str, content: &[u8]) -> Answer {
@@ -270,6 +303,13 @@ async fn an_object_uploaded_through_s3_is_what_the_update_installs() {
             created.status,
             created.summary()
         );
+        let granted = emulator.put_bucket_policy(bucket, REGION).await;
+        assert_eq!(
+            granted.status, BUCKET_POLICY_STORED,
+            "case {case:?}: expected the S3 PutBucketPolicy to be stored, got {} ({})",
+            granted.status,
+            granted.summary()
+        );
         let written = emulator.put_object(bucket, key, REGION, &uploaded).await;
         assert_eq!(
             written.status, 200,
@@ -318,6 +358,11 @@ async fn a_reference_naming_a_version_s3_minted_installs_that_version() {
         emulator.create_bucket(bucket, REGION).await.status,
         200,
         "the S3 CreateBucket must succeed"
+    );
+    assert_eq!(
+        emulator.put_bucket_policy(bucket, REGION).await.status,
+        BUCKET_POLICY_STORED,
+        "the S3 PutBucketPolicy granting WorkMail the read must be stored"
     );
     assert_eq!(
         emulator.enable_versioning(bucket, REGION).await.status,
@@ -392,18 +437,36 @@ async fn a_reference_naming_a_version_s3_minted_installs_that_version() {
 }
 
 /// The documented location reasons are decided from the REAL bucket: an object in a
-/// bucket S3 holds in another Region, and a key S3 holds nothing at, are both
+/// bucket S3 holds in another Region, a key S3 holds nothing at, and an object in a
+/// bucket whose policy does not grant WorkMail the read are each
 /// `InvalidContentLocation`, and the message keeps its content.
+///
+/// The last row is the one a client meets most often: it uploaded the object and
+/// forgot the bucket policy, so nothing authorizes WorkMail's own fetch of it. The
+/// control beside it is the row above that uploads the object AND attaches the grant,
+/// which the first test of this suite asserts is accepted.
 #[tokio::test]
-async fn a_bucket_in_another_region_or_an_empty_key_is_an_invalid_content_location() {
-    // (case, the Region the bucket is created in, whether the object is uploaded)
-    let rows: [(&str, &str, bool); 3] = [
-        ("a bucket in another Region", "eu-west-1", true),
-        ("a bucket in a third Region", "ap-southeast-2", true),
-        ("a bucket in the request's Region with nothing at the key", REGION, false),
+async fn a_region_key_or_missing_policy_is_an_invalid_content_location() {
+    // (case, the Region the bucket is created in, whether the object is uploaded,
+    //  whether the bucket policy granting WorkMail the read is attached)
+    let rows: [(&str, &str, bool, bool); 4] = [
+        ("a bucket in another Region", "eu-west-1", true, true),
+        ("a bucket in a third Region", "ap-southeast-2", true, true),
+        (
+            "a bucket in the request's Region with nothing at the key",
+            REGION,
+            false,
+            true,
+        ),
+        (
+            "an uploaded object in a bucket carrying no policy at all",
+            REGION,
+            true,
+            false,
+        ),
     ];
 
-    for (case, bucket_region, uploaded) in rows {
+    for (case, bucket_region, uploaded, granted) in rows {
         let emulator = Emulator::new();
         let bucket = format!("wmf-objects-{bucket_region}");
         let key = "updated/message-mime";
@@ -419,6 +482,15 @@ async fn a_bucket_in_another_region_or_an_empty_key_is_an_invalid_content_locati
             created.status,
             created.summary()
         );
+        if granted {
+            let policy = emulator.put_bucket_policy(&bucket, bucket_region).await;
+            assert_eq!(
+                policy.status, BUCKET_POLICY_STORED,
+                "case {case:?}: expected the S3 PutBucketPolicy to be stored, got {} ({})",
+                policy.status,
+                policy.summary()
+            );
+        }
         if uploaded {
             let written = emulator
                 .put_object(&bucket, key, bucket_region, &mime("elsewhere", "body"))

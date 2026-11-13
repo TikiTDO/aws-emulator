@@ -25,6 +25,10 @@ tracing = { workspace = true }
 # of the S3 object its `S3Reference` names, which S3 owns, so the reference is resolved
 # against S3's own state in the shared engine rather than against a copy kept here.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
+# The tree's one evaluation of IAM policy documents: whether the bucket holding the
+# referenced object grants WorkMail the read is a resource-policy decision, and two services
+# must not read one document differently.
+service-common = { path = "../common" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

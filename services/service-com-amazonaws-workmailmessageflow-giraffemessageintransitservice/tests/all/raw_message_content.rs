@@ -134,6 +134,13 @@ impl Emulator {
     /// version id is S3's to mint, and the reference that comes back carries the id
     /// S3 minted for this write. An unversioned one comes back unversioned.
     ///
+    /// The bucket is left carrying the resource policy `object` asks for — by default
+    /// the grant WorkMail's own instructions tell a client to attach
+    /// ([`workmail_read_policy`]), since WorkMail fetches the object as its own
+    /// service principal and only the bucket's policy can authorize that. The
+    /// document is written exactly as S3's `PutBucketPolicy` stores it: one policy
+    /// per bucket, replacing whatever it carried.
+    ///
     /// Nothing of this service's own state is touched: the object belongs to S3,
     /// which is why a reference resolves for any client that can call `PutObject`.
     pub(crate) fn seed_object(&self, reference: &S3Ref, object: StagedObject) -> S3Ref {
@@ -167,6 +174,15 @@ impl Emulator {
                 .expect("the bucket just staged is held")
                 .set_versioning("Enabled", None);
         }
+        let policy = match &object.bucket_policy {
+            StagedPolicy::WorkMailRead => Some(workmail_read_policy(&reference.bucket)),
+            StagedPolicy::Absent => None,
+            StagedPolicy::Document(document) => Some(document.clone()),
+        };
+        store
+            .bucket_mut(&reference.bucket)
+            .expect("the bucket just staged is held")
+            .policy = policy;
         let write = store.put_object(
             &reference.bucket,
             &reference.key,
@@ -192,6 +208,18 @@ impl Emulator {
             reference.key
         );
         S3Ref::new(reference.bucket.clone(), reference.key.clone(), minted)
+    }
+
+    /// Put `policy` in force on `bucket` in AMAZON S3's own store, as S3's
+    /// `PutBucketPolicy` leaves it; `None` takes the policy off the bucket, the way
+    /// `DeleteBucketPolicy` does. The bucket must already be staged.
+    pub(crate) fn put_bucket_policy(&self, bucket: &str, policy: Option<&str>) {
+        let s3 = s3_service_state(&*self.engine).expect("Amazon S3's store is reachable");
+        let mut store = s3.lock();
+        store
+            .bucket_mut(bucket)
+            .unwrap_or_else(|| panic!("the bucket {bucket:?} is staged in Amazon S3"))
+            .policy = policy.map(str::to_string);
     }
 
     /// Lay a DELETE MARKER over `reference`'s key in Amazon S3, as an S3
@@ -347,8 +375,9 @@ pub(crate) fn regional_reference(region: &str, key: &str) -> S3Ref {
 /// How an object is staged in AMAZON S3's own store: the bytes, the Region of the
 /// bucket that holds it, whether that bucket is one another emulated service
 /// provisioned (so it is held in a service-managed account rather than the calling
-/// one), and whether it is versioning-enabled (so S3 mints a version id for the
-/// write).
+/// one), whether it is versioning-enabled (so S3 mints a version id for the write),
+/// and the resource policy the bucket carries (which is what grants WorkMail the
+/// read of the object).
 ///
 /// Every one of those is a property of the BUCKET or the OBJECT in S3, which is
 /// what the handler reads them off.
@@ -356,16 +385,62 @@ pub(crate) struct StagedObject {
     content: Vec<u8>,
     region: String,
     provisioned_by: Option<String>,
+    bucket_policy: StagedPolicy,
+}
+
+/// What the bucket a staged object lives in carries as its own resource policy — the
+/// document S3's `PutBucketPolicy` would have left on it.
+pub(crate) enum StagedPolicy {
+    /// The grant WorkMail's own instructions tell a client to attach
+    /// ([`workmail_read_policy`]). The default, because an update resolves only
+    /// against a bucket that grants WorkMail the read.
+    WorkMailRead,
+    /// No policy at all — a freshly created bucket's state, which grants nothing.
+    Absent,
+    /// Exactly this document, for a row that is about the policy itself.
+    Document(String),
+}
+
+/// The bucket policy a client following WorkMail's own instructions attaches to the
+/// bucket it stages message content in: an `Allow` of the S3 object read to
+/// WorkMail's service principal over every key of `bucket`.
+///
+/// The model documents that "for WorkMail to process an S3 object, it must have
+/// permission to access that object" (`smithy_query(query="doc",
+/// shape="S3Reference")`), and names "an incomplete or missing S3 bucket policy" as
+/// an `InvalidContentLocation` reason: the fetch is WorkMail's own, so this is the
+/// document that authorizes it.
+pub(crate) fn workmail_read_policy(bucket: &str) -> String {
+    json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Sid": "AllowWorkMailToReadMessageContent",
+            "Effect": "Allow",
+            "Principal": { "Service": "workmail.amazonaws.com" },
+            "Action": "s3:GetObject",
+            "Resource": format!("arn:aws:s3:::{bucket}/*"),
+        }],
+    })
+    .to_string()
 }
 
 impl StagedObject {
-    /// `content` in a bucket of the caller's own account in [`REGION`].
+    /// `content` in a bucket of the caller's own account in [`REGION`], carrying the
+    /// grant WorkMail needs to read it.
     pub(crate) fn new(content: impl Into<Vec<u8>>) -> Self {
         Self {
             content: content.into(),
             region: REGION.to_string(),
             provisioned_by: None,
+            bucket_policy: StagedPolicy::WorkMailRead,
         }
+    }
+
+    /// The same object in a bucket carrying the resource policy `policy` describes.
+    #[must_use]
+    pub(crate) fn with_bucket_policy(mut self, policy: StagedPolicy) -> Self {
+        self.bucket_policy = policy;
+        self
     }
 
     /// The same object in a bucket created in `region`.

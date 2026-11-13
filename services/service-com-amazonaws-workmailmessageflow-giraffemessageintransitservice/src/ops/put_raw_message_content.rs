@@ -437,19 +437,18 @@ fn refuse_rejected(
 /// [`crate::state::referenced_object`]. Nothing about the reference is echoed into
 /// the message: the bytes come out of the stored object.
 ///
-/// Three conditions make an object unreadable, and the model's own
+/// Four conditions make an object unreadable, and the model's own
 /// `InvalidContentLocation` documentation
-/// (`smithy_query(query="doc", shape="InvalidContentLocation")`) names the first
-/// two of them: "You made the request in a region other than your S3 bucket
-/// region" and "The S3 bucket owner is not the same as the calling AWS account".
-/// The third is the reference naming no object at all — no such bucket, no such
-/// key, a key whose current version is a delete marker, or a versioned reference
-/// naming a version that is not stored, since the model documents `objectVersion`
-/// as selecting one version of the object.
-///
-/// The remaining documented reason, an incomplete or missing S3 bucket policy, is
-/// not decided here: an object this emulator's S3 serves the calling account is one
-/// that account can read, so there is no policy state to evaluate against.
+/// (`smithy_query(query="doc", shape="InvalidContentLocation")`) names three of
+/// them: "You made the request in a region other than your S3 bucket region", "The
+/// S3 bucket owner is not the same as the calling AWS account" and "You have an
+/// incomplete or missing S3 bucket policy" — the last because the content is
+/// fetched by WorkMail itself, as its own service principal, which only the
+/// bucket's resource policy can authorize ([`crate::state::bucket_policy`]). The
+/// fourth is the reference naming no object at all — no such bucket, no such key, a
+/// key whose current version is a delete marker, or a versioned reference naming a
+/// version that is not stored, since the model documents `objectVersion` as
+/// selecting one version of the object.
 fn resolve_content<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>(
     engine: &Eng,
     reference: &S3Ref,
@@ -475,6 +474,9 @@ fn resolve_content<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>(
             "the bucket is not one the calling AWS account {} holds",
             ::engine::emulator_account_id()
         ))),
+        crate::state::ReferencedObject::NotPermitted => Err(Unreadable::Location(
+            "the bucket's policy does not grant WorkMail read access to the object".to_string(),
+        )),
         crate::state::ReferencedObject::Oversize { octets } => Err(Unreadable::Oversize(octets)),
     }
 }

@@ -20217,6 +20217,7 @@ dependencies = [
  "http",
  "serde_json",
  "service-com-amazonaws-s3-amazons3",
+ "service-common",
  "sha2 0.10.9",
  "tokio",
  "tracing",

@@ -25,6 +25,8 @@ use std::time::SystemTime;
 
 use crate::ops::types::S3Reference;
 
+pub mod bucket_policy;
+
 /// The region a request is treated as having been made in when its SigV4
 /// credential scope does not name one (an unsigned or anonymous request).
 pub const DEFAULT_REGION: &str = "us-east-1";
@@ -95,13 +97,14 @@ impl S3Ref {
 ///
 /// The variants other than [`Self::Content`] are the conditions that stop WorkMail
 /// from reading the object, and each is a property of the REAL bucket or object:
-/// the two the model's `InvalidContentLocation` documentation names
+/// the three the model's `InvalidContentLocation` documentation names
 /// (`smithy_query(query="doc", shape="InvalidContentLocation")`) — "you made the
-/// request in a region other than your S3 bucket region" and "the S3 bucket owner
-/// is not the same as the calling AWS account" — plus the reference naming no
-/// object at all, and the one ceiling this emulator reads content up to. Which
-/// condition fired is reported here rather than decided here, so the wording of
-/// the refusal stays with the operation that answers it.
+/// request in a region other than your S3 bucket region", "the S3 bucket owner
+/// is not the same as the calling AWS account" and "you have an incomplete or
+/// missing S3 bucket policy" — plus the reference naming no object at all, and the
+/// one ceiling this emulator reads content up to. Which condition fired is reported
+/// here rather than decided here, so the wording of the refusal stays with the
+/// operation that answers it.
 #[derive(Debug)]
 pub enum ReferencedObject {
     /// The bytes the referenced object holds.
@@ -115,6 +118,10 @@ pub enum ReferencedObject {
     OtherRegion { bucket_region: String },
     /// The bucket is not one of the buckets the calling account holds in S3.
     OtherAccount,
+    /// The bucket's own resource policy does not grant WorkMail the read of that
+    /// object — the bucket carries no policy at all, or the document it carries
+    /// says nothing about this read or denies it ([`bucket_policy`]).
+    NotPermitted,
     /// The object carries `octets` octets, beyond the ceiling the caller asked to
     /// read up to.
     Oversize { octets: usize },
@@ -134,8 +141,8 @@ pub enum ReferencedObject {
 /// containing the S3 object must match the region used for WorkMail operations" and
 /// that "for WorkMail to process an S3 object, it must have permission to access
 /// that object" (`smithy_query(query="doc", shape="S3Reference")`), so the object is
-/// S3's and so are the two conditions: a client makes it resolvable by calling
-/// `PutObject`, and this reads what that write left. `objectVersion` selects one
+/// S3's and so is every condition below: a client makes it resolvable by calling
+/// `PutObject` and `PutBucketPolicy`, and this reads what those writes left. `objectVersion` selects one
 /// version of it, and a reference that names none addresses the key's current
 /// version, which is what an S3 read naming no version answers with.
 ///
@@ -149,6 +156,12 @@ pub enum ReferencedObject {
 /// are the ONLY ownership signal the object store carries — this emulator serves one
 /// account, so a bucket created over S3's own API belongs to the caller and can
 /// never earn this refusal.
+///
+/// Being the calling account's bucket is not yet permission to READ the object: the
+/// fetch is WorkMail's own, so it is the bucket's resource policy that has to grant
+/// it ([`bucket_policy::read_is_granted`]), which is the third condition the model's
+/// `InvalidContentLocation` documentation names. It is asked of the bucket the
+/// address already resolved, like the two above it, so it costs no second lookup.
 ///
 /// LOCK ORDER: this takes Amazon S3's store lock and holds no other while it does,
 /// and it hands back owned values rather than a guard — so it is called with NO
@@ -173,6 +186,14 @@ pub fn referenced_object<Eng: Send + Sync + 'static>(
     }
     if bucket.provisioned_by().is_some() || bucket.is_aws_published() {
         return Some(ReferencedObject::OtherAccount);
+    }
+    if !bucket_policy::read_is_granted(
+        bucket.policy.as_deref(),
+        &reference.bucket,
+        &reference.key,
+        request_region,
+    ) {
+        return Some(ReferencedObject::NotPermitted);
     }
     let Some(object) =
         bucket.addressed_object(&reference.key, reference.object_version.as_deref())
