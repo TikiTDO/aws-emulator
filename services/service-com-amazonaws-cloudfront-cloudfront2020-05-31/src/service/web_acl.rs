@@ -21,6 +21,7 @@
 
 use aws_smithy_runtime_api::http::Request as RtRequest;
 use service_com_amazonaws_wafv2_awswaf_20190729::service::edge as waf_edge;
+use service_com_amazonaws_wafv2_awswaf_20190729::service::logs as waf_logs;
 
 /// The status a terminating action is answered under when the action names none —
 /// `EdgeAction::default_status` answers one for every terminating action, so this is only
@@ -44,11 +45,16 @@ pub struct Refusal {
 
 /// What the web ACL `web_acl_id` names decides about the viewer request `req`, whose path
 /// within the distribution's endpoint is `viewer_path` and whose query string (without its
-/// leading `?`) is `query`.
+/// leading `?`) is `query`, beside the record that web ACL's own `LoggingConfiguration`
+/// logs about the request.
 ///
-/// `None` lets the request through: the distribution names no web ACL, names one by an
-/// identifier that is no WAFv2 ARN (a WAF Classic ACL id, whose rules this emulator holds
-/// none of), names one this emulator does not hold, or the web ACL allowed it.
+/// A `None` refusal lets the request through: the distribution names no web ACL, names one
+/// by an identifier that is no WAFv2 ARN (a WAF Classic ACL id, whose rules this emulator
+/// holds none of), names one this emulator does not hold, or the web ACL allowed it.
+///
+/// The record is WAFv2's ([`waf_logs`]); this service only DELIVERS it, with
+/// `waf_logs::deliver`, because the write is a call made from the operation serving the
+/// request. `None` when the web ACL logs nothing about this request.
 ///
 /// The two stores are locked one after the other and never at the same time, and the wafv2
 /// side locks nothing of this service's, so the two cannot deadlock: the caller releases
@@ -61,9 +67,9 @@ pub fn refusal<Eng: Send + Sync + 'static>(
     req: &RtRequest,
     viewer_path: &str,
     query: &str,
-) -> Option<Refusal> {
+) -> (Option<Refusal>, Option<waf_logs::LoggedRecord>) {
     if !names_a_web_acl_arn(web_acl_id) {
-        return None;
+        return (None, None);
     }
     // The body as it arrived, which is what a rule inspecting `FieldToMatch$Body` reads. A
     // viewer request this plane serves is one the front door handed over whole, so its body
@@ -71,9 +77,12 @@ pub fn refusal<Eng: Send + Sync + 'static>(
     // being quietly inspected as an empty one.
     let body = req.body().bytes().map(<[u8]>::to_vec).unwrap_or_default();
     let inspected = waf_edge::InspectedRequest::of_http(req, viewer_path, query, body);
-    let decided = waf_edge::decide_against(engine, web_acl_id, &inspected)?;
+    let Some(decided) = waf_edge::decide_against(engine, web_acl_id, &inspected) else {
+        return (None, None);
+    };
+    let logged = decided.log_record.clone();
     if decided.action.is_allow() {
-        return None;
+        return (None, logged);
     }
     ::tracing::debug!(
         web_acl = %web_acl_id,
@@ -83,7 +92,7 @@ pub fn refusal<Eng: Send + Sync + 'static>(
     // A terminating action that configures its own `CustomResponse` is served BY WAF: the
     // status, the headers and the body are the web ACL's own, and the edge produced none of
     // them.
-    Some(match decided.custom_response {
+    let refusal = match decided.custom_response {
         Some(custom) => Refusal {
             status: custom.status,
             content_type: custom.content_type,
@@ -99,7 +108,8 @@ pub fn refusal<Eng: Send + Sync + 'static>(
             body: Vec::new(),
             headers: Vec::new(),
         },
-    })
+    };
+    (Some(refusal), logged)
 }
 
 /// Whether `web_acl_id` names a WAFv2 web ACL by its ARN.

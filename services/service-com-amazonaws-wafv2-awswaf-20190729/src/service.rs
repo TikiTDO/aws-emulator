@@ -51,8 +51,14 @@
 //! [`sqli`] is the injection detection the SQL and cross-site-scripting statements
 //! inspect with. [`metrics`] is what that evaluation REPORTS to CloudWatch about the
 //! requests each dimension acted on, which is the other half of a `VisibilityConfig`.
+//! [`logs`] is what it DELIVERS about each request to the destination the web ACL's
+//! `LoggingConfiguration` names, which is the other channel a web ACL reports on itself
+//! through.
 
 pub mod edge;
+/// The log record a web ACL's `LoggingConfiguration` delivers about each request it
+/// decided, and the write of that record into the destination it names.
+pub mod logs;
 /// The `AWS/WAFV2` series the data plane publishes: the per-dimension counters a
 /// `VisibilityConfig$CloudWatchMetricsEnabled` asks WAF to send to CloudWatch.
 pub mod metrics;

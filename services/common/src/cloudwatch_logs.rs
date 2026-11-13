@@ -18,6 +18,12 @@
 //! the envelope its own API refuses with (the status, the error shape and which member the
 //! refusal is keyed by).
 //!
+//! Beside the NAME, this module holds the two things a service that WRITES into a group
+//! needs: the reading of a log group's own ARN, which is how a caller names the destination
+//! it is pointing a service at ([`log_group_of_arn`]), and the vended-logs write itself
+//! ([`delivered`]) — the one path a service delivering records on the account's behalf puts
+//! them in the group through.
+//!
 //! `service-com-amazonaws-mediapackage-mediapackage` still carries its own copy of this
 //! reading (`state::is_log_group_name`), inlined before this module existed and pinned by
 //! that service's own refusal suite; it is to be MIGRATED onto this one rather than copied
@@ -97,9 +103,217 @@ pub fn reserved_log_group_name_message() -> String {
     format!("logGroupName must not start with the string '{RESERVED_LOG_GROUP_NAME_PREFIX}'")
 }
 
+/// The suffix the ARN of a log group carries when it names the group TOGETHER with
+/// everything under it, which is the form `DescribeLogGroups` reports a group's `arn` in.
+const EVERYTHING_UNDER_THE_GROUP: &str = ":*";
+
+/// The resource type a log group's ARN names
+/// (`arn:<partition>:logs:<region>:<account>:log-group:<name>`).
+const LOG_GROUP_RESOURCE_TYPE: &str = "log-group";
+
+/// The NAME of the log group `arn` names, or `None` when it names anything else.
+///
+/// Several services take the ARN of a log group as the destination they are to write into
+/// — an access-log setting, a vended-logs destination, a web ACL's logging configuration —
+/// and both forms of that ARN name the same group: the group on its own, and the group
+/// with everything under it ([`EVERYTHING_UNDER_THE_GROUP`], which is how a client reads
+/// an ARN off `DescribeLogGroups`). What is left has to be a name CloudWatch Logs can hold
+/// ([`is_log_group_name`]), so a destination of another kind (an Amazon S3 bucket, a
+/// Firehose delivery stream) resolves no group at all and its caller reports the delivery
+/// as one it does not make rather than writing somewhere nobody named.
+#[must_use]
+pub fn log_group_of_arn(arn: &str) -> Option<&str> {
+    let resource = crate::arn::resource_id_of_type(arn, LOG_GROUP_RESOURCE_TYPE)?;
+    let name = resource
+        .strip_suffix(EVERYTHING_UNDER_THE_GROUP)
+        .unwrap_or(resource);
+    is_log_group_name(name).then_some(name)
+}
+
+/// Write one log event per entry of `records` into `log_group`, in the stream `log_stream`.
+///
+/// The VENDED-LOGS write: a service delivering records on the account's behalf — an API
+/// Gateway stage's access log, the record a WAFv2 web ACL logs about a request it decided —
+/// writes them here, once, so no two of them deliver differently. The group and the stream
+/// are created first, because a service was POINTED at that destination and provisions it,
+/// and a group or stream already there is the one it has been writing to; each record is one
+/// log event stamped with the instant it is delivered, which is what keeps it inside
+/// CloudWatch Logs' ingestion window.
+///
+/// The write goes over the in-process transport into the CloudWatch Logs this emulator
+/// mounts, so a delivered record and `GetLogEvents` / `FilterLogEvents` cannot disagree
+/// about it.
+///
+/// Delivery is BEST EFFORT, as it is for every vended-logs destination: a group the account
+/// has since deleted, or a write CloudWatch Logs refuses, loses the record and is reported
+/// in tracing rather than failing the request the caller has already answered. `true` once
+/// the records are in the group, `false` when they could not be written. Call it with NO
+/// state guard held — it awaits.
+pub async fn delivered(
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    log_group: &str,
+    log_stream: &str,
+    records: &[String],
+) -> bool {
+    if records.is_empty() {
+        return true;
+    }
+    let client = logs_client(ctx, region);
+    match client
+        .create_log_group()
+        .log_group_name(log_group)
+        .send()
+        .await
+    {
+        Ok(_) => {}
+        Err(error)
+            if error
+                .as_service_error()
+                .is_some_and(|service| service.is_resource_already_exists_exception()) => {}
+        Err(error) => {
+            ::tracing::warn!(
+                log_group = %log_group,
+                error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
+                "the vended-logs destination could not be created, so these records are not \
+                 delivered"
+            );
+            return false;
+        }
+    }
+    match client
+        .create_log_stream()
+        .log_group_name(log_group)
+        .log_stream_name(log_stream)
+        .send()
+        .await
+    {
+        Ok(_) => {}
+        Err(error)
+            if error
+                .as_service_error()
+                .is_some_and(|service| service.is_resource_already_exists_exception()) => {}
+        Err(error) => {
+            ::tracing::warn!(
+                log_group = %log_group,
+                log_stream = %log_stream,
+                error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
+                "the vended-logs stream could not be created, so these records are not \
+                 delivered"
+            );
+            return false;
+        }
+    }
+    let at = epoch_millis(::std::time::SystemTime::now());
+    let events: Vec<::aws_sdk_cloudwatchlogs::types::InputLogEvent> = records
+        .iter()
+        .filter_map(|record| {
+            ::aws_sdk_cloudwatchlogs::types::InputLogEvent::builder()
+                .timestamp(at)
+                .message(record)
+                .build()
+                .ok()
+        })
+        .collect();
+    let count = events.len();
+    if let Err(error) = client
+        .put_log_events()
+        .log_group_name(log_group)
+        .log_stream_name(log_stream)
+        .set_log_events(Some(events))
+        .send()
+        .await
+    {
+        ::tracing::warn!(
+            log_group = %log_group,
+            log_stream = %log_stream,
+            records = count,
+            error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
+            "these records could not be delivered to CloudWatch Logs"
+        );
+        return false;
+    }
+    true
+}
+
+/// A CloudWatch Logs client over the in-process callback into this same emulator.
+///
+/// The callback is the framework's documented seam for calling another emulated service: it
+/// routes in process, so no network client is configured here. `region` is the Region the
+/// delivering service's own records name, so a record lands where the destination's ARN says
+/// it does.
+fn logs_client(
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+) -> ::aws_sdk_cloudwatchlogs::Client {
+    let config = ::aws_sdk_cloudwatchlogs::Config::builder()
+        .behavior_version(::aws_sdk_cloudwatchlogs::config::BehaviorVersion::latest())
+        .region(::aws_sdk_cloudwatchlogs::config::Region::new(
+            region.to_string(),
+        ))
+        .endpoint_url(format!("https://logs.{region}.amazonaws.com"))
+        .credentials_provider(ctx.callback().aws_credentials_provider())
+        .http_client(ctx.callback().http_client())
+        // The transport is in-process: there is nothing to retry, time out or watch for a
+        // stalled stream, and each of those would need a sleep implementation this client is
+        // not given. The same goes for caching the identity: the credentials are handed over
+        // directly.
+        .retry_config(::aws_sdk_cloudwatchlogs::config::retry::RetryConfig::disabled())
+        .timeout_config(::aws_sdk_cloudwatchlogs::config::timeout::TimeoutConfig::disabled())
+        .identity_cache(::aws_sdk_cloudwatchlogs::config::IdentityCache::no_cache())
+        .stalled_stream_protection(
+            ::aws_sdk_cloudwatchlogs::config::StalledStreamProtectionConfig::disabled(),
+        )
+        .build();
+    ::aws_sdk_cloudwatchlogs::Client::from_conf(config)
+}
+
+/// `at` in milliseconds since the Unix epoch, which is the stamp a log event carries.
+///
+/// An instant before the epoch, which no log event can carry, clamps to the epoch rather
+/// than wrapping.
+fn epoch_millis(at: ::std::time::SystemTime) -> i64 {
+    at.duration_since(::std::time::SystemTime::UNIX_EPOCH)
+        .map(|since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_log_group_arn_resolves_in_both_published_forms_and_nothing_else_does() {
+        for (case, arn, expected) in [
+            (
+                "a log group",
+                "arn:aws:logs:us-east-1:000000000000:log-group:/vended/one",
+                Some("/vended/one"),
+            ),
+            (
+                "a log group with everything under it",
+                "arn:aws:logs:us-east-1:000000000000:log-group:aws-waf-logs-guard:*",
+                Some("aws-waf-logs-guard"),
+            ),
+            (
+                "a bucket, which names no log group",
+                "arn:aws:s3:::aws-waf-logs-guard",
+                None,
+            ),
+            ("not an arn at all", "aws-waf-logs-guard", None),
+            (
+                "a log group whose name no group may carry",
+                "arn:aws:logs:us-east-1:000000000000:log-group:has a space",
+                None,
+            ),
+        ] {
+            let got = log_group_of_arn(arn);
+            assert_eq!(
+                got, expected,
+                "case {case:?}: expected {expected:?} for {arn:?}, got {got:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_published_domain_is_admitted_and_nothing_else_is() {

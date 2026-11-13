@@ -62,6 +62,11 @@ service-com-amazonaws-cloudwatch-graniteserviceversion20100801 = { workspace = t
 # amount spells rather than through a binary float (`state::monetization_amount`).
 # The same crate the sibling dynamodb service reads a numeric attribute with.
 bigdecimal = "0.4"
+# `cloudwatch_logs`: the one reading of a log group's ARN this tree holds, which is how a
+# web ACL's logging destination naming a log group is resolved, and the in-process
+# CloudWatch Logs client the record of a decided request is delivered through
+# (`service::logs`).
+service-common = { path = "../common" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

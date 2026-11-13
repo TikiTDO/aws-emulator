@@ -442,7 +442,16 @@ impl<Eng: Send + Sync + 'static> ErasedOperation for BehindWebAcl<Eng> {
         ctx: &'r OperationContext<'r>,
     ) -> BoxFuture<'r, RtResponse> {
         Box::pin(async move {
-            if let Some(refused) = web_acl::refusal(&*self.engine, self.name, req) {
+            let (refused, logged) = web_acl::refusal(&*self.engine, self.name, req);
+            // What the web ACL LOGS about the request it has just decided, delivered to
+            // the destination its own `LoggingConfiguration` names: WAF records the
+            // request it inspected, so the record is delivered for a request it refused
+            // at the edge as much as for one it let through to the operation.
+            if let Some(logged) = logged.as_ref() {
+                ::service_com_amazonaws_wafv2_awswaf_20190729::service::logs::deliver(ctx, logged)
+                    .await;
+            }
+            if let Some(refused) = refused {
                 return refused;
             }
             self.operation.run(svc, req, ctx).await

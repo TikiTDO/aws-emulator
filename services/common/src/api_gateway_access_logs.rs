@@ -50,30 +50,16 @@ const CONTEXT_PREFIX: &str = "$context.";
 /// a line keeps its field count whatever the call did or did not carry.
 pub const UNRESOLVED_VALUE: &str = "-";
 
-/// The suffix the ARN of a log group carries when it names the group TOGETHER with
-/// everything under it, which is the form `DescribeLogGroups` reports a group's `arn` in.
-const EVERYTHING_UNDER_THE_GROUP: &str = ":*";
-
-/// The resource type a log group's ARN names
-/// (`arn:<partition>:logs:<region>:<account>:log-group:<name>`).
-const LOG_GROUP_RESOURCE_TYPE: &str = "log-group";
-
 /// The name of the log group an `accessLogSettings` `destinationArn` names, or `None` when
 /// it names anything else.
 ///
-/// Both forms of a log group's ARN name the same group — the group on its own and the group
-/// with everything under it ([`EVERYTHING_UNDER_THE_GROUP`], which is how a client reads an
-/// ARN off `DescribeLogGroups`) — so a stage carrying either logs into the one group. What
-/// is left has to be a log group NAME, which is the rule this crate already holds
-/// ([`crate::cloudwatch_logs::is_log_group_name`]): a destination of another kind (a Kinesis
-/// Data Firehose delivery stream) names no group at all.
+/// The reading is this crate's one reading of a log group's ARN
+/// ([`crate::cloudwatch_logs::log_group_of_arn`]): both forms name the same group, and a
+/// destination of another kind (a Kinesis Data Firehose delivery stream) names no group at
+/// all.
 #[must_use]
 pub fn destination_log_group(destination_arn: &str) -> Option<&str> {
-    let resource = crate::arn::resource_id_of_type(destination_arn, LOG_GROUP_RESOURCE_TYPE)?;
-    let name = resource
-        .strip_suffix(EVERYTHING_UNDER_THE_GROUP)
-        .unwrap_or(resource);
-    crate::cloudwatch_logs::is_log_group_name(name).then_some(name)
+    crate::cloudwatch_logs::log_group_of_arn(destination_arn)
 }
 
 /// `format` rendered against `values`, which are keyed by the member path a reference writes
@@ -125,14 +111,14 @@ fn is_member_path_character(c: char) -> bool {
 
 /// Write one access-log record into `log_group`, in the stream `log_stream`.
 ///
-/// The group and the stream are created first — API Gateway provisions the destination it
-/// was pointed at, and a group or stream that is already there is the one this stage has been
-/// writing to — and the record is ONE log event stamped with the instant it is delivered,
-/// which is what keeps it inside CloudWatch Logs' ingestion window.
+/// The one vended-logs write this crate holds
+/// ([`crate::cloudwatch_logs::delivered`]): the group and the stream are created
+/// first — API Gateway provisions the destination it was pointed at — and each record is one
+/// log event stamped with the instant it is delivered.
 ///
-/// `true` once the record is in the group. `false` when it could not be written, which is
-/// traced here and never fails the request the stage already answered. Call it with NO state
-/// guard held — it awaits.
+/// `true` once the records are in the group, `false` when they could not be written, which
+/// never fails the request the stage already answered. Call it with NO state guard held — it
+/// awaits.
 pub async fn delivered(
     ctx: &::smithy_server_runtime::OperationContext<'_>,
     region: &str,
@@ -140,124 +126,7 @@ pub async fn delivered(
     log_stream: &str,
     records: &[String],
 ) -> bool {
-    if records.is_empty() {
-        return true;
-    }
-    let client = logs_client(ctx, region);
-    match client
-        .create_log_group()
-        .log_group_name(log_group)
-        .send()
-        .await
-    {
-        Ok(_) => {}
-        Err(error)
-            if error
-                .as_service_error()
-                .is_some_and(|service| service.is_resource_already_exists_exception()) => {}
-        Err(error) => {
-            ::tracing::warn!(
-                log_group = %log_group,
-                error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
-                "the stage's log destination could not be created, so this record is not \
-                 delivered"
-            );
-            return false;
-        }
-    }
-    match client
-        .create_log_stream()
-        .log_group_name(log_group)
-        .log_stream_name(log_stream)
-        .send()
-        .await
-    {
-        Ok(_) => {}
-        Err(error)
-            if error
-                .as_service_error()
-                .is_some_and(|service| service.is_resource_already_exists_exception()) => {}
-        Err(error) => {
-            ::tracing::warn!(
-                log_group = %log_group,
-                log_stream = %log_stream,
-                error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
-                "the stage's log stream could not be created, so this record is not delivered"
-            );
-            return false;
-        }
-    }
-    let at = epoch_millis(::std::time::SystemTime::now());
-    let events: Vec<::aws_sdk_cloudwatchlogs::types::InputLogEvent> = records
-        .iter()
-        .filter_map(|record| {
-            ::aws_sdk_cloudwatchlogs::types::InputLogEvent::builder()
-                .timestamp(at)
-                .message(record)
-                .build()
-                .ok()
-        })
-        .collect();
-    let count = events.len();
-    if let Err(error) = client
-        .put_log_events()
-        .log_group_name(log_group)
-        .log_stream_name(log_stream)
-        .set_log_events(Some(events))
-        .send()
-        .await
-    {
-        ::tracing::warn!(
-            log_group = %log_group,
-            log_stream = %log_stream,
-            records = count,
-            error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
-            "the stage's records could not be delivered to CloudWatch Logs"
-        );
-        return false;
-    }
-    true
-}
-
-/// A CloudWatch Logs client over the in-process callback into this same emulator.
-///
-/// The callback is the framework's documented seam for calling another emulated service: it
-/// routes in process, so no network client is configured here. `region` is the Region the
-/// stage's own records name, so the record lands where the destination's ARN says it does.
-fn logs_client(
-    ctx: &::smithy_server_runtime::OperationContext<'_>,
-    region: &str,
-) -> ::aws_sdk_cloudwatchlogs::Client {
-    let config = ::aws_sdk_cloudwatchlogs::Config::builder()
-        .behavior_version(::aws_sdk_cloudwatchlogs::config::BehaviorVersion::latest())
-        .region(::aws_sdk_cloudwatchlogs::config::Region::new(
-            region.to_string(),
-        ))
-        .endpoint_url(format!("https://logs.{region}.amazonaws.com"))
-        .credentials_provider(ctx.callback().aws_credentials_provider())
-        .http_client(ctx.callback().http_client())
-        // The transport is in-process: there is nothing to retry, time out or watch for a
-        // stalled stream, and each of those would need a sleep implementation this client is
-        // not given. The same goes for caching the identity: the credentials are handed over
-        // directly.
-        .retry_config(::aws_sdk_cloudwatchlogs::config::retry::RetryConfig::disabled())
-        .timeout_config(::aws_sdk_cloudwatchlogs::config::timeout::TimeoutConfig::disabled())
-        .identity_cache(::aws_sdk_cloudwatchlogs::config::IdentityCache::no_cache())
-        .stalled_stream_protection(
-            ::aws_sdk_cloudwatchlogs::config::StalledStreamProtectionConfig::disabled(),
-        )
-        .build();
-    ::aws_sdk_cloudwatchlogs::Client::from_conf(config)
-}
-
-/// `at` in milliseconds since the Unix epoch, which is the stamp a log event carries.
-///
-/// An instant before the epoch, which no log event can carry, clamps to the epoch rather
-/// than wrapping.
-fn epoch_millis(at: ::std::time::SystemTime) -> i64 {
-    at.duration_since(::std::time::SystemTime::UNIX_EPOCH)
-        .map(|since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or_default()
+    crate::cloudwatch_logs::delivered(ctx, region, log_group, log_stream, records).await
 }
 
 #[cfg(test)]

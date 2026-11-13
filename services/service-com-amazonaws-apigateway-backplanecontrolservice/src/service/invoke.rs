@@ -283,6 +283,9 @@ use crate::state::{
 };
 
 use ::service_com_amazonaws_wafv2_awswaf_20190729::service::edge as waf_edge;
+// The record that same web ACL logs about the request, and the delivery of it: WAFv2
+// composes it, this plane hands it to the destination the configuration names.
+use ::service_com_amazonaws_wafv2_awswaf_20190729::service::logs as waf_logs;
 
 use super::mapping_template::{self, TemplateInputs};
 use super::resource_policy;
@@ -1432,7 +1435,15 @@ async fn serving<Eng: Send + Sync + 'static>(
     // which a request it blocks ever reaches. A stage with no web ACL associated is
     // served exactly as it was before web ACLs were read at all.
     let with_inserted_headers;
-    let req = match web_acl_decision(engine, &state, req) {
+    let (outcome, logged) = web_acl_decision(engine, &state, req);
+    // What the web ACL LOGS about the request it has just decided, delivered to the
+    // destination its own `LoggingConfiguration` names before the stage is reached: WAF
+    // records the request it inspected, so the record is delivered for a request it
+    // blocked at the edge as much as for one it let through to the api.
+    if let Some(logged) = logged.as_ref() {
+        waf_logs::deliver(ctx, logged).await;
+    }
+    let req = match outcome {
         EdgeOutcome::Refused(response) => return *response,
         EdgeOutcome::Unchanged => req,
         // An `AllowAction`'s (or a `CountAction`'s) `CustomRequestHandling` inserts
@@ -2121,7 +2132,8 @@ enum EdgeOutcome {
     Refused(Box<RtResponse>),
 }
 
-/// Apply the WAFv2 web ACL in front of the stage this request addresses.
+/// Apply the WAFv2 web ACL in front of the stage this request addresses, and answer what
+/// it decided beside what it LOGS about the request.
 ///
 /// A web ACL is bound to a stage by `AssociateWebACL` over the stage's own ARN, so the
 /// stage is resolved from THIS service's records, its ARN is built the one way this
@@ -2130,13 +2142,18 @@ enum EdgeOutcome {
 /// tree. A request addressing no stage of this account resolves no ARN and so no web
 /// ACL: it is refused by the api's own records further down.
 ///
+/// The record is WAFv2's too: this plane only DELIVERS it, because the write is a call
+/// made from the operation serving the request. `None` when the web ACL logs nothing
+/// about this request — a web ACL with no logging configuration, or a configuration whose
+/// filter drops the record.
+///
 /// The two stores are locked one after the other and never at the same time, and the
 /// wafv2 side locks nothing of this service's, so the two cannot deadlock.
 fn web_acl_decision<Eng: Send + Sync + 'static>(
     engine: &Eng,
     state: &::engine::ServiceState<crate::state::ComAmazonawsApigatewayBackplanecontrolserviceState>,
     req: &RtRequest,
-) -> EdgeOutcome {
+) -> (EdgeOutcome, Option<waf_logs::LoggedRecord>) {
     let addressed = Addressed::of_request(req);
     // The stage's ARN, and the invoke path WITHIN the api — which is the path AWS's
     // edge inspects, `/{stage}/{resource-path}`, whichever addressing the client
@@ -2144,13 +2161,13 @@ fn web_acl_decision<Eng: Send + Sync + 'static>(
     let (stage_arn, invoke_path) = {
         let store = state.lock();
         let Some(resolved) = resolve(&store, &addressed) else {
-            return EdgeOutcome::Unchanged;
+            return (EdgeOutcome::Unchanged, None);
         };
         let Some((stage_name, _)) = split_stage(resolved.invoke_path) else {
-            return EdgeOutcome::Unchanged;
+            return (EdgeOutcome::Unchanged, None);
         };
         if !resolved.api.stages.contains_key(stage_name) {
-            return EdgeOutcome::Unchanged;
+            return (EdgeOutcome::Unchanged, None);
         }
         (
             crate::state::stage_arn(
@@ -2179,13 +2196,14 @@ fn web_acl_decision<Eng: Send + Sync + 'static>(
     // of this service's, so the two cannot deadlock.
     let Some(decision) = waf_edge::decide(engine, &stage_arn, &inspected) else {
         // No web ACL in front of this stage.
-        return EdgeOutcome::Unchanged;
+        return (EdgeOutcome::Unchanged, None);
     };
+    let logged = decision.log_record.clone();
     if decision.action.is_allow() {
         if decision.inserted_headers.is_empty() {
-            return EdgeOutcome::Unchanged;
+            return (EdgeOutcome::Unchanged, logged);
         }
-        return EdgeOutcome::Allowed(decision.inserted_headers);
+        return (EdgeOutcome::Allowed(decision.inserted_headers), logged);
     }
     tracing::info!(
         stage_arn = %stage_arn,
@@ -2196,9 +2214,12 @@ fn web_acl_decision<Eng: Send + Sync + 'static>(
     // the status, the headers and the body are the web ACL's own, and the api's gateway
     // responses are not consulted, because API Gateway never produced the response.
     if let Some(custom) = decision.custom_response {
-        return EdgeOutcome::Refused(Box::new(edge_response(custom)));
+        return (
+            EdgeOutcome::Refused(Box::new(edge_response(custom))),
+            logged,
+        );
     }
-    match decision.action {
+    let refused = match decision.action {
         waf_edge::EdgeAction::Block => {
             // Answered through the api's own `WAF_FILTERED` gateway response, so a
             // developer's customization of that type reaches the blocked caller.
@@ -2216,7 +2237,8 @@ fn web_acl_decision<Eng: Send + Sync + 'static>(
             JSON_CONTENT_TYPE,
             Vec::new(),
         ))),
-    }
+    };
+    (refused, logged)
 }
 
 /// The request as WAFv2 inspects it: every component a `FieldToMatch` can name.

@@ -722,13 +722,21 @@ pub async fn serve<Eng: Send + Sync + 'static>(
     // The web ACL `AssociateWebACL` bound to this load balancer, which decides the request
     // BEFORE the listener's own action — the load balancer's ARN is the one the binding was
     // written under.
-    let served = match super::web_acl::decision(
+    let (decided, logged) = super::web_acl::decision(
         engine,
         &load_balancer_arn,
         req,
         &request.path,
         &request.query,
-    ) {
+    );
+    // What that web ACL LOGS about the request it has just decided, delivered to the
+    // destination its own `LoggingConfiguration` names: WAF records the request it
+    // inspected, so the record is delivered for a request it refused at the edge as much
+    // as for one it let through to the listener.
+    if let Some(logged) = logged.as_ref() {
+        ::service_com_amazonaws_wafv2_awswaf_20190729::service::logs::deliver(ctx, logged).await;
+    }
+    let served = match decided {
         super::web_acl::Decision::Refused(answer) => Served::at_the_edge(answer),
         decided => {
             if let super::web_acl::Decision::Allowed(inserted) = decided {

@@ -46,6 +46,11 @@ mod stage_trace_context;
 mod stage_trace_sampling_decision;
 #[path = "all/stage_web_acl_edge.rs"]
 mod stage_web_acl_edge;
+// What that same web ACL LOGS about the requests it decided: the record its
+// `LoggingConfiguration` delivers to a CloudWatch Logs log group, with the declared fields
+// redacted.
+#[path = "all/stage_web_acl_logging.rs"]
+mod stage_web_acl_logging;
 #[path = "all/stage_web_acl_association_report.rs"]
 mod stage_web_acl_association_report;
 #[path = "all/aws_service_integration.rs"]

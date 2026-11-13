@@ -14,7 +14,10 @@
 //! bookkeeping WAF reports about its own data plane — the sample
 //! `GetSampledRequests` draws from, and the rate counts
 //! `GetRateBasedStatementManagedKeys` reads the currently rate-limited keys out of.
-//! Neither can be computed without recording the requests already evaluated.
+//! Neither can be computed without recording the requests already evaluated. It also
+//! REPORTS the request where the web ACL's own configuration says to: the counters of
+//! every dimension that acted ([`super::metrics`]) and the log record its
+//! `LoggingConfiguration` delivers ([`super::logs`]).
 //!
 //! # The order a web ACL decides in
 //!
@@ -331,8 +334,8 @@ pub enum EdgeAction {
 
 impl EdgeAction {
     /// The `ActionValue` a sample reports this action under
-    /// (`SampledHTTPRequest$Action`).
-    fn action_value(self) -> &'static str {
+    /// (`SampledHTTPRequest$Action`), and a log record its `action` by.
+    pub fn action_value(self) -> &'static str {
         match self {
             Self::Allow => "ALLOW",
             Self::Block => "BLOCK",
@@ -398,6 +401,14 @@ pub struct EdgeDecision {
     pub rule_name_within_rule_group: Option<String>,
     /// The fully qualified labels the request carries once evaluation finished.
     pub labels: Vec<String>,
+    /// What the web ACL's `LoggingConfiguration` logs about this request, and where it
+    /// goes ([`super::logs`]); `None` when the web ACL logs nothing about it.
+    ///
+    /// The DELIVERY is the protected resource's own service's to make, once it has
+    /// answered the request: `super::logs::deliver` writes it, over the in-process call
+    /// that write is. A record left undelivered is a request a configured web ACL
+    /// enforced without logging, which is what this member exists to prevent.
+    pub log_record: Option<super::logs::LoggedRecord>,
 }
 
 /// One request a web ACL evaluated, as `GetSampledRequests` reports it.
@@ -511,12 +522,13 @@ fn group_rule_name(group: &[&str], rule_name: &str) -> String {
 /// both, so no protected resource's service can serve traffic that is enforced but
 /// never reported.
 ///
-/// FOUR phases, and no two stores are ever locked at once. Inspecting a request is work
+/// FIVE phases, and no two stores are ever locked at once. Inspecting a request is work
 /// the web ACL's stored rules decide the cost of — a regular expression to compile, a
 /// body to scan — so it must not run while every other request to this service waits on
 /// the store: the records the evaluation needs are copied out under one shared read, the
 /// evaluation runs with the lock released, the bookkeeping it produced is written under a
-/// second, exclusive one, and the counters are published once that lock is gone.
+/// second, exclusive one, and the counters and the log record are published once that lock
+/// is gone.
 pub fn decide<Eng: Send + Sync + 'static>(
     engine: &Eng,
     resource_arn: &str,
@@ -525,13 +537,13 @@ pub fn decide<Eng: Send + Sync + 'static>(
     let state: ::engine::ServiceState<ComAmazonawsWafv2Awswaf20190729State> =
         crate::state::service_state(engine)?;
     // Which web ACL is in front of the resource, read under its own shared lock and
-    // released again: the evaluation below takes the lock itself, in the four phases its
+    // released again: the evaluation below takes the lock itself, in the five phases its
     // own documentation describes.
     let web_acl_arn = {
         let store = state.lock();
         store.web_acl_associations.get(resource_arn)?.clone()
     };
-    decide_against(engine, &web_acl_arn, request)
+    decided(engine, &web_acl_arn, Some(resource_arn), request)
 }
 
 /// Decide one request against the web ACL `web_acl_arn` names, whichever resource put it
@@ -550,14 +562,30 @@ pub fn decide_against<Eng: Send + Sync + 'static>(
     web_acl_arn: &str,
     request: &InspectedRequest,
 ) -> Option<EdgeDecision> {
+    decided(engine, web_acl_arn, None, request)
+}
+
+/// The evaluation both entry points perform, in the phases [`decide`] documents.
+///
+/// `protected_resource` is the ARN the web ACL was ASSOCIATED with, where an association
+/// is what put it in front of the resource; `None` for a resource that names its own web
+/// ACL. It decides nothing about the request — only what the log record says about where
+/// the request arrived ([`super::logs`]).
+fn decided<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    web_acl_arn: &str,
+    protected_resource: Option<&str>,
+    request: &InspectedRequest,
+) -> Option<EdgeDecision> {
     let state: ::engine::ServiceState<ComAmazonawsWafv2Awswaf20190729State> =
         crate::state::service_state(engine)?;
-    // PHASE 1, under a shared read: the web ACL, the entities its rules reference, and
-    // the rate counts already recorded for it.
-    let (entry, catalogue, counts): (
+    // PHASE 1, under a shared read: the web ACL, the entities its rules reference, the
+    // rate counts already recorded for it, and the logging configuration in front of it.
+    let (entry, catalogue, counts, logging): (
         WebAclEntry,
         Catalogue,
         HashMap<RateInstanceKey, Vec<RateBucket>>,
+        Option<LoggingConfiguration>,
     ) = {
         let store = state.lock();
         let entry = store.web_acl_by_arn(web_acl_arn)?.clone();
@@ -574,7 +602,11 @@ pub fn decide_against<Eng: Send + Sync + 'static>(
             })
             .map(|(key, buckets)| (key.clone(), buckets.clone()))
             .collect();
-        (entry, catalogue, counts)
+        // The customer-owned configuration, which is the one `PutLoggingConfiguration`
+        // enables "to start logging from a web ACL"; a configuration of another
+        // `LogScope` belongs to the service that owns that scope.
+        let logging = store.logging_configuration(web_acl_arn, None).cloned();
+        (entry, catalogue, counts, logging)
     };
     let now = crate::state::now_millis();
 
@@ -621,6 +653,20 @@ pub fn decide_against<Eng: Send + Sync + 'static>(
         &entry.web_acl.name,
         &super::metrics::reported_region(&entry.scope, &entry.web_acl.arn),
         &recorded.acted,
+        now,
+    );
+
+    // PHASE 5, under the same discipline: what the web ACL's logging configuration logs
+    // about this request ([`super::logs`]). The record is composed here, by the
+    // evaluation that knows what the web ACL did, and carried on the decision for the
+    // protected resource's own service to deliver once it has answered the request.
+    let mut decision = decision;
+    decision.log_record = super::logs::logged(
+        &entry,
+        logging.as_ref(),
+        protected_resource,
+        request,
+        &decision,
         now,
     );
     Some(decision)
@@ -1006,6 +1052,10 @@ impl Evaluation<'_> {
                         rule_name: Some(rule.name.clone()),
                         rule_name_within_rule_group: group.inner_rule,
                         labels: cx.labels,
+                        // Composed once the evaluation has settled, by the entry point
+                        // that read the web ACL's logging configuration
+                        // ([`decided`]).
+                        log_record: None,
                     },
                     recorded,
                     counted,
@@ -1052,6 +1102,8 @@ impl Evaluation<'_> {
                 rule_name: None,
                 rule_name_within_rule_group: None,
                 labels: cx.labels,
+                // See the sibling construction above.
+                log_record: None,
             },
             recorded,
             counted,

@@ -30,6 +30,7 @@
 
 use aws_smithy_runtime_api::http::Request as RtRequest;
 use service_com_amazonaws_wafv2_awswaf_20190729::service::edge as waf_edge;
+use service_com_amazonaws_wafv2_awswaf_20190729::service::logs as waf_logs;
 
 /// The status a terminating action with no `CustomResponse` of its own is answered under
 /// when the action names none — `EdgeAction::default_status` answers one for every
@@ -66,7 +67,12 @@ pub struct EdgeAnswer {
 
 /// What the web ACL associated with `load_balancer_arn` decides about `req`, whose path
 /// within the load balancer's own endpoint is `uri_path` and whose query string (without
-/// its leading `?`) is `query_string`.
+/// its leading `?`) is `query_string`, beside the record that web ACL's own
+/// `LoggingConfiguration` logs about the request.
+///
+/// The record is WAFv2's ([`waf_logs`]); this plane only DELIVERS it, with
+/// `waf_logs::deliver`, because the write is a call made from the operation serving the
+/// request. `None` when the web ACL logs nothing about this request.
 ///
 /// The two stores are locked one after the other and never at the same time, and the
 /// wafv2 side locks nothing of this service's, so the two cannot deadlock: the caller
@@ -80,7 +86,7 @@ pub fn decision<Eng: Send + Sync + 'static>(
     req: &RtRequest,
     uri_path: &str,
     query_string: &str,
-) -> Decision {
+) -> (Decision, Option<waf_logs::LoggedRecord>) {
     // The body as it arrived, which is what a rule inspecting `FieldToMatch$Body` reads.
     // A request this plane serves is one the front door handed over whole, so its body is in
     // memory; a body that cannot be read as bytes is reported rather than quietly inspected
@@ -100,13 +106,14 @@ pub fn decision<Eng: Send + Sync + 'static>(
     let Some(decided) = waf_edge::decide(engine, load_balancer_arn, &inspected) else {
         // No web ACL is in front of this load balancer — or the wafv2 service is not
         // mounted in this process at all, so no binding can exist.
-        return Decision::Unchanged;
+        return (Decision::Unchanged, None);
     };
+    let logged = decided.log_record.clone();
     if decided.action.is_allow() {
         if decided.inserted_headers.is_empty() {
-            return Decision::Unchanged;
+            return (Decision::Unchanged, logged);
         }
-        return Decision::Allowed(decided.inserted_headers);
+        return (Decision::Allowed(decided.inserted_headers), logged);
     }
     tracing::info!(
         load_balancer = %load_balancer_arn,
@@ -116,7 +123,7 @@ pub fn decision<Eng: Send + Sync + 'static>(
     // A terminating action that configures its own `CustomResponse` is served BY WAF: the
     // status, the headers and the body are the web ACL's own, and the listener's actions
     // are not consulted, because the load balancer never produced the response.
-    Decision::Refused(match decided.custom_response {
+    let refused = Decision::Refused(match decided.custom_response {
         Some(custom) => EdgeAnswer {
             status: custom.status,
             content_type: custom.content_type,
@@ -132,5 +139,6 @@ pub fn decision<Eng: Send + Sync + 'static>(
             body: Vec::new(),
             headers: Vec::new(),
         },
-    })
+    });
+    (refused, logged)
 }

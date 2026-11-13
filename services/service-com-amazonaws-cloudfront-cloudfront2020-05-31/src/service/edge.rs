@@ -952,17 +952,24 @@ pub async fn serve<Eng: Send + Sync + 'static>(
     // origin request made — while the answer is still counted into the distribution's own
     // series, the edge having served it. Asked with THIS service's store released, since
     // the decision locks the WAFv2 service's own ([`super::web_acl`]).
-    let (response, served_from, origin_latency) = match served_for
-        .as_ref()
-        .and_then(|served| {
-            super::web_acl::refusal(
-                engine,
-                &served.web_acl_id,
-                req,
-                &served.viewer_path,
-                &served.query,
-            )
-        }) {
+    let (edge_refusal, logged) = match served_for.as_ref() {
+        Some(served) => super::web_acl::refusal(
+            engine,
+            &served.web_acl_id,
+            req,
+            &served.viewer_path,
+            &served.query,
+        ),
+        None => (None, None),
+    };
+    // What that web ACL LOGS about the request it has just decided, delivered to the
+    // destination its own `LoggingConfiguration` names: WAF records the request it
+    // inspected, so the record is delivered for a request it refused at the edge as much
+    // as for one it let through to the cache.
+    if let Some(logged) = logged.as_ref() {
+        ::service_com_amazonaws_wafv2_awswaf_20190729::service::logs::deliver(ctx, logged).await;
+    }
+    let (response, served_from, origin_latency) = match edge_refusal {
         Some(refusal) => (
             refused_by_web_acl(refusal, &cf_id),
             edge_metrics::ServedFrom::CloudFront,

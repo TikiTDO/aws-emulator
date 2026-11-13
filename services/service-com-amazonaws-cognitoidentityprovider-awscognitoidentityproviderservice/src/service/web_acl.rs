@@ -41,6 +41,7 @@ use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse,
 use aws_smithy_schema_server::protocol::ServerProtocol;
 use aws_smithy_types::body::SdkBody;
 use service_com_amazonaws_wafv2_awswaf_20190729::service::edge as waf_edge;
+use service_com_amazonaws_wafv2_awswaf_20190729::service::logs as waf_logs;
 
 use crate::ops::types::{ForbiddenException, SCHEMA_FORBIDDEN_EXCEPTION};
 use crate::state::ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState as PoolStore;
@@ -124,7 +125,12 @@ pub fn governs(operation: &str) -> bool {
 /// The response the web ACL in front of the user pool `req` addresses serves for it, or
 /// `None` when the request goes on to the operation — which is every request of an
 /// operation no web ACL decides, every request addressing a pool with no web ACL in
-/// front of it, and every request the web ACL allowed.
+/// front of it, and every request the web ACL allowed — beside the record that web ACL's
+/// own `LoggingConfiguration` logs about the request.
+///
+/// The record is WAFv2's ([`waf_logs`]); this service only DELIVERS it, with
+/// `waf_logs::deliver`, because the write is a call made from the operation serving the
+/// request. `None` when the web ACL logs nothing about this request.
 ///
 /// The two stores are locked one after the other and never at the same time, and the
 /// wafv2 side locks nothing of this service's, so the two cannot deadlock.
@@ -132,13 +138,27 @@ pub fn refusal<Eng: Send + Sync + 'static>(
     engine: &Eng,
     operation: &str,
     req: &RtRequest,
-) -> Option<RtResponse> {
+) -> (Option<RtResponse>, Option<waf_logs::LoggedRecord>) {
     if !governs(operation) {
-        return None;
+        return (None, None);
     }
     // The pool the request addresses is named in the request's own body, which this
     // service's records resolve to a pool. A body this protocol cannot read at all
     // names no pool: the operation owes that request its own refusal.
+    let Some(decided) = decided(engine, req) else {
+        return (None, None);
+    };
+    decided
+}
+
+/// [`refusal`]'s body for an operation a web ACL DOES decide, written as a function that
+/// answers `None` for every request this module cannot place — a body that is not JSON, a
+/// token or an app client this emulator never issued, a pool that no longer exists — so
+/// each of those stays one early answer rather than a pair repeated at every step.
+fn decided<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    req: &RtRequest,
+) -> Option<(Option<RtResponse>, Option<waf_logs::LoggedRecord>)> {
     let submitted_body = req.body().bytes()?.to_vec();
     let submitted: serde_json::Value = serde_json::from_slice(&submitted_body).ok()?;
     let pool_arn = {
@@ -156,28 +176,28 @@ pub fn refusal<Eng: Send + Sync + 'static>(
     // when the wafv2 service is not mounted in this process at all, so no binding can
     // exist. This service's store is not held across the call.
     let decision = waf_edge::decide(engine, &pool_arn, &inspected_request(req, submitted_body))?;
+    let logged = decision.log_record.clone();
     tracing::debug!(
         user_pool_arn = %pool_arn,
-        operation = %operation,
         rule = decision.rule_name.as_deref().unwrap_or("<default action>"),
         "the web acl in front of this user pool decided this request"
     );
     if decision.action.is_allow() {
-        return None;
+        return Some((None, logged));
     }
     tracing::info!(
         user_pool_arn = %pool_arn,
-        operation = %operation,
         rule = decision.rule_name.as_deref().unwrap_or("<default action>"),
         "the web acl in front of this user pool does not let the request through"
     );
     // A terminating action that configures its own `CustomResponse` is served BY WAF:
     // the status, the headers and the body are the web ACL's own, and this service's
     // error envelope is not used, because the pool never produced the response.
-    match decision.custom_response {
-        Some(custom) => Some(edge_response(custom)),
-        None => Some(forbidden_response()),
-    }
+    let refused = match decision.custom_response {
+        Some(custom) => edge_response(custom),
+        None => forbidden_response(),
+    };
+    Some((Some(refused), logged))
 }
 
 /// The ARN of the user pool `submitted` addresses, or `None` when it addresses none
