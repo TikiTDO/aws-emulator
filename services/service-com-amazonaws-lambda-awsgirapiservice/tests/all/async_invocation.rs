@@ -215,6 +215,9 @@ fn hold_undelivered_event(engine: &Arc<engine::InMemoryEngine>, name: &str, payl
         received: "2026-01-01T00:00:00.000Z".to_string(),
         attempt_due: SystemTime::now() - Duration::from_secs(1),
         attempts: 0,
+        // Nothing is delivering it: this is the entry a process with no asynchronous
+        // runtime to deliver on leaves behind, which is what the clock settles.
+        attempt_pending: false,
         outcome: AsyncInvocationOutcome::Queued,
     });
 }

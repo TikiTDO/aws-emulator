@@ -39,7 +39,11 @@ use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
 use serde_json::{json, Value};
+use service_com_amazonaws_lambda_awsgirapiservice::state::execution::{
+    ABANDON_GRACE, HOST_WAIT_CEILING, INIT_PHASE_LIMIT, PERMIT_WAIT,
+};
 use service_com_amazonaws_lambda_awsgirapiservice::state::ACTIVATION_DELAY;
+use service_com_amazonaws_secretsmanager_secretsmanager::state::rotation::ROTATION_STEPS;
 use smithy_server_runtime::MultiServiceRouter;
 
 /// The Region every request in this suite signs for.
@@ -59,7 +63,20 @@ const HANDLER: &str = "lambda_function.lambda_handler";
 
 /// How long this suite waits for a rotation to finish before giving up on it, and how often
 /// it looks while waiting.
-const ROTATION_WAIT: Duration = Duration::from_secs(20);
+///
+/// The ceiling is DERIVED rather than picked: a rotation finishes only once Secrets Manager
+/// has invoked the rotation function once per documented step, and Lambda may spend its own
+/// published bounds on each of those invocations — the wait for the capacity to run in, the
+/// initialization of the execution environment, the longest the run itself is waited for and
+/// the grace past that
+/// (`service_com_amazonaws_lambda_awsgirapiservice::state::execution`). A ceiling below that
+/// worth of work is a bet on how fast the host runs; this one is above it, and bounds the
+/// suite only so it cannot hang.
+const ROTATION_WAIT: Duration = PERMIT_WAIT
+    .saturating_add(INIT_PHASE_LIMIT)
+    .saturating_add(HOST_WAIT_CEILING)
+    .saturating_add(ABANDON_GRACE)
+    .saturating_mul(ROTATION_STEPS.len() as u32);
 const LOOK_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Secrets Manager and Lambda over ONE shared engine.

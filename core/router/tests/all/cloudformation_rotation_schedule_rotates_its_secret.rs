@@ -29,6 +29,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use serde_json::{json, Value};
+use service_com_amazonaws_lambda_awsgirapiservice::state::execution::{
+    ABANDON_GRACE, HOST_WAIT_CEILING, INIT_PHASE_LIMIT, PERMIT_WAIT,
+};
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::query_wire::{elements, form_encode, opt_element, outputs_of};
@@ -64,13 +67,29 @@ const STEPS_TAG: &str = "RotationSteps";
 const FUNCTION_TIMEOUT: u64 = 30;
 
 /// How long this suite waits for a condition another service owes, and how often it looks
-/// while waiting. Generous: every wait here is for a CONDITION, and the budget is bounded
-/// only so a suite cannot hang — a whole rotation runs four interpreted invocations behind
-/// each wait, so the budget has to hold on a host that is busy building and running the rest
-/// of the workspace rather than only on an idle one.
+/// while waiting.
+///
+/// The ceiling is DERIVED rather than picked: a hand-picked one is a bet on how fast the host
+/// runs, and every condition here is owed only once a chain of invocations of the rotation
+/// function has happened — [`ROTATION_STEPS`] of them per rotation, each of which Lambda
+/// itself may spend its published bounds on (waiting for the capacity to run in, initialising
+/// the execution environment the handler is called in, the handler's own run and the grace a
+/// run past its budget is given). So the ceiling is that worst case for the whole chain —
+/// which holds on a host that is busy building and running the rest of the workspace rather
+/// than only on an idle one — and it bounds the suite only so it cannot hang.
 const POLL: Duration = Duration::from_millis(50);
-/// See [`POLL`].
-const POLLS: usize = 4_800;
+/// See [`POLL`]: the ceiling in whole polls, which is what the loops count.
+const POLLS: usize = INVOCATION_CHAIN_CEILING.as_millis() as usize / POLL.as_millis() as usize;
+
+/// What Lambda allows ONE invocation of the rotation function, summed over the chain of them
+/// a rotation drives: its wait for capacity, the initialization of the execution environment,
+/// the longest the run itself is waited for and the grace past that
+/// (`service_com_amazonaws_lambda_awsgirapiservice::state::execution`).
+const INVOCATION_CHAIN_CEILING: Duration = PERMIT_WAIT
+    .saturating_add(INIT_PHASE_LIMIT)
+    .saturating_add(HOST_WAIT_CEILING)
+    .saturating_add(ABANDON_GRACE)
+    .saturating_mul(ROTATION_STEPS.len() as u32);
 
 /// The emulator as it is ASSEMBLED, on one engine (`aws_emulator_router::build_router`): the
 /// rotation function's own SDK calls are dispatched back into this same router, so the secret

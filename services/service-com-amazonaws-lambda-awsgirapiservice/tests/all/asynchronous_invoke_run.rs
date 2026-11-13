@@ -23,9 +23,11 @@
 //!
 //! Every wait here is for a CONDITION, looked at again until it holds or a generous deadline
 //! passes — the function reporting `Active`, the delivery attempt having settled — and every
-//! limit no row is about (the `Timeout` a handler is given, the ceiling on a row's own wait)
-//! is set far above what the work takes. So how fast the host runs decides nothing a row
-//! asserts: a slow host is waited for, and only a delivery that never arrives fails a row.
+//! limit no row is about is far above what the work takes: the `Timeout` a handler is given,
+//! and the ceiling on a row's own wait, which is DERIVED from the bounds the emulator itself
+//! puts on a delivery attempt rather than picked by hand, so it cannot be tighter than the
+//! work it waits for. So how fast the host runs decides nothing a row asserts: a slow host is
+//! waited for, and only a delivery that never arrives fails a row.
 
 use std::io::Write as _;
 use std::sync::Arc;
@@ -33,9 +35,12 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde_json::json;
-use service_com_amazonaws_lambda_awsgirapiservice::state::execution::FUNCTION_ERROR_UNHANDLED;
+use service_com_amazonaws_lambda_awsgirapiservice::state::execution::{
+    ABANDON_GRACE, FUNCTION_ERROR_UNHANDLED, HOST_WAIT_CEILING, INIT_PHASE_LIMIT, PERMIT_WAIT,
+};
 use service_com_amazonaws_lambda_awsgirapiservice::state::{
     AsyncInvocationOutcome, AsyncInvocationRecord, ComAmazonawsLambdaAwsgirapiserviceState,
+    ASYNC_DELIVERY_DELAY, ASYNC_RETRY_DELAY, MAX_ASYNC_DELIVERY_ATTEMPTS,
 };
 use service_com_amazonaws_lambda_awsgirapiservice::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
@@ -58,15 +63,32 @@ const AUTHORIZATION: &str = "AWS4-HMAC-SHA256 \
 /// A well-formed execution role ARN, satisfying the model's `RoleArn` pattern.
 const ROLE: &str = "arn:aws:iam::000000000000:role/service-role/lambda-exec";
 
+/// The longest ONE delivery attempt can take, which is the sum of the spans the EMULATOR
+/// itself bounds an attempt by: the waits for the two pools a run claims (the mounts it
+/// inflates and its share of the run memory, each bounded by `PERMIT_WAIT`), the
+/// initialization of the execution environment the handler is called in and the handler's
+/// own run, plus the grace a run past its budget is still waited for.
+const ONE_ATTEMPT_CEILING: Duration = PERMIT_WAIT
+    .saturating_mul(2)
+    .saturating_add(INIT_PHASE_LIMIT)
+    .saturating_add(HOST_WAIT_CEILING)
+    .saturating_add(ABANDON_GRACE);
+
 /// How long a row waits for the delivery attempt it accepted to settle.
 ///
-/// A ceiling, never a span anything here counts on: an attempt that errored is made again
-/// after a wait of its own, so a row whose handler raises settles only once the attempts the
-/// retry policy has for it are spent — each of them an engine built, a package loaded and a
-/// handler run. So this is far longer than those attempts take on any host, which is what
-/// keeps the host's speed out of the outcome: only a delivery that never settles at all
-/// fails a row here.
-const DELIVERY_BUDGET: Duration = Duration::from_secs(300);
+/// A ceiling, never a span anything here counts on — and not a span picked by hand either,
+/// because a hand-picked one is a bet on how fast the host runs: it is DERIVED from the
+/// bounds the emulator puts on the very work this waits for, so it cannot be tighter than
+/// that work's own worst case. An attempt that errored is made again after a wait of its own,
+/// so a row whose handler raises settles only once the attempts the retry policy has for it
+/// are spent, each of them bounded by [`ONE_ATTEMPT_CEILING`]; the extra round is for a host
+/// whose capacity an attempt has to wait for before it can even start. Only a delivery that
+/// never settles at all fails a row here.
+const DELIVERY_BUDGET: Duration = ASYNC_DELIVERY_DELAY.saturating_add(
+    ONE_ATTEMPT_CEILING
+        .saturating_add(ASYNC_RETRY_DELAY)
+        .saturating_mul(MAX_ASYNC_DELIVERY_ATTEMPTS + 1),
+);
 
 /// The `Timeout` every function below is created with: the longest a handler of it may run.
 ///
@@ -81,7 +103,7 @@ const GENEROUS_TIMEOUT_SECONDS: u32 = 300;
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// The python package's handler, as `Handler` names it (`module.attribute`).
-const PYTHON_HANDLER: &str = "lambda_function.lambda_handler";
+pub(crate) const PYTHON_HANDLER: &str = "lambda_function.lambda_handler";
 
 /// The node package's handler, as `Handler` names it (`module.export`).
 const NODE_HANDLER: &str = "index.handler";
@@ -89,7 +111,7 @@ const NODE_HANDLER: &str = "index.handler";
 /// A python handler that returns what it was handed, and raises exactly when the event asks
 /// it to — so the outcome recorded for a delivery says whether the guest ran and which event
 /// it ran on.
-const PYTHON_SOURCE: &str = "def lambda_handler(event, context):\n\
+pub(crate) const PYTHON_SOURCE: &str = "def lambda_handler(event, context):\n\
                              \x20   if isinstance(event, dict) and event.get('fail'):\n\
                              \x20       raise RuntimeError('the event asked this handler to fail')\n\
                              \x20   return {'received': event}\n";
@@ -103,19 +125,19 @@ const NODE_SOURCE: &str = "exports.handler = async (event) => {\n\
                            };\n";
 
 /// What a dispatched request answered.
-struct Answer {
-    status: u16,
+pub(crate) struct Answer {
+    pub(crate) status: u16,
     body: bytes::Bytes,
 }
 
 impl Answer {
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).to_string()
     }
 }
 
 /// One service mounted on its own engine, reached the way the production router reaches it.
-fn router_on(engine: &Arc<engine::InMemoryEngine>) -> MultiServiceRouter {
+pub(crate) fn router_on(engine: &Arc<engine::InMemoryEngine>) -> MultiServiceRouter {
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
     router.register_service(EmulatedService::new(Arc::clone(engine)));
@@ -123,7 +145,7 @@ fn router_on(engine: &Arc<engine::InMemoryEngine>) -> MultiServiceRouter {
 }
 
 /// Dispatch one request, with the headers `headers` names.
-async fn call(
+pub(crate) async fn call(
     router: &MultiServiceRouter,
     method: &str,
     uri: &str,
@@ -168,7 +190,7 @@ fn package(name: &str, source: &str) -> Vec<u8> {
 
 /// Create a function whose code is `source`, publish version 1, and point the alias `live`
 /// at it, so a row can address the unpublished version, a published one or an alias.
-async fn create_function(
+pub(crate) async fn create_function(
     router: &MultiServiceRouter,
     name: &str,
     runtime: &str,
@@ -227,7 +249,7 @@ async fn create_function(
 
 /// How the invocation this row accepts is submitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Accept {
+pub(crate) enum Accept {
     /// `Invoke` with `InvocationType: Event`.
     InvokeEvent,
     /// `InvokeAsync`, whose only invocation type is the asynchronous one.
@@ -236,7 +258,7 @@ enum Accept {
 
 /// Submit one asynchronous invocation of `reference` carrying `event`, the way `accept`
 /// names, and answer what the accepting call reported.
-async fn accept_invocation(
+pub(crate) async fn accept_invocation(
     router: &MultiServiceRouter,
     accept: Accept,
     reference: &str,
@@ -268,7 +290,7 @@ async fn accept_invocation(
 
 /// Every event this function holds, in queue order, read out of the service's own state
 /// because no modelled operation reports an accepted asynchronous invocation.
-fn held(engine: &Arc<engine::InMemoryEngine>, name: &str) -> Vec<AsyncInvocationRecord> {
+pub(crate) fn held(engine: &Arc<engine::InMemoryEngine>, name: &str) -> Vec<AsyncInvocationRecord> {
     let state = engine.state::<ComAmazonawsLambdaAwsgirapiserviceState>();
     let store = state.lock();
     store
@@ -279,7 +301,7 @@ fn held(engine: &Arc<engine::InMemoryEngine>, name: &str) -> Vec<AsyncInvocation
 }
 
 /// The newest event held for `name`, waited for until its delivery attempt has settled.
-async fn settled_newest(
+pub(crate) async fn settled_newest(
     engine: &Arc<engine::InMemoryEngine>,
     case: &str,
     name: &str,

@@ -184,7 +184,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             outcome = "success",
             "reported the raw content of an in-transit message"
         );
-
         Ok(GetRawMessageContentOutput {
             message_content: content,
         })

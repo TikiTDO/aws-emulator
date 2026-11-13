@@ -201,14 +201,18 @@ impl FunctionRecord {
             self.last_update_due = None;
         }
         // The same rule for the asynchronous event queue: a queued event whose delivery
-        // attempt the clock has already made due and which NOTHING claimed has had no
-        // attempt at all, so it was never executed. The outcome would have been owed at the
-        // same instant even if nobody had called. An event a delivery attempt did claim is
-        // left alone: that attempt records what the run came to
-        // ([`super::async_invocation::deliver`]), and the clock owes nothing about a run
+        // attempt the clock has already made due and which NO ATTEMPT IS PENDING for has had
+        // no attempt at all, so it was never executed. The outcome would have been owed at
+        // the same instant even if nobody had called. An event an attempt is pending for is
+        // left alone — whether that attempt has claimed the entry yet
+        // ([`AsyncInvocationOutcome::Delivering`]) or is still to be made, including one a
+        // throttle put back on the queue — because the attempt records what the run came to
+        // ([`super::async_invocation::deliver`]) and the clock owes nothing about a delivery
         // that is under way.
         for invocation in &mut self.async_invocations {
-            if invocation.outcome == AsyncInvocationOutcome::Queued && now >= invocation.attempt_due
+            if invocation.outcome == AsyncInvocationOutcome::Queued
+                && !invocation.attempt_pending
+                && now >= invocation.attempt_due
             {
                 invocation.outcome =
                     AsyncInvocationOutcome::Failed(ASYNC_NOT_DELIVERED_REASON.to_string());
@@ -322,6 +326,10 @@ impl FunctionRecord {
             received: iso8601(now),
             attempt_due: now + ASYNC_DELIVERY_DELAY,
             attempts: 0,
+            // Whether an attempt is coming for this event is [`deliver`]'s to say, which the
+            // accepting call asks it right after this: a queued event nothing is delivering
+            // is one the clock settles.
+            attempt_pending: false,
             outcome: AsyncInvocationOutcome::Queued,
         });
     }
@@ -348,6 +356,9 @@ impl FunctionRecord {
             received: iso8601(now),
             attempt_due: now,
             attempts: 0,
+            // The guardrail "stops your function being invoked", so there is no attempt to
+            // come for this event and none pending.
+            attempt_pending: false,
             outcome: AsyncInvocationOutcome::Failed(ASYNC_RECURSION_STOPPED_REASON.to_string()),
         });
     }

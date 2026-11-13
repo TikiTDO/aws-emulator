@@ -17,14 +17,20 @@
 //! handler, the same package, the same bounds. An attempt whose handler ERRORED is followed
 //! by another, as many as the event has ([`super::async_delivery`]), because "if you invoke
 //! a function asynchronously and it returns an error, Lambda executes the function up to two
-//! more times". Nothing about the run reaches the accepting call's response, because the
-//! response was given before the run happened; the entry keeps what the last attempt came to
-//! ([`AsyncInvocationOutcome`]).
+//! more times"; so is one that found no capacity to run the function at all, because "if your
+//! function is throttled, Lambda returns the event to the queue and attempts to run the
+//! function again" — how busy this host is decides WHEN the function runs the event, never
+//! whether it ever does. Nothing about the run reaches the accepting call's response, because
+//! the response was given before the run happened; the entry keeps what the last attempt came
+//! to ([`AsyncInvocationOutcome`]).
 //!
 //! Nothing sleeps inside a request: the attempt is driven on a task of its own, exactly as
 //! the account's other in-process pumps are, and with no async runtime to spawn onto there
 //! is no attempt — the entry then settles on the clock, carrying
-//! [`ASYNC_NOT_DELIVERED_REASON`], because nothing delivered it.
+//! [`ASYNC_NOT_DELIVERED_REASON`], because nothing delivered it. An event an attempt IS
+//! pending for ([`AsyncInvocationRecord::attempt_pending`]) is left to that attempt however
+//! long the host takes to get to it, so what the entry comes to is the attempt's and never a
+//! race between the attempt and the clock.
 
 use super::*;
 
@@ -71,9 +77,17 @@ pub struct AsyncInvocationRecord {
     pub received: String,
     /// When the first delivery attempt becomes due; see [`ASYNC_DELIVERY_DELAY`].
     pub attempt_due: SystemTime,
-    /// How many delivery attempts have been MADE for this event, which is what
-    /// [`super::async_delivery::MAX_ASYNC_DELIVERY_ATTEMPTS`] bounds.
+    /// How many delivery attempts have been MADE for this event — every attempt, including
+    /// one that found no capacity to run the function; what
+    /// [`super::async_delivery::MAX_ASYNC_DELIVERY_ATTEMPTS`] bounds is the attempts that RAN
+    /// the handler ([`super::async_delivery::next_attempt_in`]).
     pub attempts: u32,
+    /// Whether a delivery attempt is PENDING for this event: set by [`deliver`] before the
+    /// call that accepted the event is answered, and the reason the clock leaves the entry
+    /// alone ([`FunctionRecord::materialize`]) — an event an attempt is coming for is one
+    /// that IS being delivered, whether or not the host has got to the attempt yet, so
+    /// [`ASYNC_NOT_DELIVERED_REASON`] is owed only where no attempt was ever made.
+    pub attempt_pending: bool,
     /// What has become of the event.
     pub outcome: AsyncInvocationOutcome,
 }
@@ -167,7 +181,9 @@ impl Drop for DeliveryPermit {
 /// [`super::execution::run_invocation`] — which holds a run slot of its own, waits at most
 /// [`super::execution::PERMIT_WAIT`] for one of them and is cut off by the function's `Timeout`
 /// inside [`super::execution::HOST_WAIT_CEILING`] — with only an errored handler taking
-/// another ([`super::async_delivery::next_attempt_in`]).
+/// another ([`super::async_delivery::next_attempt_in`]). An attempt that found no capacity to
+/// run the function at all RAN nothing, so it is made again instead, for as long as the event
+/// is retained ([`super::async_delivery::next_throttled_attempt_in`]) and never past it.
 ///
 /// With no async runtime to spawn onto nothing is delivered, and nothing a caller was told
 /// depends on it: the entry settles on the clock instead, carrying
@@ -197,9 +213,19 @@ pub fn deliver(
         );
         return;
     };
+    // The attempt is this event's from here on: the entry is marked as one a delivery
+    // attempt is PENDING for before the accepting call is answered, so the clock leaves it
+    // to that attempt rather than settling it as an event nothing ever delivered. Which of
+    // the two reaches the entry first is the host's to decide; what the entry comes to is
+    // not.
+    mark_attempt_pending(state, &invocation.function_name, &invocation.request_id);
     let state = ::engine::ServiceState::clone(state);
     let function_name = invocation.function_name.clone();
     let request_id = invocation.request_id.clone();
+    // When this event was accepted, which is what its age is measured from: the window a
+    // throttled event is attempted again inside runs from the acceptance
+    // ([`super::async_delivery::next_throttled_attempt_in`]).
+    let accepted = ::tokio::time::Instant::now();
     runtime.spawn(async move {
         // Moved into the task, so the slot is held for exactly as long as the task runs and
         // is released however it ends.
@@ -208,15 +234,49 @@ pub fn deliver(
         // inside the request that queued the event, so a caller that looks straight after
         // that call still sees the event queued. No store guard is held across it.
         ::tokio::time::sleep(ASYNC_DELIVERY_DELAY).await;
+        // How many attempts RAN the handler, and how many found no capacity to run it at
+        // all: the two are bounded by different published rules, so the attempts are counted
+        // apart (`super::async_delivery`).
+        let mut runs: u32 = 0;
+        let mut throttles: u32 = 0;
         // Each turn is ONE delivery attempt: the attempt is the entry's from here on, so the
         // clock settles it no further, and what follows an attempt is the retry policy's
-        // (`super::async_delivery`) — an errored handler is invoked again, a handler that
-        // returned and a run that never started are not.
+        // (`super::async_delivery`) — an errored handler is invoked again, an attempt that
+        // found no capacity is made again, and a handler that returned or a run nothing
+        // could start are the end of the event.
         loop {
-            let Some(attempts) = claim(&state, &function_name, &request_id) else {
+            if claim(&state, &function_name, &request_id).is_none() {
                 return;
-            };
+            }
             let run = super::execution::run_invocation(invocation.clone()).await;
+            // A THROTTLED attempt is not what became of the event: nothing about the event
+            // stopped it, so "Lambda returns the event to the queue and attempts to run the
+            // function again" for as long as the event is retained. The entry goes back to
+            // being queued, with the instant the next attempt is due on it, rather than
+            // recording a capacity this host happened not to have as the event's outcome.
+            if matches!(&run, Err(super::execution::Unrunnable::Overloaded(_))) {
+                throttles = throttles.saturating_add(1);
+                let retention = event_retention_of(&state, &function_name, &request_id);
+                if let Some(again) = super::async_delivery::next_throttled_attempt_in(
+                    throttles,
+                    accepted.elapsed(),
+                    retention,
+                ) {
+                    ::tracing::warn!(
+                        function = %function_name,
+                        request_id = %request_id,
+                        next_attempt_seconds = again.as_secs(),
+                        "no capacity was free to run this function for an accepted \
+                         asynchronous invocation, so the event goes back on the queue"
+                    );
+                    requeue(&state, &function_name, &request_id, again);
+                    ::tokio::time::sleep(again).await;
+                    continue;
+                }
+            }
+            if run.is_ok() {
+                runs = runs.saturating_add(1);
+            }
             let (outcome, ran, function_error) = match &run {
                 Ok(invoked) => (
                     AsyncInvocationOutcome::Delivered {
@@ -244,7 +304,7 @@ pub fn deliver(
                 );
             }
             let Some(again) =
-                super::async_delivery::next_attempt_in(ran, function_error.as_deref(), attempts)
+                super::async_delivery::next_attempt_in(ran, function_error.as_deref(), runs)
             else {
                 settle(&state, &function_name, &request_id, outcome);
                 // The run was the durable execution's, so the execution ends in the status
@@ -267,6 +327,77 @@ pub fn deliver(
             ::tokio::time::sleep(again).await;
         }
     });
+}
+
+/// Mark the entry `request_id` names on `function` as having a delivery attempt PENDING, so
+/// the clock leaves the outcome to that attempt however long the host takes to make it.
+///
+/// Called by [`deliver`] with no store guard held, before the accepting call is answered: an
+/// event an attempt is coming for is one that IS being delivered, and the entry is left
+/// [`AsyncInvocationOutcome::Queued`] until the attempt claims it so a caller that looks
+/// straight after the accepting call still sees the event queued.
+///
+/// Does nothing when the store holds no such entry, which is nothing to deliver to.
+fn mark_attempt_pending(
+    state: &::engine::ServiceState<ComAmazonawsLambdaAwsgirapiserviceState>,
+    function: &str,
+    request_id: &str,
+) {
+    let mut store = state.lock();
+    if let Some(entry) = entry_of(&mut store, function, request_id) {
+        entry.attempt_pending = true;
+    }
+}
+
+/// How long the event `request_id` names on `function` is RETAINED while this emulator
+/// tries to get the function run for it.
+///
+/// The window is the `MaximumEventAgeInSeconds` the asynchronous-invocation configuration of
+/// the QUALIFIER the event was addressed to states — that resource is "for asynchronous
+/// invocation on a function, version, or alias", so a configuration put on an alias is the
+/// alias's own and never the one the version that alias invokes holds — and the documented
+/// default ([`super::async_delivery::DEFAULT_ASYNC_EVENT_RETENTION`]) for a qualifier nobody
+/// has configured, which is also the window for an event the store no longer holds.
+///
+/// A READ of both: it decides how long a throttled event keeps its place in the queue and
+/// changes nothing a later caller sees.
+#[must_use]
+pub fn event_retention_of(
+    state: &::engine::ServiceState<ComAmazonawsLambdaAwsgirapiserviceState>,
+    function: &str,
+    request_id: &str,
+) -> Duration {
+    let mut store = state.lock();
+    let configured = entry_of(&mut store, function, request_id)
+        .map(|entry| entry.version.clone())
+        .and_then(|version| {
+            store
+                .functions
+                .get(function)?
+                .event_invoke_configs
+                .get(&version)?
+                .maximum_event_age_in_seconds
+        });
+    super::async_delivery::event_retention(configured)
+}
+
+/// Put the entry `request_id` names back on the QUEUE, with its next attempt due `next_in`
+/// from now: what a throttled attempt leaves behind, because "Lambda returns the event to
+/// the queue and attempts to run the function again".
+///
+/// The entry keeps its pending mark, so the instant the attempt falls due is the attempt's
+/// to act on and not an outcome the clock writes.
+fn requeue(
+    state: &::engine::ServiceState<ComAmazonawsLambdaAwsgirapiserviceState>,
+    function: &str,
+    request_id: &str,
+    next_in: Duration,
+) {
+    let mut store = state.lock();
+    if let Some(entry) = entry_of(&mut store, function, request_id) {
+        entry.outcome = AsyncInvocationOutcome::Queued;
+        entry.attempt_due = SystemTime::now() + next_in;
+    }
 }
 
 /// Mark the entry `request_id` names on `function` as being delivered, counting the attempt

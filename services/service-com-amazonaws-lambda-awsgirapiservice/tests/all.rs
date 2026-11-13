@@ -43,6 +43,8 @@ mod alias_write_not_found_sentence;
 mod announced_download_locations;
 #[path = "all/async_delivery.rs"]
 mod async_delivery;
+#[path = "all/async_event_delivery_ownership.rs"]
+mod async_event_delivery_ownership;
 #[path = "all/async_invocation.rs"]
 mod async_invocation;
 #[path = "all/asynchronous_invoke_run.rs"]
