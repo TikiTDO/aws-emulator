@@ -60,7 +60,8 @@
 //! read back from the request ([`submitted_map_entries_at`], at the member path the clause
 //! names, so a map declared on a nested structure member is reached too);
 //! [`in_submitted_order`] is the order the request carried, which is what a service whose
-//! recordings show the submitted order passes.
+//! recordings show the submitted order passes, and [`in_hashed_entry_order`] the order a
+//! layer holding that map in a hash table keyed on each entry's own key walks it in.
 //!
 //! A service that words its constraint refusal in its own PRE-DISPATCH layer, rather than
 //! through the wrapper, states the same one fact and reaches the same restating through
@@ -121,6 +122,73 @@ pub fn in_submitted_order(entries: &[(String, String)]) -> Option<Vec<(&str, &st
             .map(|(key, value)| (key.as_str(), value.as_str()))
             .collect(),
     )
+}
+
+/// The entries in the order the HASH TABLE holding them is walked, for the
+/// [`MapEntryOrder`] of a service whose layer holds a submitted map in a table keyed on
+/// each entry's own key and states it by enumerating that table rather than by sorting it:
+///
+/// * in ascending bucket, the bucket being the low bits of the key's string hash
+///   ([`map_entry_bucket`]) at the table's own width ([`map_entry_table_buckets`]);
+/// * two keys of ONE bucket in KEY order, which is the order the bucket's chain was filled
+///   in — the table is filled from the map's entries in key order, so a bucket's chain
+///   carries them in that order too.
+///
+/// The order is a function of the KEYS and of the entry count alone — a member, an
+/// operation and a depth do not enter it, and the order the request wrote its entries in
+/// does not either — so one map is stated the same way wherever it is carried, and a
+/// handler that reads the map it already holds reaches the same order
+/// ([`hashed_entry_order`]).
+#[must_use]
+pub fn in_hashed_entry_order(entries: &[(String, String)]) -> Option<Vec<(&str, &str)>> {
+    let held: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    Some(hashed_entry_order(&held))
+}
+
+/// `entries` in the order [`in_hashed_entry_order`] states them, for a caller holding the
+/// entries as borrowed pairs — a handler wording its own clause about a map it has already
+/// read, which reaches the same order as a clause restated from the request because the
+/// order reads nothing but the keys.
+#[must_use]
+pub fn hashed_entry_order<'e>(entries: &[(&'e str, &'e str)]) -> Vec<(&'e str, &'e str)> {
+    let buckets = map_entry_table_buckets(entries.len());
+    let mut stated: Vec<(&str, &str)> = entries.to_vec();
+    stated.sort_by_key(|(key, _)| (map_entry_bucket(key, buckets), *key));
+    stated
+}
+
+/// How many buckets the table holding a map's entries starts with, before it has grown.
+pub const MAP_ENTRY_TABLE_MIN_BUCKETS: usize = 16;
+
+/// How wide the table holding `entries` entries is: it starts at
+/// [`MAP_ENTRY_TABLE_MIN_BUCKETS`] and doubles whenever the entries put into it pass three
+/// quarters of its width, so the width is a power of two decided by the entry COUNT alone.
+#[must_use]
+pub fn map_entry_table_buckets(entries: usize) -> usize {
+    let mut buckets = MAP_ENTRY_TABLE_MIN_BUCKETS;
+    // `buckets` is a power of two, so three quarters of it is exact; the guard keeps the
+    // doubling inside `usize` for an entry count no request could carry anyway.
+    while buckets / 4 * 3 < entries && buckets <= usize::MAX / 2 {
+        buckets *= 2;
+    }
+    buckets
+}
+
+/// Which bucket of a table of `buckets` buckets the entry keyed `key` sits in: the key's
+/// string hash ([`crate::validation_message::string_hash`]) with its high half folded into
+/// its low half, reduced to the table's width.
+///
+/// The fold is what makes a table narrower than the hash separate keys that differ only
+/// above its width. `buckets` is a power of two ([`map_entry_table_buckets`]), so the
+/// reduction is the low bits of the folded hash.
+#[must_use]
+pub fn map_entry_bucket(key: &str, buckets: usize) -> usize {
+    let hash = crate::validation_message::string_hash(key);
+    let folded = hash ^ (hash >> 16);
+    (folded as usize) & (buckets - 1)
 }
 
 /// How a service renders a `@pattern` expression inside a requirement sentence it states:
@@ -631,7 +699,8 @@ struct SubmittedMaps<'r> {
 
 impl<'r> SubmittedMaps<'r> {
     /// Read `req`'s body lazily: nothing is parsed until a clause asks for a member.
-    fn of(req: &'r RtRequest) -> Self {
+    #[must_use]
+    pub fn of(req: &'r RtRequest) -> Self {
         Self {
             body: req.body().bytes().unwrap_or_default(),
             read: HashMap::new(),
@@ -916,5 +985,138 @@ mod tests {
             Some(vec![("z", "1"), ("a", "2")]),
             "expected the submitted order"
         );
+    }
+
+    /// RULE: the table holding a map's entries starts at
+    /// [`MAP_ENTRY_TABLE_MIN_BUCKETS`] buckets and doubles whenever the entries put into it
+    /// pass three quarters of its width, so its width is decided by the entry count alone.
+    #[test]
+    fn the_table_doubles_when_the_entries_pass_three_quarters_of_its_width() {
+        // (entries, the width that many entries are held in) — each bound and the count
+        // just past it.
+        let rows: [(usize, usize); 10] = [
+            (0, 16),
+            (1, 16),
+            (12, 16),
+            (13, 32),
+            (24, 32),
+            (25, 64),
+            (48, 64),
+            (49, 128),
+            (96, 128),
+            (97, 256),
+        ];
+        for (entries, expected) in rows {
+            let actual = map_entry_table_buckets(entries);
+            assert_eq!(
+                actual, expected,
+                "case {entries} entries: expected {expected} buckets, got {actual}"
+            );
+        }
+    }
+
+    /// RULE: a map stated from its hash table is stated in ascending bucket of each key's
+    /// string hash at the table's own width, two keys of one bucket in key order — so the
+    /// stated order follows the KEYS and the table's width, and neither the order the request
+    /// wrote the entries in nor their sort order alone.
+    #[test]
+    fn a_hashed_map_is_stated_in_the_order_its_table_is_walked() {
+        // A key of ONE ASCII character hashes to that character's own code point, and one
+        // of two to `31 * <first> + <second>`; neither reaches the high half of the hash,
+        // so each bucket below is that number at the table's width: 'a' (97) and 'q' (113)
+        // share bucket 1 of a 16-bucket table, 'p' (112) sits in bucket 0, and 'b'..'l'
+        // (98..108) in buckets 2..12.
+        //
+        // (case, the entries as submitted, the order the table is walked in)
+        type Row<'r> = (&'r str, &'r [(&'r str, &'r str)], &'r [&'r str]);
+        let rows: &[Row<'_>] = &[
+            (
+                "two keys in two buckets",
+                &[("a", "1"), ("p", "2")],
+                &["p", "a"],
+            ),
+            (
+                "the same two, submitted the other way round",
+                &[("p", "2"), ("a", "1")],
+                &["p", "a"],
+            ),
+            (
+                "two keys sharing a bucket, stated in key order",
+                &[("a", "1"), ("q", "2")],
+                &["a", "q"],
+            ),
+            (
+                "the same two, submitted the other way round",
+                &[("q", "2"), ("a", "1")],
+                &["a", "q"],
+            ),
+            // Twelve entries fit a 16-bucket table, where 'p' sits in bucket 0 ahead of
+            // every other key …
+            (
+                "twelve entries, in a table of sixteen buckets",
+                &[
+                    ("a", "1"),
+                    ("b", "2"),
+                    ("c", "3"),
+                    ("d", "4"),
+                    ("e", "5"),
+                    ("f", "6"),
+                    ("g", "7"),
+                    ("h", "8"),
+                    ("i", "9"),
+                    ("j", "10"),
+                    ("k", "11"),
+                    ("p", "12"),
+                ],
+                &["p", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"],
+            ),
+            // … and one more entry doubles the table to 32 buckets, where 'p' sits in
+            // bucket 16 and is stated last.
+            (
+                "thirteen entries, in a table of thirty-two buckets",
+                &[
+                    ("a", "1"),
+                    ("b", "2"),
+                    ("c", "3"),
+                    ("d", "4"),
+                    ("e", "5"),
+                    ("f", "6"),
+                    ("g", "7"),
+                    ("h", "8"),
+                    ("i", "9"),
+                    ("j", "10"),
+                    ("k", "11"),
+                    ("l", "12"),
+                    ("p", "13"),
+                ],
+                &["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "p"],
+            ),
+            ("one entry", &[("z", "1")], &["z"]),
+            ("no entries at all", &[], &[]),
+        ];
+
+        for (case, submitted, expected) in rows {
+            let entries: Vec<(String, String)> = submitted
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect();
+            let stated = in_hashed_entry_order(&entries).expect("an order is always stated");
+            let keys: Vec<&str> = stated.iter().map(|(key, _)| *key).collect();
+            assert_eq!(
+                keys,
+                expected.to_vec(),
+                "case {case:?}: expected {expected:?}, got {keys:?}"
+            );
+            // The map is RE-ORDERED, never changed: every entry is stated once, with the
+            // value it was submitted with.
+            let mut by_key = stated.clone();
+            by_key.sort_unstable();
+            let mut sorted_submitted = submitted.to_vec();
+            sorted_submitted.sort_unstable();
+            assert_eq!(
+                by_key, sorted_submitted,
+                "case {case:?}: the stated map is the submitted one re-ordered, got {stated:?}"
+            );
+        }
     }
 }

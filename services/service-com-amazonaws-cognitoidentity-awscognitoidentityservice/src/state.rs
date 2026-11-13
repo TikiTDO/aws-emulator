@@ -1261,15 +1261,22 @@ pub fn map_key_constraint_refusal(
 
 /// `submitted` as a constraint refusal quotes a map: `{<key>=<value>, …}`, through the one
 /// renderer of that form (`service_common::validation::rendered_map`). The entries are in
-/// key order, which is the order a `BTreeMap` holds them in and the one order a request's
-/// map can be stated in twice — the request's own map is unordered by the time a handler
-/// reads it.
+/// the order the table holding them is walked
+/// (`service_common::submitted_collections::hashed_entry_order`), which is the order every
+/// clause of this service states a map in ([`crate::service::validation`]).
+///
+/// Two keys that share a bucket are stated in KEY order, which is what the entries of one
+/// bucket carry wherever this order is stated: the rule reads nothing but the keys, so a
+/// clause a handler words about the map it holds and one the boundary walk's refusal states
+/// about the same map read back from the request are the same text.
 pub fn rendered_map(submitted: &BTreeMap<String, String>) -> String {
     let entries: Vec<(&str, &str)> = submitted
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
-    ::service_common::validation::rendered_map(&entries)
+    ::service_common::validation::rendered_map(
+        &::service_common::submitted_collections::hashed_entry_order(&entries),
+    )
 }
 
 /// The punctuation an AWS tag key admits beside letters, digits and separators. AWS's

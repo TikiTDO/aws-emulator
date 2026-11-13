@@ -149,16 +149,24 @@ async fn a_refusal_about_a_collection_quotes_the_collection_the_request_sent() {
     );
 
     // The same rule over a MAP member: a principal-tag map one entry past its modelled
-    // maximum quotes the map, in the order a map of this service is stated in.
+    // maximum quotes the map. The entries are stated in the order the table holding them is
+    // walked rather than sorted, which is the shared rendering
+    // `service_common::submitted_collections::hashed_entry_order` and is the rule
+    // `stated_collection_order` asserts in its own right; this row is about the map being
+    // QUOTED at all.
     let over_tags: Vec<(String, String)> = (0..=PRINCIPAL_TAGS_MAX)
         .map(|number| (format!("tag{number:03}"), format!("claim{number:03}")))
         .collect();
     let quoted_map = {
-        let mut entries: Vec<String> = over_tags
+        let held: Vec<(&str, &str)> = over_tags
             .iter()
-            .map(|(key, value)| format!("{key}={value}"))
+            .map(|(key, value)| (key.as_str(), value.as_str()))
             .collect();
-        entries.sort_unstable();
+        let entries: Vec<String> =
+            service_common::submitted_collections::hashed_entry_order(&held)
+                .into_iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect();
         format!("{{{}}}", entries.join(", "))
     };
     let (status, body) = emulator
@@ -327,12 +335,19 @@ async fn a_map_key_outside_its_shape_is_refused_with_the_constraints_a_key_must_
     ];
 
     for (case, entries) in rows {
+        // The map is quoted in the order the table holding it is walked, the shared
+        // rendering every clause of this service states a map through; for these rows, whose
+        // keys fall in distinct buckets, that is also their key order.
         let quoted = {
-            let mut rendered: Vec<String> = entries
+            let held: Vec<(&str, &str)> = entries
                 .iter()
-                .map(|(key, value)| format!("{key}={value}"))
+                .map(|(key, value)| (*key, value.as_str()))
                 .collect();
-            rendered.sort_unstable();
+            let rendered: Vec<String> =
+                service_common::submitted_collections::hashed_entry_order(&held)
+                    .into_iter()
+                    .map(|(key, value)| format!("{key}={value}"))
+                    .collect();
             format!("{{{}}}", rendered.join(", "))
         };
         let (status, body) = emulator

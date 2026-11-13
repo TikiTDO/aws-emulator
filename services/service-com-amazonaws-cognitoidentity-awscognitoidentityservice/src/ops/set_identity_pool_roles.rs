@@ -120,6 +120,16 @@ const RULES_ROLE_MAPPING_TYPE: &str = "Rules";
 /// holds, so the refusal names neither the provider the mapping is keyed by nor the pool.
 const RULES_CONFIGURATION_REQUIRED_MESSAGE: &str = "RuleConfiguration is required for Rules";
 
+/// How AWS words the refusal of a role mapping that states no `AmbiguousRoleResolution` —
+/// "If you specify Token or Rules as the Type, AmbiguousRoleResolution is required"
+/// (`RoleMapping$AmbiguousRoleResolution`, this service's model). The one variable part is
+/// the `Type` that requires it, as the request spelled it; what is missing is a member of
+/// the request, which the caller already holds, so the refusal names neither the provider
+/// the mapping is keyed by nor the pool.
+fn ambiguous_role_resolution_required(role_mapping_type: &str) -> String {
+    format!("AmbiguousRoleResolution must be specified for {role_mapping_type}")
+}
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -409,13 +419,12 @@ fn validated_role_mappings(
         }
         // `RoleMapping$AmbiguousRoleResolution`, from the model: "If you specify Token or
         // Rules as the Type, AmbiguousRoleResolution is required." `RoleMappingType` is
-        // exactly those two values, so it is required for every mapping.
+        // exactly those two values, so it is required for every mapping, and the refusal is
+        // the sentence AWS words that condition with over the `Type` that requires it.
         match mapping.ambiguous_role_resolution.as_deref() {
             None => {
-                return Err(invalid_parameter(format!(
-                    "RoleMappings['{provider}'].AmbiguousRoleResolution is required when Type \
-                     is '{}'.",
-                    mapping.r#type
+                return Err(invalid_parameter(ambiguous_role_resolution_required(
+                    &mapping.r#type,
                 )));
             }
             Some(resolution) if !AMBIGUOUS_ROLE_RESOLUTION_TYPE_VALUES.contains(&resolution) => {

@@ -9,8 +9,8 @@
 //! mapped to the attribute it names whatever characters either is spelled with, or the
 //! DEFAULT mapping when the call asked for the defaults instead; a pool this service does
 //! not store, and a provider nobody has mapped, are the modelled
-//! `ResourceNotFoundException`; and a tag key no IAM policy could
-//! reference is refused with HTTP 400, leaving the mapping the pair already had.
+//! `ResourceNotFoundException`; and a tag key that is no tag key at all is refused with
+//! HTTP 400, leaving the mapping the pair already had.
 //!
 //! The harness is `identity_pool_flow`'s: one shared engine behind the same
 //! `MultiServiceRouter` the production router builds.
@@ -416,10 +416,12 @@ async fn a_mapping_that_is_not_stored_is_not_found() {
     }
 }
 
-/// RULE: a `PrincipalTags` key that no IAM policy could reference as a session tag of the
-/// federated principal — one in the reserved `aws:` namespace, or spelled with characters a
+/// RULE: a `PrincipalTags` key that is no tag key at all — one spelled with characters a
 /// tag key does not admit — and a key or value outside the modelled bounds, are refused with
-/// HTTP 400, and the pair keeps the mapping it already had.
+/// HTTP 400, and the pair keeps the mapping it already had. A key in the reserved `aws:`
+/// namespace is NOT one of them: that namespace is reserved for the tags AWS assigns to a
+/// RESOURCE, while a principal tag is a session tag of the federated principal, so such a
+/// mapping is stored and read back.
 #[tokio::test]
 async fn a_key_that_is_not_a_tag_key_is_refused_and_changes_nothing() {
     let emulator = Emulator::new();
@@ -435,9 +437,6 @@ async fn a_key_that_is_not_a_tag_key_is_refused_and_changes_nothing() {
         .await;
 
     let refusals: Vec<(&str, Value)> = vec![
-        // The reserved namespace, in either spelling: the reservation is on the namespace.
-        ("the reserved prefix", json!({"aws:department": "custom:a"})),
-        ("the reserved prefix, upper case", json!({"AWS:Tag": "custom:a"})),
         // Characters outside the set AWS's tagging rules publish for a tag key.
         ("an exclamation mark", json!({"tag!": "custom:a"})),
         ("a hash", json!({"tag#1": "custom:a"})),
@@ -489,6 +488,42 @@ async fn a_key_that_is_not_a_tag_key_is_refused_and_changes_nothing() {
             got["UseDefaults"],
             json!(false),
             "case {case:?}: a refused call leaves the stored UseDefaults alone, got {got}"
+        );
+    }
+
+    // A key in the namespace AWS reserves for the tags it assigns to a resource IS a
+    // principal tag: the rows span the spellings that namespace is written in, and each is
+    // stored and read back.
+    for (case, principal_tags) in [
+        ("the reserved prefix", json!({"aws:department": "custom:a"})),
+        ("the reserved prefix, upper case", json!({"AWS:Tag": "custom:a"})),
+        (
+            "the reserved prefix beside a key outside it",
+            json!({"aws:subject": "sub", "department": "custom:department"}),
+        ),
+    ] {
+        let answered = emulator
+            .ok(
+                "SetPrincipalTagAttributeMap",
+                &set_request(&pool_id, USER_POOL_PROVIDER, None, Some(&principal_tags)),
+            )
+            .await;
+        assert_eq!(
+            answered["PrincipalTags"], principal_tags,
+            "case {case:?}: expected the mapping to be echoed, got {answered}"
+        );
+        let got = emulator
+            .ok(
+                "GetPrincipalTagAttributeMap",
+                &json!({
+                    "IdentityPoolId": &pool_id,
+                    "IdentityProviderName": USER_POOL_PROVIDER,
+                }),
+            )
+            .await;
+        assert_eq!(
+            got["PrincipalTags"], principal_tags,
+            "case {case:?}: expected the mapping to be read back, got {got}"
         );
     }
 }
@@ -815,7 +850,6 @@ async fn an_invalid_request_is_refused_before_the_pool_is_looked_up() {
     for (case, principal_tags) in [
         ("a key past the modelled maximum", json!({repeated('k', 129): "custom:a"})),
         ("an empty key", json!({"": "custom:a"})),
-        ("a reserved key", json!({"aws:department": "custom:a"})),
         ("a key spelled with a character a tag key does not admit", json!({"tag#1": "custom:a"})),
         ("a map past the modelled maximum", tags(51)),
     ] {

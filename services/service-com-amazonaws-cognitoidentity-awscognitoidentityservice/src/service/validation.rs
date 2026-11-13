@@ -35,13 +35,33 @@
 //! `service_common::validation_message`, the sentences inside them from the framework's own
 //! `Violation::message`, and the status and the envelope from the framework's refusal
 //! channel.
+//!
+//! # The order a quoted collection is stated in
+//!
+//! A collection a clause embeds is stated in the order the TABLE holding it is walked, not
+//! sorted and not in the order the request wrote it: the admissible values of an enumerated
+//! type in ascending bucket of each value's string hash
+//! (`service_common::validation_message::in_hashed_enum_order`), and a map's entries in
+//! ascending bucket of each key's, two keys of one bucket in key order
+//! (`service_common::submitted_collections::in_hashed_entry_order`). Both are the one shared
+//! derivation of that hash at two table widths, so neither can drift from the other; what
+//! this service chooses is that it states those orders at all.
+//!
+//! Neither order reads anything but the collection itself, so a clause a HANDLER of this
+//! service words about a map it has already read states the same order as one restated here
+//! (`crate::state::rendered_map`). What this wrapper is needed for is the ENTRIES: the
+//! walk's own rendering of a map member is a summary of its size, so the entries are read
+//! back from the request
+//! (`service_common::submitted_collections::quoting_submitted_maps`, the shared restating
+//! every bound on what one clause may quote still belongs to).
 
 use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse};
 use service_common::query_error_envelope::with_request_id_header;
+use service_common::submitted_collections::{in_hashed_entry_order, quoting_submitted_maps};
 use service_common::validation::{refusing_violations_with_mapped_echoes, unanchored};
 use service_common::validation_message::{
     aws_validation_refusal_over_elements_quoting, aws_validation_refusal_with,
-    in_sorted_enum_order, quoting_the_submitted_collection,
+    in_hashed_enum_order, quoting_the_submitted_collection,
 };
 use smithy_server_runtime::{
     BoxFuture, ErasedOperation, Operation, OperationContext, Refusal, Refused, Service, Violation,
@@ -65,8 +85,10 @@ const VALIDATION_EXCEPTION: &str = "ValidationException";
 /// `@pattern` is quoted as the EXPRESSION a value must match rather than as the model's
 /// anchored literal (`service_common::validation::unanchored` — the anchors are what makes
 /// it a whole-value match, which "must satisfy regular expression pattern" already says), an
-/// enumerated type's value set is listed lexicographically whatever order the model declares
-/// its members in, and a constraint broken by a list's ELEMENTS is stated once at the list.
+/// enumerated type's value set is listed in the order the table of admissible values is
+/// walked whatever order the model declares its members in
+/// (`service_common::validation_message::in_hashed_enum_order`), and a constraint broken by
+/// a list's ELEMENTS is stated once at the list.
 ///
 /// `quoted_collection` answers, for a member path a clause is stated at, the collection that
 /// member held — the one value no violation carries. `None` from it states the clause
@@ -76,9 +98,9 @@ pub fn validation_error_message(
     quoted_collection: impl Fn(&str) -> Option<String>,
     input_schema: &'static ::aws_smithy_schema::Schema,
 ) -> Option<String> {
-    let sorted: Vec<Violation> = violations.iter().map(in_sorted_enum_order).collect();
+    let stated: Vec<Violation> = violations.iter().map(in_hashed_enum_order).collect();
     aws_validation_refusal_over_elements_quoting(
-        &Refusal::Invalid(sorted),
+        &Refusal::Invalid(stated),
         &[input_schema],
         unanchored,
         quoted_collection,
@@ -98,8 +120,8 @@ pub fn stated_refusal(refusal: &Refusal) -> Option<Refused> {
     let Refusal::Invalid(violations) = refusal else {
         return None;
     };
-    let sorted: Vec<Violation> = violations.iter().map(in_sorted_enum_order).collect();
-    aws_validation_refusal_with(&Refusal::Invalid(sorted), unanchored)
+    let stated: Vec<Violation> = violations.iter().map(in_hashed_enum_order).collect();
+    aws_validation_refusal_with(&Refusal::Invalid(stated), unanchored)
 }
 
 /// One modelled operation of this service, served so that a refusal states the value the
@@ -149,8 +171,17 @@ where
             // below would make this future non-`Send`.
             let (refused, submitted_lists) =
                 refusing_violations_with_mapped_echoes::<Op>(svc.definition().protocol(), req);
-            let refused: Vec<Violation> = refused
+            let (reported_violations, echoes): (Vec<Violation>, Vec<_>) =
+                refused.into_iter().unzip();
+            // A clause about a MAP member first: the walk's own rendering of such a member
+            // is a summary of its SIZE, and the entries behind it are read back from the
+            // request in the order the table holding them is walked. A clause about
+            // anything else is left for the echo below, which is what carries a LIST.
+            let quoted_maps =
+                quoting_submitted_maps(reported_violations, req, in_hashed_entry_order);
+            let refused: Vec<Violation> = quoted_maps
                 .into_iter()
+                .zip(echoes)
                 .map(|(violation, echo)| quoting_the_submitted_collection(violation, echo))
                 .collect();
             if !refused.is_empty() {

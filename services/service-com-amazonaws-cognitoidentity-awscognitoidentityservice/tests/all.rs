@@ -95,6 +95,8 @@ mod response_request_id;
 mod server_side_token_check;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/stated_collection_order.rs"]
+mod stated_collection_order;
 #[path = "all/unlink_developer_identity.rs"]
 mod unlink_developer_identity;
 #[path = "all/unlink_identity.rs"]

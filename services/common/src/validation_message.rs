@@ -587,17 +587,30 @@ pub fn hashed_enum_order<S: AsRef<str>>(declared: &[S]) -> Vec<&str> {
     stated
 }
 
-/// Which bucket of the table `value` sits in: its 31-based string hash — the hash so far
-/// multiplied by 31 plus the next UTF-16 code unit, wrapping at 32 bits — reduced to the
-/// table's width.
+/// Which bucket of the table `value` sits in: its string hash ([`string_hash`]) reduced to
+/// the table's width.
 ///
 /// The hash is a fold over values a MODEL declares; it reads nothing a caller sent and is
 /// not a digest, so it decides a listing order and nothing else.
 #[must_use]
 pub fn enum_value_bucket(value: &str) -> u32 {
+    string_hash(value) % ENUM_VALUE_SET_BUCKETS
+}
+
+/// The 31-based hash of one string: the hash so far multiplied by 31 plus the next UTF-16
+/// code unit, wrapping at 32 bits.
+///
+/// The hash the layer in front of these services keys a string by, and the ONE derivation
+/// of it here — the bucket an enumerated value is listed from ([`enum_value_bucket`]) and
+/// the bucket a map's entry is stated from
+/// ([`crate::submitted_collections::map_entry_bucket`]) are the same fold at two widths, so
+/// the two orders cannot drift apart. It is not a digest and nothing is decided by it but a
+/// listing ORDER.
+#[must_use]
+pub fn string_hash(value: &str) -> u32 {
     value.encode_utf16().fold(0u32, |hash, unit| {
         hash.wrapping_mul(31).wrapping_add(u32::from(unit))
-    }) % ENUM_VALUE_SET_BUCKETS
+    })
 }
 
 /// The violations of ONE refusal in the order a front door states them that reports a

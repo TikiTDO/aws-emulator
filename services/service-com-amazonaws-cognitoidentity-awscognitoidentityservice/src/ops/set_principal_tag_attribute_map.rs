@@ -14,10 +14,11 @@
 //! call carried is not applied — so carrying both is accepted rather than refused.
 //!
 //! A pool this service does not store is a `ResourceNotFoundException`. A
-//! principal tag key that no IAM policy could reference as a session tag of the federated
-//! principal — one in the Amazon Web Services reserved namespace, or spelled with
-//! characters a tag key does not admit — is an `InvalidParameterException` (HTTP 400), and
-//! a key outside the modelled bounds of `PrincipalTagID` is the protocol's own HTTP 400.
+//! principal tag key spelled with characters a tag key does not admit is an
+//! `InvalidParameterException` (HTTP 400), and a key outside the modelled bounds of
+//! `PrincipalTagID` is the protocol's own HTTP 400. A key in the Amazon Web Services
+//! reserved namespace is NOT refused: that namespace is reserved for the tags AWS assigns
+//! to a RESOURCE, while a principal tag is a session tag of the federated principal.
 //!
 //! ## Shape of an operation
 //!
@@ -368,13 +369,11 @@ fn validated_principal_tags(
     }
 
     for tag_key in stored.keys() {
-        if crate::state::is_reserved_tag_key(tag_key) {
-            return Err(invalid_parameter(format!(
-                "PrincipalTags key '{tag_key}' is not valid: the '{}' prefix is reserved for \
-                 Amazon Web Services use.",
-                crate::state::RESERVED_TAG_KEY_PREFIX
-            )));
-        }
+        // The reserved `aws:` namespace is NOT checked here: it is a rule about a RESOURCE
+        // tag assigned to a pool, which a caller may not write into, while a principal tag
+        // is a session tag of the federated principal, mapped from a claim of the provider's
+        // token — a recorded call that maps a claim onto a key in that namespace is served,
+        // so the mapping is stored.
         if !crate::state::is_well_formed_tag_key(tag_key) {
             return Err(invalid_parameter(format!(
                 "PrincipalTags key '{tag_key}' is not valid: a tag key is spelled with \
