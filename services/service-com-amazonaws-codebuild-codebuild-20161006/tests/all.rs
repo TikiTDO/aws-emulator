@@ -4,10 +4,8 @@
 //!
 //! Put a new suite at `tests/all/<name>.rs` and declare it below, keeping the list
 //! sorted.
-//!
 //! A suite that is not declared here compiles nowhere and its tests never run. A
 //! suite left at the top level of `tests/` fails the build.
-
 // `tests/all.rs` is a test-target CRATE ROOT, so a bare `mod` resolves to a SIBLING
 // (`tests/state_roundtrip.rs`) — which the layout check refuses. The `#[path]` is what
 // points it into `tests/all/`.
@@ -25,8 +23,8 @@ mod build_artifacts_destination;
 mod build_batch_fan_out;
 #[path = "all/buildspec_execution.rs"]
 mod buildspec_execution;
-#[path = "all/buildspec_parse_refusal.rs"]
-mod buildspec_parse_refusal;
+#[path = "all/buildspec_file_tree.rs"]
+mod buildspec_file_tree;
 #[path = "all/command_execution_lifecycle.rs"]
 mod command_execution_lifecycle;
 #[path = "all/delete_build_batch.rs"]
@@ -121,3 +119,5 @@ mod webhook_lifecycle;
 mod webhook_project_resolution;
 #[path = "all/webhook_secret_is_minted_once.rs"]
 mod webhook_secret_is_minted_once;
+#[path = "all/buildspec_parse_refusal.rs"]
+mod buildspec_parse_refusal;

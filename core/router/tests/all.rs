@@ -1589,3 +1589,10 @@ mod logs_subscription_filter_role_trust;
 // can see both ends of it.
 #[path = "all/logs_subscription_filter_to_lambda.rs"]
 mod logs_subscription_filter_to_lambda;
+// Declared in the appended tail, which is where every new suite inserts its lines: a CI
+// topology DEPLOYED BY TEMPLATE and then run — the pipeline, the build project and the two
+// service roles a stack provisions, driven to the terminal execution status the build decided
+// — spans CloudFormation, CodePipeline, CodeBuild, IAM and Amazon S3 at once, so no single
+// service crate's test target can see both ends of it.
+#[path = "all/cloudformation_ci_topology_runs_its_pipeline.rs"]
+mod cloudformation_ci_topology_runs_its_pipeline;

@@ -22,9 +22,10 @@
 //! A build's session is that session with the statuses POSIX gives those conditions, the
 //! shared bounds, and NO output kept: the bytes a command writes are not delivered anywhere
 //! — a build's log group is its own concern — so this shell keeps none of them. What a
-//! performed command contributes to the build is its exit status and the variables it sets
-//! (a buildspec's `env/exported-variables` are read back off this session), which is what
-//! [`BuildShell`] exposes.
+//! performed command contributes to the build is its exit status, the variables it sets (a
+//! buildspec's `env/exported-variables` are read back off this session) and the files it
+//! writes into the session's own working tree, which the commands after it read, and which
+//! is what [`BuildShell`] exposes.
 
 use std::collections::BTreeMap;
 

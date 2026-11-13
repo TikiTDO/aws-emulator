@@ -88,8 +88,8 @@ const CLIENT_ERROR: &str = "CLIENT_ERROR";
 /// that names no artifact file to put there.
 const NO_ARTIFACT_FILES_MESSAGE: &str = "No artifact files specified";
 
-/// What CodeBuild states when the artifact paths a buildspec names match nothing in the
-/// build's own tree, which is every path in a build environment that has no tree.
+/// What CodeBuild states when the artifact paths a buildspec names match nothing to
+/// upload at the build's destination.
 const NO_MATCHING_ARTIFACT_PATHS_MESSAGE: &str = "No matching artifact paths found";
 
 /// What CodeBuild states as the reason a phase's command failed: the command it ran and
@@ -379,11 +379,17 @@ pub fn run_build(build: &Build, start_millis: i64, due_millis: i64) -> BuildRun 
 /// files the buildspec's `artifacts` section names where the build's `artifacts` say.
 ///
 /// A build whose artifacts name no destination has nothing to put anywhere, so the phase
-/// is the whole of its own work and succeeds. A build that DOES name one has its artifact
-/// files looked for in the tree its commands ran against — and this build environment has
-/// no tree, so no declared path matches and the phase ends in the client error CodeBuild
-/// reports for exactly that: the buildspec named no artifact file, or the paths it named
-/// matched nothing. Nothing claims an upload that did not happen.
+/// is the whole of its own work and succeeds — which is every build whose artifacts
+/// CodePipeline manages and every build that produces none, the two types whose
+/// `location` the model documents as ignored.
+///
+/// A build that DOES name a destination bucket would have to PUT its artifact objects
+/// into that bucket, and this build environment puts none there — the files its commands
+/// wrote are its own session's ([`super::build_shell`]) and are not uploaded anywhere —
+/// so no upload is claimed: the phase ends in the client error CodeBuild reports for an
+/// upload that found nothing to put at its destination, which is the buildspec naming no
+/// artifact file at all, or no file arriving for the paths it named. Nothing reports an
+/// upload that did not happen.
 fn upload_artifacts_phase(build: &Build, read: &Buildspec, due_millis: i64) -> BuildPhase {
     let destination = build
         .artifacts

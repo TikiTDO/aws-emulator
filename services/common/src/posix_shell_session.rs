@@ -41,11 +41,22 @@
 //!
 //! # What a session provides
 //!
-//! It runs IN THIS PROCESS. It has no process to start, no network to reach, no filesystem
-//! and no host environment: the utilities it provides are the ones whose whole effect is
-//! inside the session itself — its output, its status and its variables. The variables it
-//! starts with are the ones its caller hands it, because those are the environment the
-//! program is given.
+//! It runs IN THIS PROCESS. It has no process to start, no network to reach, no HOST
+//! filesystem and no host environment: the utilities it provides are the ones whose whole
+//! effect is inside the session itself — its output, its status, its variables and the files
+//! it holds itself. The variables it starts with are the ones its caller hands it, because
+//! those are the environment the program is given.
+//!
+//! # The working tree
+//!
+//! A program's commands write FILES — a build writes the file its artifacts name, a hook
+//! writes the configuration it was given — so a session holds a tree of its own: an output
+//! redirection (`> path`, `>> path`) collects what the command wrote and keeps it under that
+//! path in this session, and `cat` reads a path back out of it. The tree is session-local
+//! memory, keyed by the path the program named and bounded like everything else
+//! ([`Bounds::files`], [`Bounds::file_bytes`], [`Bounds::tree_bytes`]); no host file is
+//! opened, created or read, and every other redirection form (an input, another file
+//! descriptor, a duplication, a here-document) is still one this session does not perform.
 //!
 //! # Bounds
 //!
@@ -82,11 +93,13 @@ use std::collections::BTreeMap;
 /// The commands a session provides, as their names.
 ///
 /// Each one's whole effect is inside the session, which is why it can be performed in
-/// process: `echo` writes a line of the program's output, `true`, `false` and `:` answer a
-/// status, `exit` ends the session, and `export`/`unset` change its variables. A command
-/// that is not one of these needs a program, a working tree or a network a session does not
-/// have.
-pub const BUILT_IN_COMMANDS: &[&str] = &["echo", "true", "false", ":", "exit", "export", "unset"];
+/// process: `echo` writes a line of the program's output, `cat` writes a file this session
+/// holds, `true`, `false` and `:` answer a status, `exit` ends the session, and
+/// `export`/`unset` change its variables. A command that is not one of these needs a
+/// program, a host tree or a network a session does not have.
+pub const BUILT_IN_COMMANDS: &[&str] = &[
+    "echo", "cat", "true", "false", ":", "exit", "export", "unset",
+];
 
 /// The commands an assignment written before them persists in the session for: POSIX's
 /// special built-in utilities, for which "variable assignments specified with special
@@ -148,6 +161,14 @@ pub struct Bounds {
     pub session_variables: usize,
     /// How deeply a word's expansion is walked, applied to the pieces a quoted word nests.
     pub word_depth: usize,
+    /// How many files one session's own tree holds at once.
+    pub files: usize,
+    /// How many bytes ONE of those files may hold, which is also how much of a redirected
+    /// command's output is collected for it.
+    pub file_bytes: usize,
+    /// How many bytes the whole tree may hold at once, so neither a few large files nor very
+    /// many small ones grow it without a stated ceiling.
+    pub tree_bytes: usize,
 }
 
 impl Default for Bounds {
@@ -163,6 +184,9 @@ impl Default for Bounds {
             session_bytes: 1024 * 1024,
             session_variables: 4_096,
             word_depth: 32,
+            files: 256,
+            file_bytes: 256 * 1024,
+            tree_bytes: 4 * 1024 * 1024,
         }
     }
 }
@@ -214,6 +238,19 @@ const NESTING_WORDS: [&str; 16] = [
 /// `:;if` carries an `if` exactly as `: ; if` does.
 const WORD_SEPARATORS: [char; 10] = [';', '&', '|', '(', ')', '{', '}', '<', '>', '!'];
 
+/// The path a session's tree keys a file by, for the path a program named — `None` when the
+/// program named no path at all.
+///
+/// A relative path is what a program's commands write, and `./name` and `name` are the same
+/// file to them, so the one spelling that differs only in that prefix is folded into it.
+/// Nothing else about the path is interpreted: it is a key in this session's own tree, never
+/// a path on the host.
+fn file_path(named: &str) -> Option<String> {
+    let trimmed = named.trim();
+    let folded = trimmed.strip_prefix("./").unwrap_or(trimmed);
+    (!folded.is_empty()).then(|| folded.to_string())
+}
+
 /// Whether `line` is inside the bounds a parse is given: its size, and how many nested
 /// commands it opens — through a grouping character or a reserved word.
 ///
@@ -234,9 +271,26 @@ fn within_parse_bounds(line: &str, bounds: &Bounds) -> bool {
     grouped.saturating_add(worded) <= bounds.nesting
 }
 
+/// The file descriptor a session performs a redirection of: standard output, the one a
+/// command's own writes go to. A redirection of any other descriptor is a form this session
+/// does not perform.
+const STANDARD_OUTPUT: i32 = 1;
+
+/// What the command a redirection is in force for wrote, collected for the file it names.
+#[derive(Debug, Default)]
+struct Capture {
+    /// The lines the command wrote, in the order it wrote them.
+    lines: Vec<String>,
+    /// How many bytes those lines come to, kept as they are collected.
+    bytes: usize,
+    /// Set once the command wrote more than one file may hold ([`Bounds::file_bytes`]):
+    /// the write did not fit, so the command did not perform it.
+    overflowed: bool,
+}
+
 /// The session one caller-supplied program runs in: the variables its commands see and
-/// change, what its `echo` commands wrote (when the caller keeps output), and how much
-/// running is left in its budget.
+/// change, what its `echo` commands wrote (when the caller keeps output), the files its
+/// redirections left behind, and how much running is left in its budget.
 #[derive(Debug)]
 pub struct ShellSession {
     config: SessionConfig,
@@ -257,6 +311,13 @@ pub struct ShellSession {
     /// What the program wrote, one entry per performed `echo`, kept only when the
     /// configuration asks for it.
     output: Vec<String>,
+    /// The files this session's own tree holds, keyed by the path a redirection named.
+    files: BTreeMap<String, String>,
+    /// How many bytes that tree comes to, kept as it is written.
+    tree_bytes: usize,
+    /// Set while a redirection is in force for the command being performed: what it writes
+    /// is collected here for the file rather than kept as the program's own output.
+    captured: Option<Capture>,
 }
 
 impl ShellSession {
@@ -274,6 +335,9 @@ impl ShellSession {
             commands_left: config.bounds.commands,
             exit_status: None,
             output: Vec::new(),
+            files: BTreeMap::new(),
+            tree_bytes: 0,
+            captured: None,
             config,
         }
     }
@@ -302,6 +366,7 @@ impl ShellSession {
     pub fn into_output(self) -> Vec<String> {
         self.output
     }
+
 
     /// Perform one LINE of the program and answer the status the shell answered for it.
     ///
@@ -399,7 +464,8 @@ impl ShellSession {
     }
 
     /// Perform a simple command: its variable assignments, then the command its first word
-    /// names with the words after it as its arguments.
+    /// names with the words after it as its arguments, with what it writes going to the file
+    /// an output redirection names.
     ///
     /// A command with no word at all is the assignment form — "the variable assignments
     /// shall affect the current execution environment" — which is how a program sets a
@@ -407,13 +473,19 @@ impl ShellSession {
     /// that command's environment alone, and persists in the session only for the special
     /// built-in utilities POSIX keeps it for ([`PERSISTING_COMMANDS`]); since every word is
     /// expanded before the assignments are applied, a command that does not keep them sees
-    /// the value either way. Any prefix or suffix item that is neither a word nor an
-    /// assignment is a redirection or a substitution this session does not perform, and the
-    /// command is then not run.
+    /// the value either way. An output redirection of standard output collects what the
+    /// command wrote into this session's own tree ([`Self::redirection_of`]); any other
+    /// prefix or suffix item is a redirection form or a substitution this session does not
+    /// perform, and the command is then not run.
+    ///
+    /// The file a redirection names is written whatever the command answered, the way a
+    /// shell opens it before it resolves the command at all: a command this session has no
+    /// utility for leaves the file it redirected to behind, empty.
     fn run_simple_command(&mut self, simple: &::brush_parser::ast::SimpleCommand) -> i32 {
         self.commands_left = self.commands_left.saturating_sub(1);
         let mut assignments: Vec<(String, String)> = Vec::new();
         let mut words: Vec<String> = Vec::new();
+        let mut redirected: Option<(String, bool)> = None;
         let prefix = simple.prefix.as_ref().map(|prefix| &prefix.0);
         let suffix = simple.suffix.as_ref().map(|suffix| &suffix.0);
         for item in prefix.into_iter().chain(suffix).flatten() {
@@ -429,6 +501,12 @@ impl ShellSession {
                         return self.config.statuses.could_not_run;
                     };
                     assignments.push(pair);
+                }
+                ::brush_parser::ast::CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
+                    let Some(opened) = self.redirection_of(redirect) else {
+                        return self.config.statuses.could_not_run;
+                    };
+                    redirected = Some(opened);
                 }
                 _ => return self.config.statuses.could_not_run,
             }
@@ -450,11 +528,98 @@ impl ShellSession {
                 }
             }
         }
-        match name {
-            Some(name) => self.run_built_in(&name, &words),
-            // Nothing but assignments: they have been applied, which is the whole command.
-            None => self.config.statuses.success,
+        if redirected.is_some() {
+            self.captured = Some(Capture::default());
         }
+        let status = match name {
+            Some(name) => self.run_built_in(&name, &words),
+            // Nothing but assignments, or a redirection alone: they have been applied, which
+            // is the whole command.
+            None => self.config.statuses.success,
+        };
+        let captured = self.captured.take();
+        match redirected {
+            Some((path, append)) => {
+                if self.write_file(&path, append, captured.unwrap_or_default()) {
+                    status
+                } else {
+                    self.config.statuses.could_not_run
+                }
+            }
+            None => status,
+        }
+    }
+
+    /// The file one redirection of a simple command writes, as `(path, append)` — `None`
+    /// when it is a form this session does not perform.
+    ///
+    /// The two forms it does are the output redirections: `> path` writes the file from the
+    /// start and `>> path` adds to what it holds ("the file shall be opened for
+    /// appending"), each of standard output, which is where a command's own writes go.
+    /// Every other form names a descriptor, a file or a document this session has nothing
+    /// to connect: an input (there is no program to feed), another descriptor, a duplication,
+    /// a here-document or a process substitution.
+    fn redirection_of(&mut self, redirect: &::brush_parser::ast::IoRedirect) -> Option<(String, bool)> {
+        let ::brush_parser::ast::IoRedirect::File(descriptor, kind, target) = redirect else {
+            return None;
+        };
+        if descriptor.is_some_and(|descriptor| descriptor != STANDARD_OUTPUT) {
+            return None;
+        }
+        let append = match kind {
+            ::brush_parser::ast::IoFileRedirectKind::Write => false,
+            ::brush_parser::ast::IoFileRedirectKind::Append => true,
+            _ => return None,
+        };
+        let ::brush_parser::ast::IoFileRedirectTarget::Filename(word) = target else {
+            return None;
+        };
+        let named = self.expand_word(&word.value)?;
+        Some((file_path(&named)?, append))
+    }
+
+    /// Keep `lines` as the file `path`, from the start or added to what that file already
+    /// holds.
+    ///
+    /// Each line is written with the newline that ended it, which is what a command's output
+    /// carries. `false` is a write this session did not perform — the command wrote more
+    /// than one file may hold, or the tree is already holding [`Bounds::files`] files or
+    /// [`Bounds::tree_bytes`] bytes — which its caller reports as a command that could not
+    /// be run rather than as one that wrote the file.
+    fn write_file(&mut self, path: &str, append: bool, captured: Capture) -> bool {
+        if captured.overflowed {
+            return false;
+        }
+        let mut whole = if append {
+            self.files.get(path).cloned().unwrap_or_default()
+        } else {
+            String::new()
+        };
+        for line in &captured.lines {
+            whole.push_str(line);
+            whole.push('\n');
+        }
+        if whole.len() > self.config.bounds.file_bytes {
+            return false;
+        }
+        let displaced = self
+            .files
+            .get(path)
+            .map(|held| path.len().saturating_add(held.len()));
+        if displaced.is_none() && self.files.len() >= self.config.bounds.files {
+            return false;
+        }
+        let would_hold = self
+            .tree_bytes
+            .saturating_sub(displaced.unwrap_or(0))
+            .saturating_add(path.len())
+            .saturating_add(whole.len());
+        if would_hold > self.config.bounds.tree_bytes {
+            return false;
+        }
+        self.tree_bytes = would_hold;
+        self.files.insert(path.to_string(), whole);
+        true
     }
 
     /// One assignment of a simple command as the name and value it sets, or `None` when it
@@ -512,17 +677,35 @@ impl ShellSession {
     /// Write one line of the program's output, which is what `echo` does: the words it was
     /// given, separated by one space, as the shell's own `echo` writes them.
     ///
-    /// Nothing is kept for a session whose configuration asks for no output. A line past
-    /// [`OutputLimits::line_bytes`] is truncated on a character boundary, and a line past
-    /// [`OutputLimits::lines`] is not kept at all.
+    /// While a redirection is in force the line is collected for the file it names, so it is
+    /// not kept as the program's own output; a line that would take the write past
+    /// [`Bounds::file_bytes`] is not collected and the write does not happen at all.
+    ///
+    /// Otherwise nothing is kept for a session whose configuration asks for no output. A
+    /// line past [`OutputLimits::line_bytes`] is truncated on a character boundary, and a
+    /// line past [`OutputLimits::lines`] is not kept at all.
     fn write_line(&mut self, words: &[String]) {
+        let mut line = words.join(" ");
+        let file_bytes = self.config.bounds.file_bytes;
+        if let Some(captured) = self.captured.as_mut() {
+            let written = captured
+                .bytes
+                .saturating_add(line.len())
+                .saturating_add(1);
+            if written > file_bytes {
+                captured.overflowed = true;
+                return;
+            }
+            captured.bytes = written;
+            captured.lines.push(line);
+            return;
+        }
         let Some(limits) = self.config.output else {
             return;
         };
         if self.output.len() >= limits.lines {
             return;
         }
-        let mut line = words.join(" ");
         if line.len() > limits.line_bytes {
             let mut cut = limits.line_bytes;
             while cut > 0 && !line.is_char_boundary(cut) {
@@ -536,14 +719,15 @@ impl ShellSession {
     /// Perform the command `name` with `arguments`, when it is one this session provides
     /// ([`BUILT_IN_COMMANDS`]).
     ///
-    /// `echo` writes a line of the program's output. `true` and `:` answer success and
-    /// `false` answers failure, which is the whole of what those utilities do. `exit` ends
-    /// the session with the status its argument names, defaulting to success, and a status
-    /// outside 0..=255 is taken modulo 256 the way a shell takes an exit status. `export`
-    /// sets the variables its `NAME=VALUE` arguments name and `unset` removes them.
+    /// `echo` writes a line of the program's output. `cat` writes the lines of each file
+    /// this session's tree holds for the paths it was given. `true` and `:` answer success
+    /// and `false` answers failure, which is the whole of what those utilities do. `exit`
+    /// ends the session with the status its argument names, defaulting to success, and a
+    /// status outside 0..=255 is taken modulo 256 the way a shell takes an exit status.
+    /// `export` sets the variables its `NAME=VALUE` arguments name and `unset` removes them.
     fn run_built_in(&mut self, name: &str, arguments: &[String]) -> i32 {
         // The catalog is what this session provides: a command outside it needs a program, a
-        // working tree or a network this session does not have.
+        // host tree or a network this session does not have.
         if !BUILT_IN_COMMANDS.contains(&name) {
             return self.config.statuses.could_not_run;
         }
@@ -552,6 +736,7 @@ impl ShellSession {
                 self.write_line(arguments);
                 self.config.statuses.success
             }
+            "cat" => self.run_cat(arguments),
             "true" | ":" => self.config.statuses.success,
             "false" => self.config.statuses.failure,
             "exit" => {
@@ -589,6 +774,32 @@ impl ShellSession {
             }
             _ => self.config.statuses.could_not_run,
         }
+    }
+
+    /// Perform `cat`: write the lines of each file this session's tree holds for the paths it
+    /// was given.
+    ///
+    /// "cat … shall exit with a value >0 if an error occurred", and a path this tree holds no
+    /// file for is one this session could not read, so it answers failure while still writing
+    /// the files it does hold. `cat` with no operand reads standard input, which a session
+    /// has none of, so that form is one it does not perform.
+    fn run_cat(&mut self, arguments: &[String]) -> i32 {
+        if arguments.is_empty() {
+            return self.config.statuses.could_not_run;
+        }
+        let mut status = self.config.statuses.success;
+        for argument in arguments {
+            let held = file_path(argument).and_then(|path| self.files.get(&path).cloned());
+            match held {
+                Some(content) => {
+                    for line in content.lines() {
+                        self.write_line(&[line.to_string()]);
+                    }
+                }
+                None => status = self.config.statuses.failure,
+            }
+        }
+        status
     }
 
     /// `word` with its expansions resolved, or `None` when it carries an expansion this
@@ -711,7 +922,7 @@ mod tests {
     fn only_the_catalog_is_performed() {
         let statuses = Statuses::default();
         // (case, the line, the status it answers, the lines it wrote)
-        let rows: [(&str, &str, i32, &[&str]); 8] = [
+        let rows: [(&str, &str, i32, &[&str]); 9] = [
             ("echo", "echo one two", statuses.success, &["one two"]),
             ("true", "true", statuses.success, &[]),
             (":", ":", statuses.success, &[]),
@@ -723,8 +934,14 @@ mod tests {
                 &[],
             ),
             (
-                "a redirection",
-                "echo out > /tmp/file",
+                "an output redirection writes the session's own file",
+                "echo out > kept.txt",
+                statuses.success,
+                &[],
+            ),
+            (
+                "an input redirection",
+                "cat < kept.txt",
                 statuses.could_not_run,
                 &[],
             ),
@@ -757,8 +974,174 @@ mod tests {
         }
         assert_eq!(
             BUILT_IN_COMMANDS.len(),
-            7,
-            "case the catalog: expected the seven session-local utilities, got {BUILT_IN_COMMANDS:?}"
+            8,
+            "case the catalog: expected the eight session-local utilities, got {BUILT_IN_COMMANDS:?}"
+        );
+    }
+
+    /// RULE: a program's commands write FILES in the session's own tree — an output
+    /// redirection keeps what the command wrote under the path it named (`>` from the start,
+    /// `>>` added to what the file holds), `cat` reads one back, and a path the tree holds no
+    /// file for is one `cat` could not read.
+    ///
+    /// The rows differ along what the rule generalises over: which redirection operator the
+    /// program used, how many commands wrote the file, the path's spelling, whether the file
+    /// was ever written, and which command the redirection applies to.
+    #[test]
+    fn a_program_s_commands_write_files_in_the_session_s_tree() {
+        let statuses = Statuses::default();
+        // (case, the program, the status its last line answered, the lines it wrote)
+        let rows: [(&str, &str, i32, &[&str]); 8] = [
+            (
+                "a redirected write read back",
+                "echo first > out.txt\ncat out.txt",
+                statuses.success,
+                &["first"],
+            ),
+            (
+                "a second write from the start replaces the file",
+                "echo first > out.txt\necho second > out.txt\ncat out.txt",
+                statuses.success,
+                &["second"],
+            ),
+            (
+                "an appending write adds to it",
+                "echo first > out.txt\necho second >> out.txt\ncat out.txt",
+                statuses.success,
+                &["first", "second"],
+            ),
+            (
+                "an appending write to a file nothing wrote yet",
+                "echo only >> out.txt\ncat out.txt",
+                statuses.success,
+                &["only"],
+            ),
+            (
+                "the same file named with and without a leading ./",
+                "echo first > ./out.txt\ncat out.txt",
+                statuses.success,
+                &["first"],
+            ),
+            (
+                "a path nothing wrote",
+                "cat missing.txt",
+                statuses.failure,
+                &[],
+            ),
+            (
+                "an expansion names the path and the content",
+                "NAME=out.txt\nWHAT=written\necho $WHAT > $NAME\ncat out.txt",
+                statuses.success,
+                &["written"],
+            ),
+            (
+                "a redirected command this session has no utility for leaves the file empty",
+                "mvn package > out.txt\ncat out.txt",
+                statuses.success,
+                &[],
+            ),
+        ];
+        for (case, program, expected_status, expected_output) in rows {
+            let mut held = session();
+            let mut status = statuses.success;
+            for line in program.lines() {
+                status = held.run(line);
+            }
+            assert_eq!(
+                status, expected_status,
+                "case {case:?}: expected status {expected_status}, got {status}"
+            );
+            assert_eq!(
+                held.output(),
+                expected_output,
+                "case {case:?}: expected {expected_output:?}, got {:?}",
+                held.output()
+            );
+        }
+    }
+
+    /// RULE: the tree is bounded like everything else — a write past the per-file ceiling,
+    /// one past the whole tree's, and a file past the file count are each a write this
+    /// session did not perform, and the file it would have written is not there.
+    #[test]
+    fn the_tree_s_bounds_stop_the_write() {
+        let statuses = Statuses::default();
+
+        // One file may hold no more than `file_bytes`.
+        let mut held = ShellSession::new(
+            BTreeMap::new(),
+            SessionConfig {
+                bounds: Bounds {
+                    file_bytes: 8,
+                    ..Bounds::default()
+                },
+                output: Some(OutputLimits {
+                    lines: 8,
+                    line_bytes: 64,
+                }),
+                ..SessionConfig::default()
+            },
+        );
+        let status = held.run("echo 0123456789 > out.txt");
+        assert_eq!(
+            status, statuses.could_not_run,
+            "case the per-file ceiling: expected {}, got {status}",
+            statuses.could_not_run
+        );
+        assert_eq!(
+            held.run("cat out.txt"),
+            statuses.failure,
+            "case the per-file ceiling: the file must not be there, got {:?}",
+            held.output()
+        );
+
+        // The tree holds no more than `files` files.
+        let mut held = ShellSession::new(
+            BTreeMap::new(),
+            SessionConfig {
+                bounds: Bounds {
+                    files: 1,
+                    ..Bounds::default()
+                },
+                ..SessionConfig::default()
+            },
+        );
+        assert_eq!(
+            held.run("echo one > first.txt"),
+            statuses.success,
+            "case the file count: the first file is written"
+        );
+        assert_eq!(
+            held.run("echo two > second.txt"),
+            statuses.could_not_run,
+            "case the file count: a file past the count is not written"
+        );
+        assert_eq!(
+            held.run("echo again > first.txt"),
+            statuses.success,
+            "case the file count: a file the tree already holds is still written"
+        );
+
+        // The whole tree holds no more than `tree_bytes`.
+        let mut held = ShellSession::new(
+            BTreeMap::new(),
+            SessionConfig {
+                bounds: Bounds {
+                    tree_bytes: 24,
+                    ..Bounds::default()
+                },
+                ..SessionConfig::default()
+            },
+        );
+        assert_eq!(
+            held.run("echo onetwothree > first.txt"),
+            statuses.success,
+            "case the tree ceiling: the first file fits"
+        );
+        assert_eq!(
+            held.run("echo onetwothree > second.txt"),
+            statuses.could_not_run,
+            "case the tree ceiling: the write past it is not performed"
         );
     }
 

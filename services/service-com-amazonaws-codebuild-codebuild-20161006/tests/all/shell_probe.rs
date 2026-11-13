@@ -27,12 +27,14 @@ fn command_failure(command: &str, status: i32) -> Value {
 
 /// RULE: a command FORM this environment does not perform is not performed at all — it
 /// answers the way a shell answers a command it cannot run, which fails the phase that
-/// ran it. Nothing here reaches a process, a file, a socket or the host's environment,
-/// because the only commands it performs are the session-local ones above.
+/// ran it. Nothing here reaches a process, a socket or the host's environment, and no file
+/// of the HOST either: the files a build writes are its own session's
+/// (`buildspec_file_tree.rs` covers those), so a redirection that READS a path is still a
+/// form this environment does not perform.
 ///
-/// One row per containment the shell states: a compound command, a function definition, a
-/// redirection, a command substitution, an arithmetic expansion, a tilde prefix and an
-/// appending assignment.
+/// One row per containment the shell states: a compound command, a function definition, an
+/// input redirection, a command substitution, an arithmetic expansion, a tilde prefix and
+/// an appending assignment.
 #[tokio::test]
 async fn a_command_form_this_environment_does_not_perform_is_refused() {
     let router = emulator();
@@ -41,8 +43,8 @@ async fn a_command_form_this_environment_does_not_perform_is_refused() {
         ("a compound command", "if true; then echo yes; fi"),
         ("a loop", "while true; do echo again; done"),
         ("a function definition", "run() { echo hi; }"),
-        ("a redirection to a file", "echo marker > /tmp/marker"),
         ("a redirection reading a file", "echo marker < /etc/hostname"),
+        ("a redirection of another descriptor", "echo marker 2> errors.txt"),
         ("a command substitution", "echo $(date)"),
         ("a command substitution, backquoted", "echo `date`"),
         ("an arithmetic expansion", "echo $((1 + 1))"),
