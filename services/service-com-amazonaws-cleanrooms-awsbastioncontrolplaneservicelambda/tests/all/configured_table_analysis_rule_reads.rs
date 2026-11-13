@@ -26,7 +26,7 @@ use super::configured_table_analysis_rule_round_trip::{
 
 /// A policy of `rule_type`, so each row below breaks ONE thing — the pair holds no rule
 /// — rather than also carrying a policy of another type than the pair's.
-fn policy_of(rule_type: &str) -> serde_json::Value {
+pub(crate) fn policy_of(rule_type: &str) -> serde_json::Value {
     match rule_type {
         "LIST" => list_policy(&COLUMN_NAMES[..1], &COLUMN_NAMES[1..], Some(&["AND"]), None),
         "AGGREGATION" => aggregation_policy(&COLUMN_NAMES[1..2], "SUM", None, None, 2),

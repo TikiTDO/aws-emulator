@@ -2162,28 +2162,41 @@ pub fn configured_table_association_exists_message(name: &str, membership_id: &s
     )
 }
 
-/// The internal name of an analysis rule class, which is how the service names a rule
-/// TYPE in a refusal (the modelled catalog value is what the request and the stored rule
-/// carry).
+/// The internal, SHOUTY_SNAKE_CASE name of the analysis rule CLASS an analysis-rule type
+/// names, which is how the service names a rule TYPE in a "no such analysis rule" refusal
+/// (the modelled catalog value is what the request, the stored rule and the service's
+/// other messages carry).
 ///
-/// Catalog source: model shape `ConfiguredTableAssociationAnalysisRuleType`
-/// (AGGREGATION | LIST | CUSTOM). The rule applied to the whole catalog is "the catalog
-/// value as one CamelCase word", so a value added to it reads correctly without a second
-/// table to maintain. LIST is the one value whose class does not follow its catalog name:
-/// a list analysis returns the intersection of the joined tables, and the class is named
-/// for that, which is why it is the one branch written out here.
+/// Catalog source: the model shapes `ConfiguredTableAnalysisRuleType` and
+/// `ConfiguredTableAssociationAnalysisRuleType` (both AGGREGATION | LIST | CUSTOM). The
+/// rule applied to the whole catalog is "the class is named for its catalog value", so a
+/// value added to either reads correctly without a second table to maintain. LIST is the
+/// one value whose class does not follow its catalog name: a list analysis returns the
+/// intersection of the joined tables, and the class is named for that, which is why it is
+/// the one branch written out here.
 ///
 /// Only LIST's internal name is observed: the other two are derived by the rule above and
 /// are UNVERIFIED against the service, because neither the model nor any recorded refusal
 /// in this repository names them. The derivation, not the two derived strings, is what
 /// this function claims.
+pub fn analysis_rule_type_internal_name(analysis_rule_type: &str) -> &str {
+    if analysis_rule_type == ANALYSIS_RULE_TYPE_LIST {
+        return INTERNAL_ANALYSIS_RULE_CLASS_LIST;
+    }
+    analysis_rule_type
+}
+
+/// The internal name of the rule class the LIST analysis-rule type names — the one class
+/// not named for its catalog value. See [`analysis_rule_type_internal_name`].
+const INTERNAL_ANALYSIS_RULE_CLASS_LIST: &str = "INTERSECTION_LIST";
+
+/// The internal rule-class name ([`analysis_rule_type_internal_name`]) as the association
+/// plane renders it: the class name as one CamelCase word, the form that plane's refusals
+/// report a rule class by.
 pub fn configured_table_association_analysis_rule_type_internal_name(
     analysis_rule_type: &str,
 ) -> String {
-    if analysis_rule_type == ANALYSIS_RULE_TYPE_LIST {
-        return "IntersectionList".to_string();
-    }
-    capitalised_words(analysis_rule_type, "")
+    capitalised_words(analysis_rule_type_internal_name(analysis_rule_type), "")
 }
 
 /// The most tags one resource can carry.
@@ -2564,8 +2577,10 @@ pub fn table_reference_type(reference: &TableReference) -> &'static str {
 /// What the service says when the `(configured table, analysis rule type)` pair a
 /// request addresses holds no analysis rule.
 ///
-/// The two variable parts are the identifier and the type the REQUEST carried, echoed as
-/// sent: the pair is the rule's identity ("Configured table analysis rules are uniquely
+/// The variable parts are the identifier the REQUEST carried, echoed as sent, and the rule
+/// type rendered by the INTERNAL name of its rule class
+/// ([`analysis_rule_type_internal_name`]) rather than by the catalog value the path
+/// carried: the pair is the rule's identity ("Configured table analysis rules are uniquely
 /// identified by their configured table identifier and analysis rule type"), so the
 /// refusal names the pair that resolved to nothing rather than describing the table.
 /// Every analysis-rule operation that addresses a rule through that pair refuses a miss
@@ -2575,7 +2590,8 @@ pub fn no_such_configured_table_analysis_rule_message(
     analysis_rule_type: &str,
 ) -> String {
     format!(
-        "No such analysis rule with configuredTableId: {configured_table_identifier} and type {analysis_rule_type}"
+        "No such analysis rule with configuredTableId: {configured_table_identifier} and type {}",
+        analysis_rule_type_internal_name(analysis_rule_type)
     )
 }
 
@@ -2635,8 +2651,9 @@ pub fn configured_table_association_not_found_message(
 /// ([`configured_table_association_analysis_rule_type_internal_name`]) rather than by the
 /// catalog value from the path: the pair is the rule's identity, so the refusal names the
 /// pair that resolved to nothing rather than describing the association. Worded like the
-/// configured-table refusal ([`no_such_configured_table_analysis_rule_message`]) because
-/// the two name the same kind of miss.
+/// configured-table refusal ([`no_such_configured_table_analysis_rule_message`]), which
+/// names the same rule class by the same internal name, because the two name the same
+/// kind of miss.
 pub fn no_such_configured_table_association_analysis_rule_message(
     configured_table_association_identifier: &str,
     analysis_rule_type: &str,

@@ -44,11 +44,25 @@ const MAX_JOIN_OPERATORS: usize = 2;
 const ALL_ADDITIONAL_ANALYSES: [&str; 3] = ["ALLOWED", "REQUIRED", "NOT_ALLOWED"];
 
 /// The refusal a `(configured table, analysis rule type)` pair holding no analysis rule
-/// is answered with, as the service words it.
+/// is answered with, as the service words it: the type is named by the INTERNAL name of
+/// its rule class ([`internal_analysis_rule_class`]), not by the catalog value the request
+/// path carried.
 pub(crate) fn no_such_analysis_rule(configured_table_id: &str, analysis_rule_type: &str) -> String {
     format!(
-        "No such analysis rule with configuredTableId: {configured_table_id} and type {analysis_rule_type}"
+        "No such analysis rule with configuredTableId: {configured_table_id} and type {}",
+        internal_analysis_rule_class(analysis_rule_type)
     )
+}
+
+/// The internal, SHOUTY_SNAKE_CASE name of the rule class a `ConfiguredTableAnalysisRuleType`
+/// names (model shape `ConfiguredTableAnalysisRuleType`: AGGREGATION | LIST | CUSTOM): the
+/// catalog value itself, except for LIST, whose class is named for the intersection a list
+/// analysis returns.
+pub(crate) fn internal_analysis_rule_class(analysis_rule_type: &str) -> &str {
+    match analysis_rule_type {
+        "LIST" => "INTERSECTION_LIST",
+        other => other,
+    }
 }
 
 /// An `AnalysisRuleList` policy: `joinColumns` and `listColumns` are required;

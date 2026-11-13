@@ -39,6 +39,8 @@ mod collaboration_change_request_auto_commit;
 mod collaboration_change_request_decisions;
 #[path = "all/collaboration_change_requests.rs"]
 mod collaboration_change_requests;
+#[path = "all/configured_table_analysis_rule_class_names.rs"]
+mod configured_table_analysis_rule_class_names;
 #[path = "all/configured_table_analysis_rule_reads.rs"]
 mod configured_table_analysis_rule_reads;
 #[path = "all/configured_table_analysis_rule_round_trip.rs"]
