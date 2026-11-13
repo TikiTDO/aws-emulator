@@ -324,6 +324,42 @@ impl Chain {
         }
     }
 
+    /// Publish a version of the function `name` and answer the version label Lambda
+    /// minted for it.
+    ///
+    /// `pub(crate)` for the reason the helpers above are: a sibling suite whose rule is
+    /// about which VERSION an invocation ran reaches the version and alias plane through
+    /// these rather than opening a second seam onto Lambda's wire protocol.
+    pub(crate) async fn published(&self, name: &str) -> String {
+        let (status, version) = self
+            .lambda(
+                "POST",
+                &format!("{FUNCTIONS_URI}/{name}/versions"),
+                &json!({}),
+            )
+            .await;
+        assert_eq!(
+            status, 201,
+            "PublishVersion must answer 201, got {status} with {version}"
+        );
+        string(&version, "Version")
+    }
+
+    /// Point the alias `alias` of the function `name` at `version`.
+    pub(crate) async fn aliased(&self, name: &str, alias: &str, version: &str) {
+        let (status, created) = self
+            .lambda(
+                "POST",
+                &format!("{FUNCTIONS_URI}/{name}/aliases"),
+                &json!({ "Name": alias, "FunctionVersion": version }),
+            )
+            .await;
+        assert_eq!(
+            status, 201,
+            "CreateAlias must answer 201, got {status} with {created}"
+        );
+    }
+
     /// Create `definition` as a state machine, start one execution of it with `input`,
     /// and report that execution once it has left `RUNNING`.
     pub(crate) async fn ran(

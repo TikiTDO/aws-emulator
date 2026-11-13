@@ -553,6 +553,7 @@ fn names_its_state(cause: &str) -> bool {
         || cause.starts_with(INTRINSIC_OPENING)
         || cause.starts_with(FUNCTION_ERROR_OPENING)
         || cause.starts_with(REFERENCED_VALUE_OPENING)
+        || cause.starts_with(super::integration::UNUSABLE_PARAMETERS_OPENING)
         || names_a_parameter(cause)
 }
 

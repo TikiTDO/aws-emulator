@@ -131,6 +131,8 @@ mod lambda_callback_task_token;
 mod lambda_failure_source_routing;
 #[path = "all/lambda_function_timeout.rs"]
 mod lambda_function_timeout;
+#[path = "all/lambda_task_alias_version_and_payload.rs"]
+mod lambda_task_alias_version_and_payload;
 #[path = "all/lambda_task_control_flow.rs"]
 mod lambda_task_control_flow;
 #[path = "all/lambda_task_function_metrics.rs"]

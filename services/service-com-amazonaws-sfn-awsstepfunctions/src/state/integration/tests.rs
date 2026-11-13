@@ -731,7 +731,7 @@ fn an_optimized_integrations_result_carries_the_sdk_response_envelope() {
             payload: Vec::new(),
         };
         let members = document.as_object().expect("each row answers a document").clone();
-        let result = with_sdk_envelope(document, &answered);
+        let result = with_sdk_envelope(document, &answered, None);
         // Every member the operation answered is still there, untouched.
         for (member, value) in &members {
             assert_eq!(
@@ -772,12 +772,75 @@ fn an_optimized_integrations_result_carries_the_sdk_response_envelope() {
         headers: Vec::new(),
         payload: Vec::new(),
     };
-    let listed = with_sdk_envelope(::serde_json::json!([1, 2]), &answered);
+    let listed = with_sdk_envelope(::serde_json::json!([1, 2]), &answered, None);
     assert_eq!(
         listed,
         ::serde_json::json!([1, 2]),
         "case \"a response that is not an object\": expected it as it stands, got {listed}"
     );
+}
+
+/// Every header the envelope reports is named the way the invoked operation BINDS it,
+/// whatever case the parsed answer carried it in — and a header that operation binds no
+/// member to is reported as it came back.
+///
+/// The rows span what the rule generalises over: a bound header carried in the lower
+/// case an HTTP library normalises field names to, the same header carried in the
+/// model's own spelling, another member of the same operation's output, and a header the
+/// operation binds nothing to.
+#[test]
+fn the_envelope_names_a_header_the_way_the_operation_binds_it() {
+    let rest = LAMBDA_REST
+        .iter()
+        .find(|rest| rest.operation == "Invoke")
+        .expect("the invocation is a call this emulator makes");
+    // (case, the field name the answer carried, the field name the envelope reports)
+    let rows = [
+        (
+            "a bound header normalised to lower case",
+            "x-amz-executed-version",
+            "X-Amz-Executed-Version",
+        ),
+        (
+            "the same header already in the model's spelling",
+            "X-Amz-Executed-Version",
+            "X-Amz-Executed-Version",
+        ),
+        (
+            "another member of the same output",
+            "x-amz-function-error",
+            "X-Amz-Function-Error",
+        ),
+        (
+            "a header the operation binds nothing to",
+            "content-type",
+            "content-type",
+        ),
+    ];
+    for (case, carried, expected) in rows {
+        let answered = Answered {
+            status: 200,
+            error_type: None,
+            headers: vec![(carried.to_string(), "1".to_string())],
+            payload: Vec::new(),
+        };
+        let result = with_sdk_envelope(::serde_json::json!({}), &answered, Some(rest));
+        assert_eq!(
+            result
+                .pointer(&format!("/SdkHttpMetadata/HttpHeaders/{expected}"))
+                .and_then(Value::as_str),
+            Some("1"),
+            "case {case:?}: expected the header under {expected:?}, got {result}"
+        );
+        assert_eq!(
+            result
+                .pointer(&format!("/SdkHttpMetadata/AllHttpHeaders/{expected}"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1),
+            "case {case:?}: expected every value under {expected:?}, got {result}"
+        );
+    }
 }
 
 /// The access request a call is subject to: the IAM action the invoked operation
@@ -1099,7 +1162,7 @@ fn a_rest_integrations_request_binds_each_member_where_the_operation_does() {
             ::serde_json::json!({"FunctionName": "handler", "InvocationType": "Event"}),
             Some((
                 "/2015-03-31/functions/handler/invocations",
-                vec![("x-amz-invocation-type", "Event")],
+                vec![("X-Amz-Invocation-Type", "Event")],
                 "",
             )),
         ),
@@ -1114,9 +1177,9 @@ fn a_rest_integrations_request_binds_each_member_where_the_operation_does() {
             Some((
                 "/2015-03-31/functions/handler/invocations",
                 vec![
-                    ("x-amz-invocation-type", "RequestResponse"),
-                    ("x-amz-log-type", "Tail"),
-                    ("x-amz-client-context", "e30="),
+                    ("X-Amz-Invocation-Type", "RequestResponse"),
+                    ("X-Amz-Log-Type", "Tail"),
+                    ("X-Amz-Client-Context", "e30="),
                 ],
                 "",
             )),
@@ -1659,6 +1722,87 @@ fn a_served_invocation_whose_function_errored_is_a_failed_task() {
     assert!(
         read.is_none(),
         "case \"another operation's answer\": expected no failure, got {read:?}"
+    );
+}
+
+/// The `Payload` a Lambda task's PARAMETERS name carries the JSON document the function
+/// is invoked with, so parameters naming a bare JSON scalar for it name no invocation
+/// the call can be built from — and nothing else is refused here.
+///
+/// The rows span what the rule generalises over: each JSON type the parameter may be
+/// given (object, array, number, string, boolean), the null document (which names no
+/// value, exactly as an absent member does), parameters naming no `Payload` at all, and
+/// the two forms that carry no parameter for it — a `Resource` that names the FUNCTION,
+/// whose event is the state's own data, and a call of another operation.
+#[test]
+fn a_payload_parameter_that_is_not_a_document_names_no_invocation() {
+    let optimized = read("arn:aws:states:::lambda:invoke").expect("this names a call");
+    // (case, the Payload the parameters name, whether they build a call)
+    let rows: &[(&str, Option<Value>, bool)] = &[
+        ("an object", Some(::serde_json::json!({"n": 1})), true),
+        ("an array", Some(::serde_json::json!([1, 2])), true),
+        ("the empty object", Some(::serde_json::json!({})), true),
+        ("the null document", Some(Value::Null), true),
+        ("no Payload at all", None, true),
+        ("a number", Some(::serde_json::json!(42)), false),
+        ("a string", Some(::serde_json::json!("text")), false),
+        ("a boolean", Some(::serde_json::json!(true)), false),
+    ];
+    for (case, payload, usable) in rows {
+        let mut parameters = ::serde_json::Map::new();
+        parameters.insert(
+            FUNCTION_NAME_MEMBER.to_string(),
+            Value::String("handler".to_string()),
+        );
+        if let Some(payload) = payload {
+            parameters.insert(PAYLOAD_MEMBER.to_string(), payload.clone());
+        }
+        let request = Value::Object(parameters);
+        let refused = unusable_parameters(&optimized, &request);
+        match usable {
+            true => assert!(
+                refused.is_none(),
+                "case {case:?}: these parameters name an invocation, got {refused:?}"
+            ),
+            false => {
+                let Some(failed) = refused else {
+                    panic!("case {case:?}: expected a refusal, got none")
+                };
+                assert_eq!(
+                    failed.error,
+                    super::super::asl::RUNTIME_ERROR,
+                    "case {case:?}: expected the runtime error, got {failed:?}"
+                );
+                assert!(
+                    failed.cause.starts_with(UNUSABLE_PARAMETERS_OPENING)
+                        && failed.cause.contains(PAYLOAD_MEMBER),
+                    "case {case:?}: the diagnosis must name the parameters and the member that \
+                     could not be used, got {:?}",
+                    failed.cause
+                );
+            }
+        }
+    }
+
+    // A `Resource` that named the FUNCTION carries the state's data as the EVENT rather
+    // than as a parameter, so a bare value is the event it is and nothing is refused.
+    let direct = read("arn:aws:lambda:us-west-2:000000000000:function:handler")
+        .expect("a function's ARN names an invocation");
+    let event = ::serde_json::json!(7);
+    let refused = unusable_parameters(&direct, &direct.operation_input(&event));
+    assert!(
+        refused.is_none(),
+        "case \"a Resource naming the function\": the event is the state's own data, got \
+         {refused:?}"
+    );
+
+    // Another operation's parameters are judged by nothing here: `Payload` is `Invoke`'s
+    // own input member.
+    let elsewhere = read("arn:aws:states:::sqs:sendMessage").expect("this names a call");
+    let refused = unusable_parameters(&elsewhere, &::serde_json::json!({"Payload": 42}));
+    assert!(
+        refused.is_none(),
+        "case \"another operation's parameters\": expected no refusal, got {refused:?}"
     );
 }
 

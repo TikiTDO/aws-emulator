@@ -642,17 +642,17 @@ const LAMBDA_REST: &[Rest] = &[Rest {
     uri: "/2015-03-31/functions/{FunctionName}/invocations",
     request_body: Body::Member("Payload"),
     headers: &[
-        ("InvocationType", "x-amz-invocation-type"),
-        ("LogType", "x-amz-log-type"),
-        ("ClientContext", "x-amz-client-context"),
+        ("InvocationType", "X-Amz-Invocation-Type"),
+        ("LogType", "X-Amz-Log-Type"),
+        ("ClientContext", "X-Amz-Client-Context"),
     ],
     query: &[("Qualifier", "Qualifier")],
     response_body: Body::Member("Payload"),
     response_status: "StatusCode",
     response_headers: &[
-        ("ExecutedVersion", "x-amz-executed-version"),
-        ("FunctionError", "x-amz-function-error"),
-        ("LogResult", "x-amz-log-result"),
+        ("ExecutedVersion", "X-Amz-Executed-Version"),
+        ("FunctionError", "X-Amz-Function-Error"),
+        ("LogResult", "X-Amz-Log-Result"),
     ],
 }];
 
@@ -1531,6 +1531,81 @@ const ERROR_TYPE_MEMBER: &str = "errorType";
 /// attribute to one: "Unhandled errors in Lambda are reported as `Lambda.Unknown` in the
 /// error output", a name a definition's `Retry` or `Catch` matches on.
 const LAMBDA_UNKNOWN_ERROR: &str = "Lambda.Unknown";
+
+/// How the diagnosis of PARAMETERS the integration could not build its call from opens,
+/// which is what tells it from every other cause and makes the state name itself around
+/// it ([`super::asl::names_its_state`]).
+///
+/// `pub(super)`, because the module that words the state around a diagnosis is the one
+/// that reads this opening.
+pub(super) const UNUSABLE_PARAMETERS_OPENING: &str = "The Parameters '";
+
+/// The failure the task's own PARAMETERS are, for parameters the invoked operation
+/// cannot be called with at all, or `None` for parameters that build a call.
+///
+/// `Payload` is "The JSON that you want to provide to your Lambda function as input"
+/// (`smithy_query(query="doc",shape="InvocationRequest",member="Payload",model_path=
+/// "services/service-com-amazonaws-lambda-awsgirapiservice/smithy-model/
+/// com-amazonaws-lambda-awsgirapiservice.json")`), so the parameter carries the JSON
+/// DOCUMENT the invocation is made with — an object or an array. A bare JSON scalar is a
+/// value rather than a document, so parameters whose `Payload` resolved to one name no
+/// invocation this call can be built from, and the task fails on its own parameters
+/// before any request is sent.
+///
+/// The diagnosis is the one the service words for parameters it could not start a task
+/// with: the parameters AS RESOLVED, and then the deserialization of the member that
+/// could not be read — the member's own name and the JSON value it was handed, both
+/// taken from those resolved parameters, because which value a path resolved to is what
+/// a reader has to be told.
+///
+/// A parameter the request carries as the NULL document names no value at all, which is
+/// how this module's own request builder reads one ([`Rest::wired`]): such a request is
+/// the one that names no payload, and a function invoked with no event is what it asks
+/// for, so it is not refused here.
+///
+/// Only the integration forms whose request IS the task's parameters are judged here
+/// ([`Call::invokes`]): a `Resource` that names the FUNCTION carries the state's data as
+/// the event rather than as a parameter, so there is no parameter to refuse.
+///
+/// Pure, so the reading of every parameter form is pinned by this module's own tests.
+fn unusable_parameters(call: &Call, request: &Value) -> Option<Failed> {
+    if call.api.namespace != LAMBDA_NAMESPACE
+        || call.operation != LAMBDA_INVOKE_OPERATION
+        || call.invokes.is_some()
+    {
+        return None;
+    }
+    let payload = request.get(PAYLOAD_MEMBER)?;
+    if matches!(
+        payload,
+        Value::Object(_) | Value::Array(_) | Value::Null
+    ) {
+        return None;
+    }
+    Some(Failed {
+        error: super::asl::RUNTIME_ERROR.to_string(),
+        cause: format!(
+            "{UNUSABLE_PARAMETERS_OPENING}{request}' could not be used to start the Task: \
+             [Cannot deserialize the '{PAYLOAD_MEMBER}' of the invocation from {} value \
+             {payload}]",
+            json_kind(payload)
+        ),
+    })
+}
+
+/// How the deserialization of a member names the JSON VALUE it was handed: the kind of
+/// value the document carried where the member takes another, which is the only part of
+/// that sentence the request decides besides the value itself.
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "Null",
+        Value::Bool(_) => "Boolean",
+        Value::Number(_) => "Number",
+        Value::String(_) => "String",
+        Value::Array(_) => "Array",
+        Value::Object(_) => "Object",
+    }
+}
 
 impl Call {
     /// The document the invoked operation receives as its INPUT, for a task whose state
@@ -4147,6 +4222,11 @@ pub async fn call_api(
     request: &Value,
 ) -> Answer {
     let api = call.api;
+    // Parameters the invoked operation cannot be called with at all fail the task on its
+    // own parameters, before a request is built out of them ([`unusable_parameters`]).
+    if let Some(failed) = unusable_parameters(call, request) {
+        return Err(failed);
+    }
     let built = match wired(call, request) {
         Ok(built) => built,
         Err(why) => {
@@ -4198,6 +4278,7 @@ pub async fn call_api(
                     None if call.sdk_envelope => Ok(with_sdk_envelope(
                         in_epoch_millis(document, call.epoch_millis),
                         &answered,
+                        call.rest,
                     )),
                     None => Ok(in_epoch_millis(document, call.epoch_millis)),
                 },
@@ -4352,8 +4433,16 @@ fn in_epoch_millis(document: Value, members: &[&str]) -> Value {
 /// body is not an object carries no members to put the envelope beside, so it is
 /// reported as it stands.
 ///
+/// A header is reported under the FIELD NAME the invoked operation binds it to, which
+/// is the name the service writes on the wire and so the name the SDK's own envelope
+/// exposes it under: HTTP field names are case-insensitive and the client library this
+/// call goes through normalises every one it parses to lower case, so the spelling the
+/// envelope reports is read back off that operation's bindings ([`Rest`]) rather than
+/// from the parsed answer. A header the operation binds no member to is reported as the
+/// answer carried it.
+///
 /// Pure, so the shape of the envelope is pinned by this module's own tests.
-fn with_sdk_envelope(document: Value, answered: &Answered) -> Value {
+fn with_sdk_envelope(document: Value, answered: &Answered, rest: Option<&Rest>) -> Value {
     let Value::Object(mut members) = document else {
         return document;
     };
@@ -4361,12 +4450,13 @@ fn with_sdk_envelope(document: Value, answered: &Answered) -> Value {
     // header was repeated with, which is the pair the SDK exposes.
     let mut single = Map::new();
     let mut all: Map<String, Value> = Map::new();
-    for (name, value) in &answered.headers {
+    for (carried, value) in &answered.headers {
+        let name = bound_field(rest, carried);
         single.insert(name.clone(), Value::String(value.clone()));
-        match all.get_mut(name).and_then(Value::as_array_mut) {
+        match all.get_mut(&name).and_then(Value::as_array_mut) {
             Some(values) => values.push(Value::String(value.clone())),
             None => {
-                all.insert(name.clone(), Value::Array(vec![Value::String(value.clone())]));
+                all.insert(name, Value::Array(vec![Value::String(value.clone())]));
             }
         }
     }
@@ -4386,6 +4476,27 @@ fn with_sdk_envelope(document: Value, answered: &Answered) -> Value {
     }
     members.insert(SDK_RESPONSE_METADATA.to_string(), Value::Object(response));
     Value::Object(members)
+}
+
+/// The field name `carried` is reported under: the spelling the invoked operation's
+/// own bindings give that header ([`Rest::response_headers`]) where it binds a member
+/// to it, and the spelling the answer carried it in where it binds none.
+///
+/// HTTP field names are case-insensitive, so the two name one header; which of them the
+/// envelope reports is what a definition reading `$.SdkHttpMetadata.HttpHeaders` sees,
+/// and that is the name the invoked service writes — the one its model states.
+///
+/// A header the operation binds NO member to — the transport's own `content-type` and
+/// `content-length`, the request id — is reported as the answer carried it, because
+/// nothing in the operation's model states a spelling for it and this emulator does not
+/// invent one.
+///
+/// Pure, so it is pinned by this module's own tests.
+fn bound_field(rest: Option<&Rest>, carried: &str) -> String {
+    rest.into_iter()
+        .flat_map(|rest| rest.response_headers.iter())
+        .find(|(_, field)| field.eq_ignore_ascii_case(carried))
+        .map_or_else(|| carried.to_string(), |(_, field)| (*field).to_string())
 }
 
 /// The result or the failure one answer carries.
