@@ -5,9 +5,10 @@
 //! RULE under test: **`DeletionMode` `FORCE_DELETE_STACK` deletes a stack that is stuck in
 //! `DELETE_FAILED` due to a resource deletion failure, so a deletion it would START is
 //! accepted only from that status; from every other status a stack holds, the request is
-//! refused `400 ValidationError` in this operation's own template for a deletion its target
-//! does not admit — the bracketed stack the request named, then the condition that refused it
-//! — and nothing of the stack is touched. The standard mode — named, or not named at all — is
+//! refused `400 ValidationError` whose message names the stack by its stack id and states the
+//! one status in which the mode may be activated — fixed text otherwise, carrying neither the
+//! status the stack is in nor the identifier form the request used — and nothing of the stack
+//! is touched. The standard mode — named, or not named at all — is
 //! not gated this way: it is how a stack is deleted from the statuses a deletion starts from.
 //! A repeat of a deletion already in flight starts nothing, so it is the same no-op success
 //! under either mode.**
@@ -44,12 +45,13 @@ const TEMPLATE: &str = r#"{"Resources":{"Param":{"Type":"AWS::SSM::Parameter",
      "Properties":{"Type":"String","Value":"forced-delete-gate"}}}}"#;
 
 /// The refusal a forced deletion gets from a stack that is not stuck in a failed deletion:
-/// the stack the request named, the mode it asked for, and the status that refused it.
-fn force_delete_needs_a_failed_deletion(stack_name: &str, status: &str) -> String {
+/// the stack's id, then the one status the mode may be activated in.
+fn force_delete_needs_a_failed_deletion(stack_id: &str) -> String {
     format!(
-        "Stack [{stack_name}] cannot be deleted with DeletionMode {} while it is in {status} \
-         state",
-        deletion_mode::FORCE_DELETE_STACK
+        "Invalid operation on stack [{stack_id}]. You can activate DeletionMode {} in a \
+         delete stack operation only when the stack is in the {} state.",
+        deletion_mode::FORCE_DELETE_STACK,
+        status::DELETE_FAILED
     )
 }
 
@@ -240,7 +242,7 @@ async fn only_a_failed_deletion_takes_the_forced_deletion_mode() {
              {deleted}",
             row.case, row.seeded
         );
-        let expected = force_delete_needs_a_failed_deletion(row.stack, row.seeded);
+        let expected = force_delete_needs_a_failed_deletion(&stack_id);
         assert_eq!(
             (
                 xml_text(&deleted, "Code").unwrap_or_default(),

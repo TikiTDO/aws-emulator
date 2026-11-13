@@ -181,22 +181,22 @@ impl From<DeleteStackErrorModeled> for DeleteStackError {
 /// The message `DeleteStack` answers a request whose `DeletionMode` is `FORCE_DELETE_STACK`
 /// against a stack whose status is not the one that mode exists for.
 ///
-/// Worded in this OPERATION's own template for a deletion its target does not admit, which
-/// is the sentence it answers a stack whose termination protection blocks the delete with:
-/// `Stack [<name>] cannot be deleted while <the condition that refused>` — the bracketed
-/// stack as the REQUEST spelled it, and then what stands in the way. Here that condition is
-/// the status the stack is in, read from the store, since `DeletionMode`
-/// `FORCE_DELETE_STACK` is "delete the stack if it's stuck in a DELETE_FAILED state due to
-/// resource deletion failure" and so acts on that one status: a stack no resource deletion
-/// has failed on is deleted by the standard behaviour, which abandons none of its resources.
+/// Everything outside the brackets is FIXED text: the operation names the stack the request
+/// resolved to and then states the one status in which the mode may be activated, since
+/// `DeletionMode` `FORCE_DELETE_STACK` is "delete the stack if it's stuck in a DELETE_FAILED
+/// state due to resource deletion failure" and so acts on that one status — a stack no
+/// resource deletion has failed on is deleted by the standard behaviour, which abandons none
+/// of its resources. The status the stack happens to be in is NOT part of the sentence.
 ///
-/// The two variable parts come from the request and from this store; no part of the sentence
-/// comes from any one run.
-fn force_delete_needs_a_failed_deletion(stack_name: &str, status: &str) -> String {
+/// The one variable part is the stack's id, read from this store, so the refusal names the
+/// stack whatever identifier form the request spelled it with; no part of the sentence comes
+/// from any one run.
+fn force_delete_needs_a_failed_deletion(stack_id: &str) -> String {
     format!(
-        "Stack [{stack_name}] cannot be deleted with DeletionMode {} while it is in {status} \
-         state",
-        crate::state::deletion_mode::FORCE_DELETE_STACK
+        "Invalid operation on stack [{stack_id}]. You can activate DeletionMode {} in a \
+         delete stack operation only when the stack is in the {} state.",
+        crate::state::deletion_mode::FORCE_DELETE_STACK,
+        status::DELETE_FAILED
     )
 }
 
@@ -430,7 +430,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 && previous.status != status::DELETE_FAILED
             {
                 return Err(crate::scaffolded::Scaffolded::validation_error(
-                    force_delete_needs_a_failed_deletion(&input.stack_name, &previous.status),
+                    force_delete_needs_a_failed_deletion(&previous.stack_id),
                 ));
             }
             // CloudFormation runs ONE operation at a time against a stack, and the operation

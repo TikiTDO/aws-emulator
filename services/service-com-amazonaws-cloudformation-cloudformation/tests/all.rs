@@ -167,6 +167,8 @@ mod failed_resource_status_reason;
 mod failed_update_resource_rollback;
 #[path = "all/forced_deletion_is_gated_by_status.rs"]
 mod forced_deletion_is_gated_by_status;
+#[path = "all/forced_deletion_refusal_wording.rs"]
+mod forced_deletion_refusal_wording;
 #[path = "all/forced_stack_deletion.rs"]
 mod forced_stack_deletion;
 #[path = "all/foreach_expanded_output_values.rs"]
