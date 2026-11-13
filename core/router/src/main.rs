@@ -184,9 +184,68 @@ async fn build_and_serve(options: RunOptions) {
 
     let engine: Arc<InMemoryEngine> = Arc::new(InMemoryEngine::new());
 
+    // The state directory is selected ONCE, here: root and namespace validated and then fixed.
+    // The same value goes to everything that persists (service snapshots now; the payload store
+    // and the emulator's private identity are installed from it on the line above
+    // `Persistence::all`), so no writer re-reads the environment or picks a different place.
+    let state_dir = match service_common::persist::StateDir::from_env() {
+        Ok(state_dir) => state_dir,
+        Err(error) => {
+            eprintln!("emulator state directory refused: {error}");
+            std::process::exit(1);
+        }
+    };
+    // With a state directory, every persisted service's state comes back BEFORE the router is
+    // built or a listener opens, and a snapshot that cannot be read honestly stops the boot.
+    let persistence = match state_dir {
+        Some(state_dir) => {
+            match aws_emulator_router::persistence::Persistence::all(engine.clone(), state_dir) {
+                Ok(persistence) => Some(Arc::new(persistence)),
+                Err(error) => {
+                    eprintln!("emulator state directory refused: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => None,
+    };
+    if let Some(persistence) = &persistence {
+        match persistence.restore() {
+            Ok(outcome) => tracing::info!(
+                restored = ?outcome.restored,
+                started_empty = ?outcome.empty,
+                "persisted state restored"
+            ),
+            Err(error) => {
+                eprintln!("emulator state could not be restored: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let router = aws_emulator_router::build_router(engine);
 
-    let outcome = emulator_server::serve_emulator_until_shutdown(router).await;
+    let outcome = match &persistence {
+        Some(persistence) => {
+            // Work that changes state after its response (a container a task launched, a clock
+            // move) has no request behind it to write it; this writes it within two seconds.
+            let periodic = persistence.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+                loop {
+                    tick.tick().await;
+                    periodic.save_changed().await;
+                }
+            });
+            let served = emulator_server::serve_emulator_until_shutdown(
+                aws_emulator_router::persistence::PersistingRouter::new(router, persistence.clone()),
+            )
+            .await;
+            persistence.save_changed().await;
+            served
+        }
+        None => emulator_server::serve_emulator_until_shutdown(router).await,
+    };
     // Only a clean end may send the final batch: a session without one is how an
     // abnormal end is recognised, so a failed serve flushes without marking it final.
     match outcome {

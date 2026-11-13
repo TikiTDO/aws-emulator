@@ -31,6 +31,7 @@ pub struct DescribeFpgaImagesOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#FpgaImage")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FpgaImage {
     pub fpga_image_id: Option<String>,
     pub fpga_image_global_id: Option<String>,
@@ -39,7 +40,9 @@ pub struct FpgaImage {
     pub shell_version: Option<String>,
     pub pci_id: Option<PciId>,
     pub state: Option<FpgaImageState>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_time: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub update_time: Option<::aws_smithy_types::DateTime>,
     pub owner_id: Option<String>,
     pub owner_alias: Option<String>,
@@ -52,6 +55,7 @@ pub struct FpgaImage {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PciId")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PciId {
     pub device_id: Option<String>,
     pub vendor_id: Option<String>,
@@ -61,6 +65,7 @@ pub struct PciId {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#FpgaImageState")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FpgaImageState {
     pub code: Option<String>,
     pub message: Option<String>,

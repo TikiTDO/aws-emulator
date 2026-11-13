@@ -62,6 +62,7 @@ pub fn grant_operation_rank(operation: &str) -> usize {
 /// principals to use KMS keys in cryptographic operations"
 /// (`smithy_query(query="doc",shape="CreateGrant")`).
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Grant {
     /// The minted grant id, which is also this record's map key.
     pub grant_id: String,

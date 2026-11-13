@@ -95,6 +95,7 @@ pub fn invalid_ipv6_pool_id_malformed<E>(pool_id: &str) -> Scaffolded<E> {
 /// would be storing a cache that can drift. The ranges are the one source of truth and
 /// [`ComAmazonawsEc2Amazonec2State::ipv6_pool_view`] derives the rest on read.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ipv6PoolRecord {
     /// The pool's own id (`ipv6pool-ec2-…`), minted by the store.
     pub pool_id: String,

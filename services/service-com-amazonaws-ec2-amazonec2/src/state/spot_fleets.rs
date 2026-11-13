@@ -279,6 +279,7 @@ pub type SpotFleetRequestTransition = ClockTransition<&'static str>;
 /// instance it launches provides — so the state the fleet derives from a request is always
 /// the one the Spot Instance request store holds.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SpotFleetPlacement {
     /// The `SpotInstanceRequestId`, a key of
     /// [`ComAmazonawsEc2Amazonec2State::spot_instance_requests`].
@@ -294,6 +295,8 @@ pub struct SpotFleetPlacement {
 /// `RequestSpotFleet` answers the id of the view stored here and `DescribeSpotFleetRequests`
 /// reports the view itself, so the two cannot describe one fleet differently.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct SpotFleetRequestRecord {
     /// The fleet as the model shapes it, carrying the state reached so far and the capacity
     /// its placements have fulfilled.

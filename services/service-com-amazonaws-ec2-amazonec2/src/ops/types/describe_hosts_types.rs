@@ -29,6 +29,7 @@ pub struct DescribeHostsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Host")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Host {
     pub auto_placement: Option<String>,
     pub availability_zone: Option<String>,
@@ -39,7 +40,9 @@ pub struct Host {
     pub host_reservation_id: Option<String>,
     pub instances: Option<Vec<HostInstance>>,
     pub state: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub allocation_time: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub release_time: Option<::aws_smithy_types::DateTime>,
     pub tags: Option<Vec<Tag>>,
     pub host_recovery: Option<String>,
@@ -55,6 +58,7 @@ pub struct Host {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AvailableCapacity")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AvailableCapacity {
     pub available_instance_capacity: Option<Vec<InstanceCapacity>>,
     pub available_v_cpus: Option<i32>,
@@ -62,6 +66,7 @@ pub struct AvailableCapacity {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InstanceCapacity")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceCapacity {
     pub available_capacity: Option<i32>,
     pub instance_type: Option<String>,
@@ -70,6 +75,7 @@ pub struct InstanceCapacity {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#HostProperties")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct HostProperties {
     pub cores: Option<i32>,
     pub instance_type: Option<String>,
@@ -80,6 +86,7 @@ pub struct HostProperties {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#HostInstance")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct HostInstance {
     pub instance_id: Option<String>,
     pub instance_type: Option<String>,
@@ -88,6 +95,7 @@ pub struct HostInstance {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#HostCpuOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct HostCpuOptions {
     pub amd_sev_snp: Option<String>,
 }

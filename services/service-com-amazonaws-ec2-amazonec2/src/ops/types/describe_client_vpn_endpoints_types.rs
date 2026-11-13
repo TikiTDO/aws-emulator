@@ -30,6 +30,7 @@ pub struct DescribeClientVpnEndpointsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ClientVpnEndpoint")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClientVpnEndpoint {
     pub client_vpn_endpoint_id: Option<String>,
     pub description: Option<String>,
@@ -64,6 +65,7 @@ pub struct ClientVpnEndpoint {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AssociatedTargetNetwork")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AssociatedTargetNetwork {
     pub network_id: Option<String>,
     pub network_type: Option<String>,
@@ -71,6 +73,7 @@ pub struct AssociatedTargetNetwork {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ClientVpnAuthentication")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClientVpnAuthentication {
     pub r#type: Option<String>,
     pub active_directory: Option<DirectoryServiceAuthentication>,
@@ -80,18 +83,21 @@ pub struct ClientVpnAuthentication {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#DirectoryServiceAuthentication")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DirectoryServiceAuthentication {
     pub directory_id: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CertificateAuthentication")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CertificateAuthentication {
     pub client_root_certificate_chain: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#FederatedAuthentication")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FederatedAuthentication {
     pub saml_provider_arn: Option<String>,
     pub self_service_saml_provider_arn: Option<String>,
@@ -99,6 +105,7 @@ pub struct FederatedAuthentication {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ConnectionLogResponseOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ConnectionLogResponseOptions {
     pub enabled: Option<bool>,
     pub cloudwatch_log_group: Option<String>,
@@ -108,6 +115,7 @@ pub struct ConnectionLogResponseOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ClientConnectResponseOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClientConnectResponseOptions {
     pub enabled: Option<bool>,
     pub lambda_function_arn: Option<String>,
@@ -116,6 +124,7 @@ pub struct ClientConnectResponseOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ClientVpnEndpointAttributeStatus")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClientVpnEndpointAttributeStatus {
     pub code: Option<String>,
     pub message: Option<String>,
@@ -123,6 +132,7 @@ pub struct ClientVpnEndpointAttributeStatus {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ClientLoginBannerResponseOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClientLoginBannerResponseOptions {
     pub enabled: Option<bool>,
     pub banner_text: Option<String>,
@@ -130,12 +140,14 @@ pub struct ClientLoginBannerResponseOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ClientRouteEnforcementResponseOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClientRouteEnforcementResponseOptions {
     pub enforced: Option<bool>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayConfigurationDescribeEndpointStructure")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayConfigurationDescribeEndpointStructure {
     pub transit_gateway_id: Option<String>,
     pub transit_gateway_attachment_id: Option<String>,
@@ -145,12 +157,14 @@ pub struct TransitGatewayConfigurationDescribeEndpointStructure {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#DevicePostureResponseOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DevicePostureResponseOptions {
     pub trust_providers: Option<Vec<ClientVpnTrustProvider>>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ClientVpnTrustProvider")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClientVpnTrustProvider {
     pub trust_provider_type: Option<String>,
     pub tenant_id: Option<String>,

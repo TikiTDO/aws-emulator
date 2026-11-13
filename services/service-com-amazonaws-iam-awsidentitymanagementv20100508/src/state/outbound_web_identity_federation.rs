@@ -26,6 +26,7 @@ use super::*;
 /// Written by the enable and the disable, read by all three operations: nothing else in
 /// this store decides what those calls answer.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct OutboundWebIdentityFederation {
     /// "A unique issuer URL for your Amazon Web Services account that hosts the OpenID
     /// Connect (OIDC) discovery endpoints"

@@ -2270,3 +2270,6 @@ pub mod host_runtime;
 /// What a service asks for when it runs something real on the host: desired and observed state,
 /// placed per kind of workload.
 pub mod workload;
+/// What of a service survives the emulator restarting: an opt-in snapshot per service, written
+/// atomically under `EMULATOR_STATE_DIR`.
+pub mod persist;

@@ -179,6 +179,7 @@ pub fn require_known_client_vpn_endpoint<E>(
 /// `DescribeClientVpnTargetNetworks` without a field-by-field copy that can silently drop
 /// one.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClientVpnTargetNetworkRecord {
     /// The association as the model shapes it, carrying the status reached so far.
     pub view: crate::ops::types::TargetNetwork,
@@ -675,6 +676,7 @@ pub fn client_vpn_active_association_not_found<E>(
 /// (`CreateClientVpnRouteRequest$TargetVpcSubnetId`) because traffic leaves through the
 /// endpoint's attachment instead.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClientVpnRouteKey {
     /// "The ID of the Client VPN endpoint with which the route is associated"
     /// (`ClientVpnRoute$ClientVpnEndpointId`).
@@ -714,6 +716,7 @@ impl ClientVpnRouteKey {
 /// of this module holds one: a member a writer sets round-trips through
 /// `DescribeClientVpnRoutes` without a field-by-field copy that can silently drop one.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClientVpnRouteRecord {
     /// The route as the model shapes it, carrying the status reached so far.
     pub view: crate::ops::types::ClientVpnRoute,

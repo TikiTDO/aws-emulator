@@ -31,8 +31,10 @@ pub struct GetSAMLProviderOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#SAMLPrivateKey")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SAMLPrivateKey {
     pub key_id: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub timestamp: Option<::aws_smithy_types::DateTime>,
 }
 

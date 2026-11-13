@@ -285,6 +285,8 @@ pub type AnalysisTransition = ClockTransition<&'static str>;
 /// `DescribeNetworkInsightsAccessScopeAnalyses` answer with that one shape, so the one
 /// stored view is what both report and they cannot describe one analysis differently.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct NetworkInsightsAccessScopeAnalysisRecord {
     /// The analysis as the model shapes it, carrying the status reached so far.
     pub view: NetworkInsightsAccessScopeAnalysis,
@@ -710,6 +712,8 @@ pub const MAX_ANALYSIS_SCOPING_ENTRIES: usize = 100;
 /// shape, so the one stored view is what both report and they cannot describe one analysis
 /// differently.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct NetworkInsightsAnalysisRecord {
     /// The analysis as the model shapes it, carrying the status reached so far.
     pub view: NetworkInsightsAnalysis,
