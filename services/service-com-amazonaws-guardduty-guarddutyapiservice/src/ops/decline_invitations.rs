@@ -174,7 +174,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // be accepted afterwards. Nothing else is persisted — the relationship an
         // acceptance would establish is exactly what declining refuses — so no clock
         // is read either.
-        let unprocessed = state.take_received_invitations_in(&region, &input.account_ids);
+        //
+        // The REASON reported for an account this call could not decline from is this
+        // operation's own: declining is a TRANSITION of the relationship with the
+        // account that invited this one, so an account whose relationship holds no
+        // pending invitation to answer is reported as a transition that cannot be
+        // made ([`crate::state::INVALID_RELATIONSHIP_TRANSITION_MESSAGE`]) — not with
+        // the discard's enumeration of its own three conditions.
+        let unprocessed = state.take_received_invitations_in(
+            &region,
+            &input.account_ids,
+            crate::state::INVALID_RELATIONSHIP_TRANSITION_MESSAGE,
+        );
 
         Ok(DeclineInvitationsOutput {
             // Present and empty when every named account had an invitation to

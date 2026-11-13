@@ -44,11 +44,10 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use service_com_amazonaws_guardduty_guarddutyapiservice::state::NO_INVITATION_FROM_ACCOUNT_MESSAGE;
-
 use crate::detector_lifecycle::{call_in, error_code, error_shape, router_over, Router};
 use crate::invitation_count::{seeds, Seed};
 use crate::invitation_listing::{enabled_detector_in, page_invitations};
+use crate::invitation_unprocessed_results::DECLINE_RESULT;
 use crate::negative_class_rejections::seed_invitation;
 
 /// The Region most rows use.
@@ -273,7 +272,7 @@ async fn an_account_the_inbox_holds_no_invitation_from_is_reported_as_unprocesse
         for entry in &unprocessed {
             assert_eq!(
                 entry["result"],
-                json!(NO_INVITATION_FROM_ACCOUNT_MESSAGE),
+                json!(DECLINE_RESULT),
                 "case {case:?}: expected the reason the account was not processed, got {entry:?}"
             );
         }

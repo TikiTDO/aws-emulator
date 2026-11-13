@@ -21,9 +21,10 @@
 //! the need to invoke the CreateMembers API again" (the modelled contract below) —
 //! re-association is the administrator's call, through a fresh invitation.
 //!
-//! An account that has accepted no invitation has no relationship to leave, so the
-//! call is refused with HTTP 400 under the `InvalidInputException` class
-//! ([`crate::state::NO_ADMINISTRATOR_MESSAGE`]) and writes nothing: this operation
+//! An account no OTHER account administers administers itself, so the call asks it to
+//! leave a relationship whose two sides are the same account and is refused with
+//! HTTP 400 under the `InvalidInputException` class
+//! ([`crate::state::SELF_DISASSOCIATION_MESSAGE`]) and writes nothing: this operation
 //! models no per-account result the way `DisassociateMembers`' `UnprocessedAccounts`
 //! does, so its only client-error channel is the `BadRequestException` envelope. A
 //! `DetectorId` this account/Region does not own is refused the same way.
@@ -198,12 +199,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     crate::state::organization_managed_administrator_message(),
                 ))
             }
-            // The detector is held, but its account has accepted no invitation, so
-            // there is no relationship to leave. Reported as the absence rather than
-            // as a hollow success: this operation models no per-account result.
-            crate::state::AdministratorDisassociation::NoAdministrator => {
+            // The detector is held, but no OTHER account administers its account: it
+            // has accepted no invitation, or the relationship it had has already
+            // ended, so it administers itself and the request asks it to leave
+            // itself. Refused rather than answered with a hollow success: this
+            // operation models no per-account result.
+            crate::state::AdministratorDisassociation::AdministratorIsSelf => {
                 Err(crate::scaffolded::Scaffolded::invalid_input(
-                    crate::state::NO_ADMINISTRATOR_MESSAGE,
+                    crate::state::SELF_DISASSOCIATION_MESSAGE,
                 ))
             }
             crate::state::AdministratorDisassociation::Disassociated => {

@@ -3,13 +3,15 @@
 //! @op GetMemberDetectors
 //! IMPLEMENTED: reports the stored configuration of each named member account's detector
 //! — the `Features` list and the deprecated `DataSources` view of the same switches — read
-//! off the member records the administrator's detector holds. An account that is not an
-//! associated member of this administrator is REPORTED in `UnprocessedAccounts`; a request
+//! off the member records the administrator's detector holds. A member account runs a
+//! detector under this administrator only once it has ACCEPTED the invitation, so an
+//! account the administrator has merely recorded or invited, one a disassociation moved,
+//! and one it holds no record for at all are REPORTED in `UnprocessedAccounts`; a request
 //! the service cannot understand is refused with `BadRequestException`. A pure report:
 //! nothing here writes to the store.
 //!
 //! The two lists PARTITION the distinct accounts the request named, so a request naming
-//! no associated member is answered 200 with `members` present and EMPTY — see the
+//! no monitored member is answered 200 with `members` present and EMPTY — see the
 //! comment on the answer below.
 //!
 //! This is the ONLY file to touch for this operation.
@@ -194,10 +196,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 continue;
             }
             match detector.members.get(account_id) {
-                // Only an account ASSOCIATED with this administrator has a detector
-                // the administrator maintains, so only that account's configuration
-                // is reported here.
-                Some(member) if member.is_associated() => configurations
+                // The condition is the MONITORING, not the record and not the
+                // association: this operation reports "which data sources are enabled
+                // for the member account's detector" (the modelled contract above),
+                // and GuardDuty maintains a detector for a member account only once
+                // that account has accepted the administrator's invitation
+                // ([`crate::state::MemberRecord::is_monitored`], the condition the
+                // monitoring operations on the same member detector read). An account
+                // the administrator has merely recorded, one whose invitation is still
+                // unanswered and one a disassociation moved therefore have no
+                // configuration to report — reporting one would invent data sources
+                // and features for an account that runs no detector under this
+                // administrator.
+                Some(member) if member.is_monitored() => configurations
                     .push(crate::state::member_data_source_configuration_view(member)),
                 _ => unprocessed.push(UnprocessedAccount {
                     account_id: account_id.clone(),
@@ -207,9 +218,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // The two lists PARTITION the distinct accounts the request named: there is a
-        // configuration to report for an account this administrator administers and a
-        // reason to report for every other one, so `configurations` is EMPTY exactly
-        // when the request named no associated member. That empty list is the answer,
+        // configuration to report for an account whose member account this
+        // administrator monitors and a reason to report for every other one, so
+        // `configurations` is EMPTY exactly when the request named no monitored member. That empty list is the answer,
         // not a refusal: these accounts were not PROCESSED, which is what
         // `UnprocessedAccounts` reports, and the service answers 200 with no
         // configuration and one unprocessed row per account. The `len 1..50` the model

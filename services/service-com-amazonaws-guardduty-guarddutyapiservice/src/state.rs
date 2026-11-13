@@ -251,9 +251,11 @@ pub enum AdministratorDisassociation {
     /// — owns the relationship (see
     /// [`organization_managed_administrator_message`]).
     OrganizationManaged,
-    /// The detector is held, but its account has accepted no invitation, so there is
-    /// no relationship to leave.
-    NoAdministrator,
+    /// The detector is held, but no OTHER account administers its account — it has
+    /// accepted no invitation, or the relationship it had has already ended — so the
+    /// account is its own administrator and the request asks it to leave itself (see
+    /// [`SELF_DISASSOCIATION_MESSAGE`]).
+    AdministratorIsSelf,
     /// This call dropped the relationship.
     Disassociated,
 }
@@ -377,7 +379,7 @@ impl ComAmazonawsGuarddutyGuarddutyapiserviceState {
             return AdministratorDisassociation::OrganizationManaged;
         }
         if detector.administrator.is_none() {
-            return AdministratorDisassociation::NoAdministrator;
+            return AdministratorDisassociation::AdministratorIsSelf;
         }
         let now = self.tick_millis();
         if self
@@ -388,7 +390,7 @@ impl ComAmazonawsGuarddutyGuarddutyapiserviceState {
         } else {
             // Unreachable: the relationship was read above under this same borrow of
             // the store. Reported as the absence it would be rather than panicked.
-            AdministratorDisassociation::NoAdministrator
+            AdministratorDisassociation::AdministratorIsSelf
         }
     }
 
@@ -831,10 +833,18 @@ impl ComAmazonawsGuarddutyGuarddutyapiserviceState {
     ///
     /// Each account resolves through [`Self::delete_received_invitation_in`], which
     /// is where the Region and the writes-nothing-for-a-miss rules live.
+    ///
+    /// The REASON is the caller's, because the two operations report their own: each
+    /// answers an account it could not process with the fixed sentence GuardDuty
+    /// defines for that operation's refusal class
+    /// ([`INVALID_RELATIONSHIP_TRANSITION_MESSAGE`] for the decline,
+    /// [`INVITATION_NOT_DELETED_MESSAGE`] for the discard), so sharing the write does
+    /// not make them share a wording.
     pub fn take_received_invitations_in(
         &mut self,
         region: &str,
         account_ids: &[String],
+        result: &str,
     ) -> Vec<crate::ops::types::shared_types::UnprocessedAccount> {
         let mut unprocessed = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
@@ -848,7 +858,7 @@ impl ComAmazonawsGuarddutyGuarddutyapiserviceState {
                 // deleted. Reported, and nothing is persisted for it.
                 unprocessed.push(crate::ops::types::shared_types::UnprocessedAccount {
                     account_id: account_id.clone(),
-                    result: NO_INVITATION_FROM_ACCOUNT_MESSAGE.to_string(),
+                    result: result.to_string(),
                 });
             }
         }
@@ -2090,16 +2100,30 @@ pub const NOT_ASSOCIATED_MESSAGE: &str = "The request is rejected because the cu
 pub const SELF_AS_MEMBER_MESSAGE: &str =
     "The request is rejected because the current account cannot be used as a member account.";
 
-/// `UnprocessedAccount.Result` for an account id the current account's inbox holds
-/// no invitation from.
+/// `UnprocessedAccount.Result` for an account id `DeclineInvitations` had no
+/// invitation to decline from.
 ///
-/// The operations that answer an invitation by the account that SENT it name the
-/// invitation by that account alone, so an account that has not invited this one
-/// identifies nothing to answer. It is reported rather than refusing the whole
-/// request, like every other per-account failure this service reports: the result
-/// states the condition, which is what "a reason why the account hasn't been
-/// processed" (`smithy_query(shape="UnprocessedAccount")`) is for.
-pub const NO_INVITATION_FROM_ACCOUNT_MESSAGE: &str = "The request is rejected because the current account has not received an invitation from the given account ID.";
+/// Declining an invitation is a TRANSITION of the relationship with the account that
+/// sent it: an invited account "can either accept or decline the invitation"
+/// (`smithy_query(query="doc",shape="InviteMembers")`), so the transition is
+/// available only while that invitation is pending. An account whose relationship
+/// holds nothing to answer is therefore reported as a relationship-status transition
+/// that cannot be made, in GuardDuty's FIXED sentence for that class: it asserts
+/// nothing about which state the relationship was in and interpolates nothing of the
+/// request or of state. The sibling discard reports its own reason
+/// ([`INVITATION_NOT_DELETED_MESSAGE`]), so the two operations do not share one.
+pub const INVALID_RELATIONSHIP_TRANSITION_MESSAGE: &str =
+    "Relationship status transition is invalid.";
+
+/// `UnprocessedAccount.Result` for an account id `DeleteInvitations` had no
+/// invitation to discard from.
+///
+/// GuardDuty enumerates, in ONE fixed sentence, every condition under which an
+/// invitation cannot be discarded — there is no such invitation, the current account
+/// is still associated to that account, or it has not declined that account's
+/// invitation yet — and deliberately does not say which of them held, so the reason
+/// commits to none of them and carries nothing of the request or of state.
+pub const INVITATION_NOT_DELETED_MESSAGE: &str = "The request is rejected either because no such invitation exists, or the current account is still associated to the given master account, or the current account has not yet declined the invitation from the given master account.";
 
 /// How many member accounts one administrator's detector holds.
 ///
@@ -2319,22 +2343,27 @@ pub const ADMINISTRATOR_ID_MEMBER: &str = "administratorId";
 /// names the acceptance is bound under.
 pub const INVITATION_NOT_PENDING_MESSAGE: &str = INVALID_INPUT_VALUE_MESSAGE;
 
-/// The message the MEMBER-side disassociation is refused with when the account
-/// that owns the named detector is monitored by no administrator.
+/// The message the MEMBER-side disassociation is refused with when no OTHER account
+/// administers the account that owns the named detector.
 ///
 /// `DisassociateFromAdministratorAccount` "disassociates the current GuardDuty
 /// member account from its administrator account"
 /// (`smithy_query(query="doc",shape="DisassociateFromAdministratorAccount")`): it
-/// acts on the one relationship [`Detector::administrator`] holds, so an account
-/// that has accepted no invitation has nothing for it to act on. The only
-/// client-error channel the operation models is `BadRequestException`/400 and its
-/// output carries no per-account result the way `DisassociateMembers`'
-/// `UnprocessedAccounts` does, so the absence is reported as the refusal rather
-/// than as a hollow success. HTTP 400 under the `InvalidInputException` class is
-/// the requirement here; this wording follows the refusal style every other
-/// rejection on this service uses — it states the rule and quotes nothing back.
-pub const NO_ADMINISTRATOR_MESSAGE: &str =
-    "The request is rejected because the current account is not associated with an administrator account.";
+/// acts on the one relationship [`Detector::administrator`] holds, the one in which
+/// the current account is the MEMBER. An account that no other account administers
+/// administers itself — "a detector a create just minted administers itself", which is
+/// why [`Detector::administrator`] starts empty — so such a request asks to leave a
+/// relationship whose two sides are the same account, and GuardDuty refuses it with
+/// this FIXED sentence naming that rule. It is the one refusal for the whole class:
+/// an account that has accepted no invitation, one whose relationship a
+/// disassociation already ended, and one that is itself the administrator of member
+/// accounts all have no administrator other than themselves. The only client-error
+/// channel the operation models is `BadRequestException`/400 under the
+/// `InvalidInputException` class, and its output carries no per-account result the way
+/// `DisassociateMembers`' `UnprocessedAccounts` does, so this is the refusal rather
+/// than a hollow success. It names no member and interpolates nothing.
+pub const SELF_DISASSOCIATION_MESSAGE: &str =
+    "The request failed because admin account cannot disassociate from itself.";
 
 /// The message a request is DENIED with when the account is not authorized on the
 /// resource `member` names.

@@ -32,8 +32,9 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use crate::detector_lifecycle::{call_in, new_router, Router};
+use crate::detector_lifecycle::{call_in, new_router, router_with_engine, Router};
 use crate::invitation_listing::enabled_detector_in;
+use crate::member_relationship_scope::monitor_member_in;
 
 /// The Region most rows use.
 const REGION: &str = "us-east-1";
@@ -211,13 +212,15 @@ async fn the_counts_are_the_membership_the_store_holds() {
 
 #[tokio::test]
 async fn count_by_feature_counts_the_active_members_holding_each_feature_enabled() {
-    let router = new_router();
+    let (router, engine) = router_with_engine();
     let detector_id = enabled_detector_in(&router, REGION).await;
     let recorded = &ORG_MEMBERS[..3];
     create_members(&router, REGION, &detector_id, recorded, "three recorded members").await;
     let all: Vec<&str> = recorded.iter().map(|(id, _)| *id).collect();
     // The invitation associates each account, which is what makes it one of the
-    // organization's counted members.
+    // organization's counted members; the account's own answer to it is what makes
+    // GuardDuty maintain its detector, which is the configuration this suite reads
+    // the counts against (the `member_relationship_scope` seam).
     member_action(
         &router,
         REGION,
@@ -227,6 +230,9 @@ async fn count_by_feature_counts_the_active_members_holding_each_feature_enabled
         "three recorded members",
     )
     .await;
+    for account_id in &all {
+        monitor_member_in(&engine, REGION, &detector_id, account_id);
+    }
 
     // The rows differ along the SWITCH they move and along how many members they move it
     // on: a feature that defaults enabled, one that defaults disabled, a feature the
@@ -336,12 +342,15 @@ async fn a_feature_every_member_holds_enabled_is_counted_on_every_member() {
     // is counted on every active member, for each size of membership.
     for size in 1..=ORG_MEMBERS.len() {
         let case = format!("{size} recorded member(s)");
-        let router = new_router();
+        let (router, engine) = router_with_engine();
         let detector_id = enabled_detector_in(&router, REGION).await;
         let recorded = &ORG_MEMBERS[..size];
         create_members(&router, REGION, &detector_id, recorded, &case).await;
         let accounts: Vec<&str> = recorded.iter().map(|(id, _)| *id).collect();
         member_action(&router, REGION, &detector_id, "invite", &accounts, &case).await;
+        for account_id in &accounts {
+            monitor_member_in(&engine, REGION, &detector_id, account_id);
+        }
 
         let statistics = organization_statistics(&router, REGION, &case).await;
         // Read the feature to expect from the members themselves rather than naming one:
@@ -487,7 +496,7 @@ async fn updated_at_is_the_latest_instant_a_counted_record_changed() {
 
 #[tokio::test]
 async fn the_report_changes_nothing_a_later_caller_sees() {
-    let router = new_router();
+    let (router, engine) = router_with_engine();
     let detector_id = enabled_detector_in(&router, REGION).await;
     let recorded = &ORG_MEMBERS[..3];
     create_members(&router, REGION, &detector_id, recorded, "three members").await;
@@ -501,6 +510,9 @@ async fn the_report_changes_nothing_a_later_caller_sees() {
         "three members",
     )
     .await;
+    for account_id in &accounts {
+        monitor_member_in(&engine, REGION, &detector_id, account_id);
+    }
 
     let before = organization_details(&router, REGION, "the first report").await;
     let members_before = list_members(&router, REGION, &detector_id, "before").await;

@@ -115,10 +115,11 @@ const RELATIONSHIPS: [(Relationship, &str); 4] = [
 /// What a member operation acts on, which is what decides the accounts it processes.
 #[derive(Debug, Clone, Copy)]
 enum ActsOn {
-    /// The ASSOCIATION itself, or the member account's detector the administrator
-    /// maintains for an associated member.
+    /// The ASSOCIATION itself, which an invitation begins and a disassociation ends.
     Association,
-    /// The MONITORING the member account's own acceptance starts.
+    /// The MONITORING the member account's own acceptance starts — including the
+    /// member account's DETECTOR, which GuardDuty maintains only while it monitors
+    /// that account under the administrator.
     Monitoring,
     /// The member RECORD, which is what a delete drops.
     Record,
@@ -174,7 +175,7 @@ const OPERATIONS: [MemberOperation; 5] = [
         name: "GetMemberDetectors",
         path: "detector/get",
         body: no_extra_members,
-        acts_on: ActsOn::Association,
+        acts_on: ActsOn::Monitoring,
         reason: NOT_AN_ASSOCIATED_MEMBER,
     },
     MemberOperation {
@@ -292,10 +293,21 @@ pub(crate) fn monitor_member(
     detector_id: &str,
     account_id: &str,
 ) {
+    monitor_member_in(engine, DEFAULT_REGION, detector_id, account_id);
+}
+
+/// [`monitor_member`] for a detector another Region's endpoint serves, so a suite that
+/// spans Regions drives the relationship through the same one place.
+pub(crate) fn monitor_member_in(
+    engine: &engine::InMemoryEngine,
+    region: &str,
+    detector_id: &str,
+    account_id: &str,
+) {
     let state = service_state(engine).expect("this service's state");
     let mut state = state.lock();
     let detector = state
-        .detector_in_mut(DEFAULT_REGION, detector_id)
+        .detector_in_mut(region, detector_id)
         .expect("the detector the create minted");
     let member = detector
         .members
@@ -669,8 +681,8 @@ async fn the_monitoring_calls_move_a_member_guardduty_monitors() {
         );
     }
 
-    // A monitored member is an associated one too, so the reads the administrator
-    // maintains for an associated member report it.
+    // A member GuardDuty monitors is the one whose detector the administrator
+    // maintains, so the member-detector READ reports its configuration.
     let (status, body) = call(
         &router,
         "POST",

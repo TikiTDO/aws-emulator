@@ -129,6 +129,8 @@ mod invitation_delivery;
 mod invitation_listing;
 #[path = "all/invitation_pending_agreement.rs"]
 mod invitation_pending_agreement;
+#[path = "all/invitation_unprocessed_results.rs"]
+mod invitation_unprocessed_results;
 #[path = "all/invite_members_no_send_clock.rs"]
 mod invite_members_no_send_clock;
 #[path = "all/ip_set_activation_allowance.rs"]

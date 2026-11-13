@@ -21,23 +21,29 @@
 //!    The reported set is every `OrgFeature` member, once each, in canonical order.
 //! 4. Configuring a member is not changing the RELATIONSHIP: `GetMembers` reports the
 //!    same member record after an update as before it.
-//! 5. An account the administrator is not ASSOCIATED with is not an error for either
-//!    operation: the call answers HTTP 200 and names the account in
-//!    `unprocessedAccounts` — once per DISTINCT id, in request order — and persists
-//!    nothing for it.
+//! 5. An account whose member-account detector the administrator does not maintain is
+//!    not an error for either operation: the call answers HTTP 200 and names the
+//!    account in `unprocessedAccounts` — once per DISTINCT id, in request order — and
+//!    persists nothing for it. The member accounts of this suite's fixture are the
+//!    ones GuardDuty MONITORS under the administrator, which is the relationship a
+//!    member account's detector exists in; the `member_detector_empty_report` suite
+//!    owns the partition the read makes over every other relationship.
 //! 6. A request the service cannot understand — a value that cannot be an account id,
 //!    a `DetectorId` this account/Region does not own, a feature name outside the
 //!    `OrgFeature` enum, a status outside `FeatureStatus`, or the two Runtime
 //!    Monitoring features asked for together — is refused with HTTP 400 under the
 //!    modelled `BadRequestException` shape, and configures nothing.
 
+use std::sync::Arc;
+
 use serde_json::{json, Value};
 
 use crate::client_rejections::{account_ids_format, invalid_parameter, not_owned};
 use crate::detector_lifecycle::{
-    call, call_in, enabled_detector, error_code, error_shape, new_router, Router,
+    call, call_in, enabled_detector, error_code, error_shape, router_over, Router,
     ABSENT_DETECTOR_ID,
 };
+use crate::member_relationship_scope::monitor_member;
 // The member-suite table, helpers and projections live in one place, so the member
 // suites cannot drift on what a malformed or non-member account id is.
 use crate::member_association::{
@@ -146,13 +152,21 @@ pub(crate) async fn get_member_detectors(
     .await
 }
 
-/// Create an enabled detector, record [`MEMBERS`] against it and INVITE them —
-/// which is what associates a recorded account with its administrator, and so what
-/// makes its detector one the administrator configures from here — returning the
-/// detector id.
-async fn detector_with_members(router: &Router) -> String {
-    let detector_id = enabled_detector(router).await;
-    let (status, body) = create_members(router, &detector_id, &MEMBERS).await;
+/// Create an enabled detector, record [`MEMBERS`] against it, INVITE them and put
+/// each one into the MONITORED relationship — the relationship GuardDuty maintains a
+/// member account's own detector in, and so the one whose configuration the
+/// administrator writes and reads here.
+///
+/// The monitored relationship is reached when the member ACCOUNT answers the
+/// administrator's invitation, which is that account's own call to make and not one
+/// this emulator can be asked to make on its behalf; the `member_relationship_scope`
+/// suite owns the one state seam every suite drives it through. The fixture keeps the
+/// engine handle that seam needs, so it hands back the router with the detector.
+async fn detector_with_monitored_members() -> (Router, String) {
+    let engine = Arc::new(engine::InMemoryEngine::new());
+    let router = router_over(Arc::clone(&engine));
+    let detector_id = enabled_detector(&router).await;
+    let (status, body) = create_members(&router, &detector_id, &MEMBERS).await;
     assert_eq!(
         status, 200,
         "create-members: expected 200, got {status} {body:?}"
@@ -162,7 +176,7 @@ async fn detector_with_members(router: &Router) -> String {
         "create-members: expected every account processed, got {body:?}"
     );
     let ids: Vec<&str> = MEMBERS.iter().map(|(id, _)| *id).collect();
-    let (status, body) = invite_members(router, &detector_id, &ids).await;
+    let (status, body) = invite_members(&router, &detector_id, &ids).await;
     assert_eq!(
         status, 200,
         "invite-members: expected 200, got {status} {body:?}"
@@ -171,7 +185,10 @@ async fn detector_with_members(router: &Router) -> String {
         unprocessed_ids(&body).is_empty(),
         "invite-members: expected every account processed, got {body:?}"
     );
-    detector_id
+    for (account_id, _) in MEMBERS {
+        monitor_member(&engine, &detector_id, account_id);
+    }
+    (router, detector_id)
 }
 
 /// Every recorded account id, in the order [`MEMBERS`] lists them.
@@ -306,8 +323,7 @@ fn opposite(status: &str) -> &'static str {
 #[tokio::test]
 async fn every_member_feature_round_trips_through_both_views() {
     for feature_name in MEMBER_FEATURES {
-        let router = new_router();
-        let detector_id = detector_with_members(&router).await;
+        let (router, detector_id) = detector_with_monitored_members().await;
         let account_id = MEMBERS[0].0;
         let start = default_status(feature_name);
         let case = format!("member {account_id} feature {feature_name}");
@@ -419,8 +435,7 @@ async fn every_member_feature_round_trips_through_both_views() {
 #[tokio::test]
 async fn a_member_data_source_node_reports_the_feature_that_governs_it() {
     for (feature_name, path) in GOVERNED_NODES {
-        let router = new_router();
-        let detector_id = detector_with_members(&router).await;
+        let (router, detector_id) = detector_with_monitored_members().await;
         let account_id = MEMBERS[1].0;
         let case = format!("member {account_id} dataSources.{}", path.join("."));
         let start = default_status(feature_name);
@@ -475,8 +490,7 @@ async fn the_deprecated_data_sources_input_writes_the_same_member_switch() {
     ];
 
     for (data_sources, feature_name, path) in cases {
-        let router = new_router();
-        let detector_id = detector_with_members(&router).await;
+        let (router, detector_id) = detector_with_monitored_members().await;
         let account_id = MEMBERS[2].0;
         let case = format!("dataSources {data_sources} -> {feature_name}");
 
@@ -497,8 +511,7 @@ async fn the_deprecated_data_sources_input_writes_the_same_member_switch() {
 /// An update configures only the MEMBERS it names.
 #[tokio::test]
 async fn an_update_configures_only_the_member_accounts_it_names() {
-    let router = new_router();
-    let detector_id = detector_with_members(&router).await;
+    let (router, detector_id) = detector_with_monitored_members().await;
     // A strict, NON-CONTIGUOUS subset, so the call is observable both ways and the
     // configured members are not merely a prefix of the stored order.
     let configured = [MEMBERS[0].0, MEMBERS[2].0];
@@ -558,8 +571,7 @@ async fn an_update_configures_only_the_member_accounts_it_names() {
 /// report `ENABLED`.
 #[tokio::test]
 async fn a_recorded_member_starts_in_the_default_configuration() {
-    let router = new_router();
-    let detector_id = detector_with_members(&router).await;
+    let (router, detector_id) = detector_with_monitored_members().await;
 
     for (account_id, _) in MEMBERS {
         let case = format!("member {account_id}");
@@ -601,8 +613,7 @@ async fn a_recorded_member_starts_in_the_default_configuration() {
 
 #[tokio::test]
 async fn configuring_a_member_leaves_its_member_record_alone() {
-    let router = new_router();
-    let detector_id = detector_with_members(&router).await;
+    let (router, detector_id) = detector_with_monitored_members().await;
     let ids = all_ids();
 
     let (status, before) = get_members(&router, &detector_id, &ids).await;
@@ -653,8 +664,7 @@ async fn configuring_a_member_leaves_its_member_record_alone() {
 
 #[tokio::test]
 async fn an_account_that_is_not_an_associated_member_is_reported_by_both_operations() {
-    let router = new_router();
-    let detector_id = detector_with_members(&router).await;
+    let (router, detector_id) = detector_with_monitored_members().await;
     let reason = NOT_AN_ASSOCIATED_MEMBER;
 
     // The administrator's own account is not one of its members either, so it is a
@@ -716,8 +726,7 @@ async fn an_account_that_is_not_an_associated_member_is_reported_by_both_operati
 
 #[tokio::test]
 async fn only_the_accounts_that_are_not_members_are_reported_once_in_request_order() {
-    let router = new_router();
-    let detector_id = detector_with_members(&router).await;
+    let (router, detector_id) = detector_with_monitored_members().await;
     let member_id = MEMBERS[2].0;
     let absent_one = NON_MEMBER_ACCOUNT_IDS[0].0;
     let absent_two = NON_MEMBER_ACCOUNT_IDS[1].0;
@@ -818,8 +827,7 @@ async fn a_features_additional_configuration_is_one_stored_entry_per_name() {
     ];
 
     for (additional, expected, why) in rows {
-        let router = new_router();
-        let detector_id = detector_with_members(&router).await;
+        let (router, detector_id) = detector_with_monitored_members().await;
         let account_id = MEMBERS[0].0;
         let case = format!("member {account_id} additionalConfiguration {additional} ({why})");
 
@@ -869,8 +877,7 @@ async fn a_features_additional_configuration_is_one_stored_entry_per_name() {
 
 #[tokio::test]
 async fn a_value_that_cannot_be_an_account_id_is_refused() {
-    let router = new_router();
-    let detector_id = detector_with_members(&router).await;
+    let (router, detector_id) = detector_with_monitored_members().await;
     // Both operations carry the ids in their `accountIds` list, which is the
     // parameter GuardDuty's format rejection names.
     let expected = account_ids_format("accountIds");
@@ -925,8 +932,7 @@ async fn a_value_that_cannot_be_an_account_id_is_refused() {
 
 #[tokio::test]
 async fn a_detector_this_account_does_not_own_is_refused() {
-    let router = new_router();
-    let detector_id = detector_with_members(&router).await;
+    let (router, detector_id) = detector_with_monitored_members().await;
     let member_id = MEMBERS[0].0;
 
     // A detector another Region's endpoint serves is not owned here: a detector is a
@@ -1020,8 +1026,7 @@ async fn a_detector_this_account_does_not_own_is_refused() {
 /// and a list carrying more entries than there are values for it to configure.
 #[tokio::test]
 async fn a_feature_list_this_service_cannot_accept_is_refused() {
-    let router = new_router();
-    let detector_id = detector_with_members(&router).await;
+    let (router, detector_id) = detector_with_monitored_members().await;
     let member_id = MEMBERS[0].0;
 
     // One entry past the number of distinct values each list can configure, so the

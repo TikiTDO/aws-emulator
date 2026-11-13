@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use crate::detector_lifecycle::{enabled_detector, new_router, Router};
+use crate::detector_lifecycle::{enabled_detector, router_with_engine, Router};
 use crate::member_association::{get_members, member_of, unprocessed_ids, DEFAULT_REGION};
 use crate::member_detector_configuration::update_member_detectors;
 // The organization-side table, bodies and projections live in the sibling suite that
@@ -92,6 +92,7 @@ async fn switch_off(router: &Router, detector_id: &str, account: &str, feature: 
 /// An invited member account whose `feature` has been switched off, so the account is
 /// one the administrator ALREADY holds when the organization is configured.
 async fn held_member(
+    engine: &engine::InMemoryEngine,
     router: &Router,
     detector_id: &str,
     index: usize,
@@ -100,7 +101,7 @@ async fn held_member(
 ) -> String {
     let account = account_id(index);
     let email = EMAIL_FORMS[index % EMAIL_FORMS.len()];
-    record_member(router, detector_id, &account, email, case).await;
+    record_member(engine, router, detector_id, &account, email, case).await;
     switch_off(router, detector_id, &account, feature, case).await;
     let configuration = member_configuration(router, detector_id, &account, case).await;
     assert_eq!(
@@ -151,12 +152,12 @@ async fn configuring_the_organization_reaches_the_members_it_already_holds() {
             // One organization per row: the two Runtime Monitoring features cannot
             // be auto-enabled together, so a row must not inherit the previous row's
             // settings.
-            let router = new_router();
+            let (router, engine) = router_with_engine();
             let detector_id = enabled_detector(&router).await;
             let case = format!("{feature} auto-enabled {auto_enable} after the member was recorded");
 
             let index = case_index * ORG_FEATURE_STATUSES.len() + status_index;
-            let account = held_member(&router, &detector_id, index, feature, &case).await;
+            let account = held_member(&engine, &router, &detector_id, index, feature, &case).await;
             let before = member_configuration(&router, &detector_id, &account, &case).await;
             let statuses_before = every_feature_status(&before, &case);
             let instants_before = every_feature_instant(&before, &case);
@@ -257,14 +258,14 @@ async fn configuring_the_organization_reaches_the_members_it_already_holds() {
 async fn an_additional_configuration_reaches_a_held_member_only_when_it_covers_it() {
     for (case_index, (feature, additional)) in ADDITIONAL_CONFIGURATIONS.into_iter().enumerate() {
         for (status_index, (auto_enable, _)) in ORG_FEATURE_STATUSES.into_iter().enumerate() {
-            let router = new_router();
+            let (router, engine) = router_with_engine();
             let detector_id = enabled_detector(&router).await;
             let case = format!(
                 "{feature}/{additional} auto-enabled {auto_enable} after the member was recorded"
             );
 
             let index = 100 + case_index * ORG_FEATURE_STATUSES.len() + status_index;
-            let account = held_member(&router, &detector_id, index, feature, &case).await;
+            let account = held_member(&engine, &router, &detector_id, index, feature, &case).await;
             assert!(
                 additional_status(
                     &member_configuration(&router, &detector_id, &account, &case).await,
@@ -336,13 +337,13 @@ async fn an_additional_configuration_reaches_a_held_member_only_when_it_covers_i
 async fn lowering_the_auto_enablement_does_not_switch_a_held_member_off() {
     for (case_index, feature) in ORG_FEATURES.into_iter().enumerate() {
         for (status_index, lowered) in ["NEW", "NONE"].into_iter().enumerate() {
-            let router = new_router();
+            let (router, engine) = router_with_engine();
             let detector_id = enabled_detector(&router).await;
             let case =
                 format!("{feature} auto-enabled {COVERS_EXISTING_ACCOUNTS} then {lowered}");
 
             let index = 200 + case_index * 2 + status_index;
-            let account = held_member(&router, &detector_id, index, feature, &case).await;
+            let account = held_member(&engine, &router, &detector_id, index, feature, &case).await;
 
             update_ok_in(
                 &router,
@@ -424,9 +425,10 @@ fn reported_feature(organization: &Value, feature: &str, case: &str) -> (String,
 #[tokio::test]
 async fn the_stored_configuration_holds_one_record_per_catalog_member() {
     let case = "a request repeating every catalog member three times";
-    let router = new_router();
+    let (router, engine) = router_with_engine();
     let detector_id = enabled_detector(&router).await;
-    let account = held_member(&router, &detector_id, 400, "RUNTIME_MONITORING", case).await;
+    let account =
+        held_member(&engine, &router, &detector_id, 400, "RUNTIME_MONITORING", case).await;
     let before = member_configuration(&router, &detector_id, &account, case).await;
 
     // The auto-enablement each feature is to END UP with. Runtime Monitoring is the
@@ -581,12 +583,13 @@ async fn the_stored_configuration_holds_one_record_per_catalog_member() {
 #[tokio::test]
 async fn applying_the_same_settings_again_moves_nothing() {
     for (status_index, (auto_enable, _)) in ORG_FEATURE_STATUSES.into_iter().enumerate() {
-        let router = new_router();
+        let (router, engine) = router_with_engine();
         let detector_id = enabled_detector(&router).await;
         let feature = "RUNTIME_MONITORING";
         let case = format!("{feature} auto-enabled {auto_enable} twice");
 
-        let account = held_member(&router, &detector_id, 300 + status_index, feature, &case).await;
+        let account =
+            held_member(&engine, &router, &detector_id, 300 + status_index, feature, &case).await;
         update_ok_in(
             &router,
             DEFAULT_REGION,

@@ -18,9 +18,11 @@
 //! 2. It moves ONLY that relationship: the member accounts the same detector
 //!    administers are the other side of the association and are reported exactly as
 //!    they were, and the accepted invitation is not put back in the inbox.
-//! 3. An account with no administrator relationship has nothing to leave, so the call
-//!    is refused with HTTP 400 under the `InvalidInputException` class and writes
-//!    nothing — on a detector that never accepted an invitation, on one whose
+//! 3. An account no OTHER account administers administers itself, so the call asks it
+//!    to leave a relationship whose two sides are the same account: it is refused with
+//!    HTTP 400 under the `InvalidInputException` class, carrying GuardDuty's fixed
+//!    sentence for that rule, and writes nothing — on a detector that never accepted
+//!    an invitation, on one that administers member accounts of its own, on one whose
 //!    relationship a disassociation already removed, and on one holding an invitation
 //!    that is only PENDING (which that refusal leaves pending).
 //! 4. A `DetectorId` this account/Region does not hold is refused the same way — a
@@ -275,7 +277,7 @@ async fn disassociating_without_an_administrator_is_refused_and_writes_nothing()
     for attempt in 1..=2 {
         let case = format!("never associated, attempt {attempt}");
         let (status, body) = disassociate(&router, region, &detector_id).await;
-        assert_no_administrator(&case, status, &body, &detector_id);
+        assert_self_disassociation(&case, status, &body, &detector_id);
         assert_no_relationship(&case, &router, region, &detector_id).await;
     }
 
@@ -292,7 +294,7 @@ async fn disassociating_without_an_administrator_is_refused_and_writes_nothing()
     );
     let case = "invitation pending, not accepted";
     let (status, body) = disassociate(&router, region, &detector_id).await;
-    assert_no_administrator(case, status, &body, &detector_id);
+    assert_self_disassociation(case, status, &body, &detector_id);
     assert_no_relationship(case, &router, region, &detector_id).await;
     accept(
         &router,
@@ -321,8 +323,39 @@ async fn disassociating_without_an_administrator_is_refused_and_writes_nothing()
     for attempt in 1..=2 {
         let case = format!("already disassociated, attempt {attempt}");
         let (status, body) = disassociate(&router, region, &detector_id).await;
-        assert_no_administrator(&case, status, &body, &detector_id);
+        assert_self_disassociation(&case, status, &body, &detector_id);
         assert_no_relationship(&case, &router, region, &detector_id).await;
+    }
+
+    // Row 4: an account that is itself the ADMINISTRATOR of member accounts. Being the
+    // administrator in its own relationships is not being a member in one, so the same
+    // rule holds: no other account administers it, and the refusal is the same
+    // sentence — the members it administers are untouched by it.
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    let router = router_over(Arc::clone(&engine));
+    let detector_id = enabled_detector_in(&router, region).await;
+    let (status, body) = create_members(&router, &detector_id, &ADMINISTERED).await;
+    assert_eq!(
+        status, 200,
+        "create-members: expected 200, got {status} {body:?}"
+    );
+    let administered: Vec<&str> = ADMINISTERED.iter().map(|(id, _)| *id).collect();
+    let (status, before) = get_members(&router, &detector_id, &administered).await;
+    assert_eq!(
+        status, 200,
+        "get-members before: expected 200, got {status} {before:?}"
+    );
+    for attempt in 1..=2 {
+        let case = format!("an administrator of member accounts, attempt {attempt}");
+        let (status, body) = disassociate(&router, region, &detector_id).await;
+        assert_self_disassociation(&case, status, &body, &detector_id);
+        assert_no_relationship(&case, &router, region, &detector_id).await;
+        let (_, after) = get_members(&router, &detector_id, &administered).await;
+        assert_eq!(
+            after, before,
+            "case {case}: the refusal must leave the members it administers alone, \
+             got {after:?} after {before:?}"
+        );
     }
 }
 
@@ -585,10 +618,45 @@ fn assert_rejected(case: &str, status: u16, body: &Value, names: &str, value: &s
     message
 }
 
-/// Assert a response is the no-administrator refusal: the classified 400, carrying a
-/// message that states the rule by naming the relationship the call found none of.
-fn assert_no_administrator(case: &str, status: u16, body: &Value, detector_id: &str) {
-    assert_rejected(case, status, body, "administrator account", detector_id);
+/// GuardDuty's FIXED refusal for a member-side disassociation sent by an account that
+/// no other account administers: such an account administers itself, so the call asks
+/// it to leave a relationship whose two sides are the same account. The sentence names
+/// no member and carries nothing of the request.
+const SELF_DISASSOCIATION: &str =
+    "The request failed because admin account cannot disassociate from itself.";
+
+/// Assert a response is the self-disassociation refusal: the classified 400 carrying
+/// GuardDuty's fixed sentence for that rule, with nothing of the caller's echoed.
+fn assert_self_disassociation(case: &str, status: u16, body: &Value, detector_id: &str) {
+    assert_eq!(
+        status, 400,
+        "case {case}: expected HTTP 400, got {status} {body:?}"
+    );
+    assert_eq!(
+        error_shape(body),
+        BAD_REQUEST,
+        "case {case}: expected the modelled envelope shape, got {body:?}"
+    );
+    assert_eq!(
+        error_code(body),
+        INVALID_INPUT,
+        "case {case}: expected the invalid-input class in __type, got {body:?}"
+    );
+    assert_eq!(
+        body["type"],
+        json!(INVALID_INPUT),
+        "case {case}: expected the invalid-input class in the type member, got {body:?}"
+    );
+    assert_eq!(
+        body["message"],
+        json!(SELF_DISASSOCIATION),
+        "case {case}: expected the self-disassociation sentence, got {body:?}"
+    );
+    let message = body["message"].as_str().unwrap_or_default();
+    assert!(
+        !message.contains(detector_id),
+        "case {case}: a rejection must not echo the caller's value {detector_id:?}, got {message:?}"
+    );
 }
 
 /// Assert both reads report no administrator relationship at all.

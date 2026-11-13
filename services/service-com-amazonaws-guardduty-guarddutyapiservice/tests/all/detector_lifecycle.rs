@@ -46,6 +46,14 @@ pub(crate) fn new_router() -> Router {
     router_over(Arc::new(engine::InMemoryEngine::new()))
 }
 
+/// [`new_router`], handing back the engine it was built over, for a suite that needs
+/// both the wire and a handle on the store the handlers write — the seam a
+/// relationship no administrator request can reach is driven through.
+pub(crate) fn router_with_engine() -> (Router, Arc<engine::InMemoryEngine>) {
+    let engine = Arc::new(engine::InMemoryEngine::new());
+    (router_over(Arc::clone(&engine)), engine)
+}
+
 /// A router carrying only this service over `engine`, for a suite that needs a handle
 /// on the store the handlers write. [`new_router`] is this with an engine of its own,
 /// so the two cannot drift.

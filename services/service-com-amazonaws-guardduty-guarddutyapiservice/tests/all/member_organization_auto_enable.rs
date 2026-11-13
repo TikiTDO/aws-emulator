@@ -30,10 +30,11 @@
 
 use serde_json::{json, Value};
 
-use crate::detector_lifecycle::{call, enabled_detector, new_router, Router};
+use crate::detector_lifecycle::{call, enabled_detector, router_with_engine, Router};
 use crate::member_association::{
     create_members, get_members, invite_members, member_of, DEFAULT_REGION,
 };
+use crate::member_relationship_scope::monitor_member;
 use crate::organization_configuration::{describe_in, update_ok_in};
 
 /// Every `OrgFeature` member, in model order
@@ -85,16 +86,18 @@ pub(crate) const ADDITIONAL_CONFIGURATIONS: [(&str, &str); 4] = [
 pub(crate) const ENABLED: &str = "ENABLED";
 pub(crate) const DISABLED: &str = "DISABLED";
 
-/// The `RelationshipStatus` a member the administrator has invited carries, read
-/// from the service so the test cannot drift from it: the invitation is what
-/// associates the account, and an associated member is the one whose detector this
+/// The `RelationshipStatus` a member account GuardDuty MONITORS under the
+/// administrator carries, read from the service so the test cannot drift from it: the
+/// account's own answer to the invitation is what starts the monitoring, and a
+/// monitored member is the one whose detector the administrator maintains and this
 /// suite reads.
-const INVITED: &str =
-    service_com_amazonaws_guardduty_guarddutyapiservice::state::RELATIONSHIP_INVITED;
+const MONITORED: &str =
+    service_com_amazonaws_guardduty_guarddutyapiservice::state::RELATIONSHIP_ENABLED;
 
 /// Email forms the rows cycle, so a case varies along the account details as well as
-/// along the configuration. Each is in a domain that can receive mail, so a member of
-/// this suite is left [`INVITED`] by the send that invites it.
+/// along the configuration. Each is in a domain that can receive mail, so the send
+/// that invites a member of this suite announces the invitation rather than failing
+/// verification.
 pub(crate) const EMAIL_FORMS: [&str; 3] = [
     "member@example-corp.com",
     "first.last@sub.example-corp.com",
@@ -147,13 +150,16 @@ pub(crate) fn organization_body_with_additional(
 }
 
 /// `CreateMembers` for one account followed by `InviteMembers` for it, asserting
-/// each call processed the account.
+/// each call processed the account, and then the member ACCOUNT's own answer to that
+/// invitation.
 ///
-/// The invitation is what associates a recorded account with its administrator, and
-/// an associated member is the one whose detector the administrator reads and
-/// configures — so a suite that reads a member's configuration records the account
-/// this way.
+/// GuardDuty maintains a member account's detector — the configuration this suite and
+/// its siblings read back — only while it MONITORS that account under the
+/// administrator, which begins when the account answers the invitation. Answering is
+/// that account's own call to make, so it is driven through the one state seam the
+/// `member_relationship_scope` suite owns; everything else here goes over the wire.
 pub(crate) async fn record_member(
+    engine: &engine::InMemoryEngine,
     router: &Router,
     detector_id: &str,
     account_id: &str,
@@ -182,6 +188,7 @@ pub(crate) async fn record_member(
             .is_some_and(|unprocessed| unprocessed.is_empty()),
         "case {case}: expected the account invited, got {body:?}"
     );
+    monitor_member(engine, detector_id, account_id);
 }
 
 /// The configuration `GetMemberDetectors` reports for `account_id`.
@@ -277,7 +284,7 @@ async fn an_auto_enabled_feature_is_enabled_for_a_newly_recorded_member() {
             // One organization per case: the two Runtime Monitoring features cannot
             // be auto-enabled together, so a case must not inherit the previous
             // case's settings.
-            let router = new_router();
+            let (router, engine) = router_with_engine();
             let detector_id = enabled_detector(&router).await;
             let case = format!("{feature} auto-enabled {auto_enable} for a new member");
 
@@ -291,7 +298,7 @@ async fn an_auto_enabled_feature_is_enabled_for_a_newly_recorded_member() {
 
             let account = account_id(case_index * ORG_FEATURE_STATUSES.len() + status_index);
             let email = EMAIL_FORMS[status_index % EMAIL_FORMS.len()];
-            record_member(&router, &detector_id, &account, email, &case).await;
+            record_member(&engine, &router, &detector_id, &account, email, &case).await;
 
             let configuration = member_configuration(&router, &detector_id, &account, &case).await;
             let expected = if enables {
@@ -325,7 +332,7 @@ async fn an_auto_enabled_feature_reaches_an_existing_member_too() {
     // DISABLED, so an auto-enablement that lands is visible.
     for (case_index, feature) in OPT_IN_FEATURES.into_iter().enumerate() {
         for (status_index, (auto_enable, enables)) in ORG_FEATURE_STATUSES.into_iter().enumerate() {
-            let router = new_router();
+            let (router, engine) = router_with_engine();
             let detector_id = enabled_detector(&router).await;
             let case = format!("{feature} auto-enabled {auto_enable} for an existing member");
 
@@ -333,7 +340,7 @@ async fn an_auto_enabled_feature_reaches_an_existing_member_too() {
             // with the configuration a member starts in.
             let account = account_id(100 + case_index * ORG_FEATURE_STATUSES.len() + status_index);
             let email = EMAIL_FORMS[case_index % EMAIL_FORMS.len()];
-            record_member(&router, &detector_id, &account, email, &case).await;
+            record_member(&engine, &router, &detector_id, &account, email, &case).await;
             let before = member_configuration(&router, &detector_id, &account, &case).await;
             assert_eq!(
                 feature_status(&before, feature, &case),
@@ -352,9 +359,15 @@ async fn an_auto_enabled_feature_reaches_an_existing_member_too() {
             )
             .await;
 
-            // The same account again: "irrespective of the accounts being new or
-            // existing members".
-            record_member(&router, &detector_id, &account, email, &case).await;
+            // The same account again, through the CREATE alone: "irrespective of the
+            // accounts being new or existing members". Re-recording an account the
+            // administrator already holds must leave its relationship where it was,
+            // which is why this step is not a fresh invitation.
+            let (status, body) = create_members(&router, &detector_id, &[(&account, email)]).await;
+            assert_eq!(
+                status, 200,
+                "case {case}: create-members expected 200, got {status} {body:?}"
+            );
             let after = member_configuration(&router, &detector_id, &account, &case).await;
             let expected = if enables { ENABLED } else { DISABLED };
             assert_eq!(
@@ -374,8 +387,8 @@ async fn an_auto_enabled_feature_reaches_an_existing_member_too() {
             );
             assert_eq!(
                 relationship_after["relationshipStatus"].as_str(),
-                Some(INVITED),
-                "case {case}: expected an invited member, got {relationship_after:?}"
+                Some(MONITORED),
+                "case {case}: expected a member GuardDuty monitors, got {relationship_after:?}"
             );
         }
     }
@@ -390,7 +403,7 @@ async fn an_auto_enabled_feature_reaches_an_existing_member_too() {
 async fn an_auto_enabled_additional_configuration_lands_with_its_feature() {
     for (case_index, (feature, additional)) in ADDITIONAL_CONFIGURATIONS.into_iter().enumerate() {
         for (status_index, (auto_enable, enables)) in ORG_FEATURE_STATUSES.into_iter().enumerate() {
-            let router = new_router();
+            let (router, engine) = router_with_engine();
             let detector_id = enabled_detector(&router).await;
             let case = format!("{feature}/{additional} auto-enabled {auto_enable}");
 
@@ -407,7 +420,7 @@ async fn an_auto_enabled_additional_configuration_lands_with_its_feature() {
             let account =
                 account_id(200 + case_index * ORG_FEATURE_STATUSES.len() + status_index);
             let email = EMAIL_FORMS[status_index % EMAIL_FORMS.len()];
-            record_member(&router, &detector_id, &account, email, &case).await;
+            record_member(&engine, &router, &detector_id, &account, email, &case).await;
 
             let configuration = member_configuration(&router, &detector_id, &account, &case).await;
             assert_eq!(
@@ -450,7 +463,7 @@ async fn an_auto_enabled_additional_configuration_lands_with_its_feature() {
 
 #[tokio::test]
 async fn a_member_configuration_agrees_with_the_organization_read() {
-    let router = new_router();
+    let (router, engine) = router_with_engine();
     let detector_id = enabled_detector(&router).await;
 
     // A MIXTURE of statuses across the catalog, so the agreement is asserted over
@@ -504,14 +517,18 @@ async fn a_member_configuration_agrees_with_the_organization_read() {
         status, 200,
         "case a batch under an organization: expected 200, got {status} {body:?}"
     );
-    // The invitation associates each account of the batch, which is what makes its
-    // detector one the administrator reads.
+    // The invitation associates each account of the batch, and the account's own
+    // answer to it is what makes its detector one the administrator maintains and
+    // reads (the seam `record_member` documents).
     let invited: Vec<&str> = ids.iter().map(|id| id.as_str()).collect();
     let (status, body) = invite_members(&router, &detector_id, &invited).await;
     assert_eq!(
         status, 200,
         "case a batch under an organization: invite expected 200, got {status} {body:?}"
     );
+    for account in &invited {
+        monitor_member(&engine, &detector_id, account);
+    }
 
     for (account, email) in &rows_to_create {
         let case = format!("{account} under a mixed organization");
@@ -537,7 +554,7 @@ async fn a_member_configuration_agrees_with_the_organization_read() {
             .iter()
             .map(|feature| feature_instant(&configuration, feature, &case))
             .collect();
-        record_member(&router, &detector_id, account, email, &case).await;
+        record_member(&engine, &router, &detector_id, account, email, &case).await;
         let again = member_configuration(&router, &detector_id, account, &case).await;
         assert_eq!(
             every_feature_status(&again, &case),

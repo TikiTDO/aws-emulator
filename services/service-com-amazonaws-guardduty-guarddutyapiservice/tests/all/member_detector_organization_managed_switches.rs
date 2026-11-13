@@ -30,7 +30,7 @@
 
 use serde_json::{json, Value};
 
-use crate::detector_lifecycle::{enabled_detector, new_router, Router};
+use crate::detector_lifecycle::{enabled_detector, router_with_engine, Router};
 use crate::member_association::{unprocessed_ids, DEFAULT_REGION};
 use crate::member_detector_configuration::update_member_detectors;
 // The organization-side table, bodies and projections live in the sibling suite that
@@ -154,7 +154,7 @@ async fn a_member_write_cannot_move_a_feature_the_organization_auto_enables() {
                 // One organization per row: the two Runtime Monitoring features
                 // cannot be auto-enabled together, so a row must not inherit the
                 // previous row's settings.
-                let router = new_router();
+                let (router, engine) = router_with_engine();
                 let detector_id = enabled_detector(&router).await;
                 let case =
                     format!("{feature} auto-enabled {auto_enable}, member write {requested}");
@@ -172,7 +172,7 @@ async fn a_member_write_cannot_move_a_feature_the_organization_auto_enables() {
                         + requested_index,
                 );
                 let email = EMAIL_FORMS[requested_index % EMAIL_FORMS.len()];
-                record_member(&router, &detector_id, &account, email, &case).await;
+                record_member(&engine, &router, &detector_id, &account, email, &case).await;
 
                 if feature == "RUNTIME_MONITORING" && requested == ENABLED {
                     clear_eks_runtime_monitoring(&router, &detector_id, &account, &case).await;
@@ -244,7 +244,7 @@ async fn a_member_write_brings_a_feature_the_organization_auto_enables_into_agre
     for (case_index, feature) in OPT_IN_FEATURES.into_iter().enumerate() {
         for (status_index, auto_enable) in ["NEW", "ALL"].into_iter().enumerate() {
             for (requested_index, requested) in [DISABLED, ENABLED].into_iter().enumerate() {
-                let router = new_router();
+                let (router, engine) = router_with_engine();
                 let detector_id = enabled_detector(&router).await;
                 let case = format!(
                     "{feature} auto-enabled {auto_enable} after the member was recorded, \
@@ -255,7 +255,7 @@ async fn a_member_write_brings_a_feature_the_organization_auto_enables_into_agre
                     400 + case_index * 4 + status_index * 2 + requested_index,
                 );
                 let email = EMAIL_FORMS[case_index % EMAIL_FORMS.len()];
-                record_member(&router, &detector_id, &account, email, &case).await;
+                record_member(&engine, &router, &detector_id, &account, email, &case).await;
                 let before = member_configuration(&router, &detector_id, &account, &case).await;
                 let was_at = feature_instant(&before, feature, &case);
                 assert_eq!(
@@ -310,7 +310,7 @@ async fn a_member_write_brings_a_feature_the_organization_auto_enables_into_agre
 async fn a_member_write_cannot_move_an_additional_configuration_the_organization_auto_enables() {
     for (case_index, (feature, additional)) in ADDITIONAL_CONFIGURATIONS.into_iter().enumerate() {
         for (status_index, (auto_enable, enables)) in ORG_FEATURE_STATUSES.into_iter().enumerate() {
-            let router = new_router();
+            let (router, engine) = router_with_engine();
             let detector_id = enabled_detector(&router).await;
             let case = format!("{feature}/{additional} auto-enabled {auto_enable}");
 
@@ -328,7 +328,7 @@ async fn a_member_write_cannot_move_an_additional_configuration_the_organization
 
             let account = account_id(500 + case_index * ORG_FEATURE_STATUSES.len() + status_index);
             let email = EMAIL_FORMS[status_index % EMAIL_FORMS.len()];
-            record_member(&router, &detector_id, &account, email, &case).await;
+            record_member(&engine, &router, &detector_id, &account, email, &case).await;
             if feature == "RUNTIME_MONITORING" {
                 clear_eks_runtime_monitoring(&router, &detector_id, &account, &case).await;
             }
@@ -393,7 +393,7 @@ async fn the_deprecated_data_sources_view_obeys_the_organizations_auto_enablemen
     for (case_index, (feature, node)) in DATA_SOURCE_VIEWS.into_iter().enumerate() {
         for (status_index, (auto_enable, enables)) in ORG_FEATURE_STATUSES.into_iter().enumerate() {
             for (enable_index, enable) in [false, true].into_iter().enumerate() {
-                let router = new_router();
+                let (router, engine) = router_with_engine();
                 let detector_id = enabled_detector(&router).await;
                 let case = format!(
                     "{feature} auto-enabled {auto_enable}, dataSources.{node} enable {enable}"
@@ -412,7 +412,7 @@ async fn the_deprecated_data_sources_view_obeys_the_organizations_auto_enablemen
                         + enable_index,
                 );
                 let email = EMAIL_FORMS[enable_index % EMAIL_FORMS.len()];
-                record_member(&router, &detector_id, &account, email, &case).await;
+                record_member(&engine, &router, &detector_id, &account, email, &case).await;
 
                 update_ok(
                     &router,

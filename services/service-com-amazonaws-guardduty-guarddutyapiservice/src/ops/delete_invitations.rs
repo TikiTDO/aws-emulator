@@ -168,7 +168,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // accounts the inbox held none from, so neither can act on an invitation the
         // other would report. A repeated account id is one account, so its invitation
         // is taken once and reported at most once.
-        let unprocessed = state.take_received_invitations_in(&region, &input.account_ids);
+        //
+        // The REASON is this operation's own, and not the decline's: GuardDuty
+        // enumerates every condition under which an invitation cannot be discarded in
+        // one fixed sentence and says which of them held for none of them
+        // ([`crate::state::INVITATION_NOT_DELETED_MESSAGE`]).
+        let unprocessed = state.take_received_invitations_in(
+            &region,
+            &input.account_ids,
+            crate::state::INVITATION_NOT_DELETED_MESSAGE,
+        );
 
         Ok(DeleteInvitationsOutput {
             // Present and empty when every named account's invitation was deleted:

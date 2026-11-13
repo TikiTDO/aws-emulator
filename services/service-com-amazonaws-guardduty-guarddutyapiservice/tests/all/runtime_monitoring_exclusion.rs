@@ -33,13 +33,17 @@
 //!    `DataSources` view (which the create applies over the same stored switches)
 //!    present alongside the list.
 
+use std::sync::Arc;
+
 use serde_json::{json, Value};
 
 use crate::detector_lifecycle::{
-    call, create_detector, enabled_detector, error_code, error_shape, new_router, Router,
+    call, create_detector, enabled_detector, error_code, error_shape, new_router, router_over,
+    Router,
 };
 use crate::member_association::{create_members, invite_members, MEMBERS};
 use crate::member_detector_configuration::{get_member_detectors, update_member_detectors};
+use crate::member_relationship_scope::monitor_member;
 
 /// The modelled error SHAPE every GuardDuty client rejection is enveloped in, as
 /// `x-amzn-errortype` carries it.
@@ -228,7 +232,8 @@ async fn an_update_of_a_member_account_is_judged_on_the_configuration_it_leaves_
     let (other_id, _) = MEMBERS[1];
 
     for row in rows() {
-        let router = new_router();
+        let engine = Arc::new(engine::InMemoryEngine::new());
+        let router = router_over(Arc::clone(&engine));
         let detector_id = enabled_detector(&router).await;
         let accounts: Vec<(&str, &str)> = MEMBERS[..2].to_vec();
         let (status, body) = create_members(&router, &detector_id, &accounts).await;
@@ -237,14 +242,20 @@ async fn an_update_of_a_member_account_is_judged_on_the_configuration_it_leaves_
             "case {:?}: create-members expected 200, got {status} {body:?}",
             row.case
         );
-        // The invitation associates the accounts, which is what makes their
-        // detectors ones the administrator configures.
+        // The invitation associates the accounts, and GuardDuty maintains a member
+        // account's detector once that account has ANSWERED it — the relationship the
+        // `member_relationship_scope` seam drives, since answering is the member
+        // account's own call to make — which is what makes their detectors ones the
+        // administrator configures and reads.
         let (status, body) = invite_members(&router, &detector_id, &[member_id, other_id]).await;
         assert_eq!(
             status, 200,
             "case {:?}: invite-members expected 200, got {status} {body:?}",
             row.case
         );
+        for (account_id, _) in &accounts {
+            monitor_member(&engine, &detector_id, account_id);
+        }
         if let Some(setup) = row.setup.as_ref() {
             // Applied to BOTH accounts the row's own call names: the call configures
             // every account it names, so it is judged against each of them.
@@ -310,7 +321,8 @@ async fn one_account_the_list_cannot_configure_refuses_the_whole_call() {
     let (prepared_id, _) = MEMBERS[0];
     let (default_id, _) = MEMBERS[1];
 
-    let router = new_router();
+    let engine = Arc::new(engine::InMemoryEngine::new());
+    let router = router_over(Arc::clone(&engine));
     let detector_id = enabled_detector(&router).await;
     let accounts: Vec<(&str, &str)> = MEMBERS[..2].to_vec();
     let (status, body) = create_members(&router, &detector_id, &accounts).await;
@@ -318,13 +330,17 @@ async fn one_account_the_list_cannot_configure_refuses_the_whole_call() {
         status, 200,
         "create-members: expected 200, got {status} {body:?}"
     );
-    // The invitation associates the accounts, which is what makes their detectors
-    // ones the administrator configures.
+    // The invitation associates the accounts, and GuardDuty maintains a member
+    // account's detector once that account has ANSWERED it, which is what makes their
+    // detectors ones the administrator configures and reads.
     let (status, body) = invite_members(&router, &detector_id, &[prepared_id, default_id]).await;
     assert_eq!(
         status, 200,
         "invite-members: expected 200, got {status} {body:?}"
     );
+    for (account_id, _) in &accounts {
+        monitor_member(&engine, &detector_id, account_id);
+    }
 
     // Only one of the two accounts has EKS Runtime Monitoring switched off, so only
     // that one could take Runtime Monitoring.
