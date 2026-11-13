@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op StartDataSourceIntrospection
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `StartDataSourceIntrospection`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`StartDataSourceIntrospection::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -154,18 +145,58 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `StartDataSourceIntrospection` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(StartDataSourceIntrospectionErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("StartDataSourceIntrospection"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                StartDataSourceIntrospectionErrorModeled::InternalFailureException(
+                    InternalFailureException {
+                        message: Some("the appsync store is unavailable on this engine".to_string()),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // An introspection is OF a data source: the configuration is "the metadata
+        // required to introspect the RDS cluster", so a call that carries none names
+        // nothing to introspect and is a malformed request.
+        let Some(config) = input.rds_data_api_config.as_ref() else {
+            return Err(
+                StartDataSourceIntrospectionErrorModeled::BadRequestException(
+                    BadRequestException {
+                        message: Some(
+                            crate::state::MISSING_RDS_DATA_API_CONFIG_MESSAGE.to_string(),
+                        ),
+                        ..Default::default()
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // What the introspection settles to is computed HERE, from the database this call
+        // named: the schema is read from the service that owns the cluster, and whatever
+        // that service refuses the read with is the reason the introspection failed.
+        // Nothing of a later request takes part in the outcome, and the read happens
+        // before the store is locked, so no engine work holds the lock across an await.
+        let outcome = crate::state::introspect(ctx, config).await;
+
+        let now = std::time::SystemTime::now();
+        let mut guard = state.lock();
+
+        // Materialise everything the clock already owes first, so this call leaves the
+        // store in the state of THIS instant rather than the one the last caller left
+        // behind.
+        guard.settle_data_source_introspections(now);
+
+        // The operation is asynchronous, so the call SCHEDULES the introspection and
+        // answers the non-terminal state its new record is in; the clock performs it, and
+        // `GetDataSourceIntrospection` is what reports that it has.
+        let record = guard.start_data_source_introspection(outcome, now);
+
+        Ok(StartDataSourceIntrospectionOutput {
+            introspection_id: Some(record.introspection_id),
+            introspection_status: Some(record.status),
+            introspection_status_detail: record.detail,
+        })
     }
 }

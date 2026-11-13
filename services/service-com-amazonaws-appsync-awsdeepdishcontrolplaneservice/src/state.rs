@@ -59,6 +59,16 @@ pub use dependencies::*;
 mod code_definition;
 pub use code_definition::*;
 
+/// The data source introspections this service has run, and how the schema one read is
+/// reported.
+mod data_source_introspection;
+pub use data_source_introspection::*;
+
+/// How that schema is READ: the RDS cluster's own Data API, asked for the tables, columns,
+/// keys and indexes of the database an introspection names.
+mod introspected_cluster;
+pub use introspected_cluster::*;
+
 use crate::ops::types::{
     AdditionalAuthenticationProvider, Api, ApiAssociation, ApiCache, ApiKey, AppSyncRuntime,
     AuthMode, ChannelNamespace, DataSource, DomainNameConfig, DynamodbDataSourceConfig,
@@ -1930,6 +1940,10 @@ pub struct ComAmazonawsAppsyncAwsdeepdishcontrolplaneserviceState {
     pub event_apis: BTreeMap<String, EventApiRecord>,
     /// Every source-API association, keyed by its minted `associationId`.
     pub source_api_associations: BTreeMap<String, SourceApiAssociationRecord>,
+    /// Every data source introspection this service has run, keyed by its minted
+    /// `introspectionId`. A record of its own resource family: an introspection belongs to
+    /// no API, which is why the operations that create and read one name none.
+    pub data_source_introspections: BTreeMap<String, IntrospectionRecord>,
     /// Every created custom domain name, keyed by the domain name itself — the name is
     /// what every domain-name and association operation addresses one by, so it
     /// identifies the domain and no second key is needed.
@@ -2177,14 +2191,26 @@ impl ComAmazonawsAppsyncAwsdeepdishcontrolplaneserviceState {
     /// Drawn from a counter the state advances (seeded from the clock on first use),
     /// never from the request, so creating the same API twice yields two ids.
     pub fn mint_id(&mut self) -> String {
+        let seed = self.next_id_draw();
+        let low = splitmix64(seed);
+        let mut id = base32_13(seed);
+        id.push_str(&base32_13(low));
+        id
+    }
+
+    /// The next draw of this state's own id counter: the bits a minted id is formed from.
+    ///
+    /// Seeded from the clock on first use and advanced through a bijection, so consecutive
+    /// draws neither repeat nor spell consecutive numbers. Shared by every id this service
+    /// mints, whatever FORM that id takes ([`Self::mint_id`], and the UUID an
+    /// introspection is referenced by), so no two of them can be drawn from the same
+    /// value.
+    fn next_id_draw(&mut self) -> u64 {
         if self.id_seed == 0 {
             self.id_seed = now_nanos();
         }
         self.id_seed = splitmix64(self.id_seed);
-        let low = splitmix64(self.id_seed);
-        let mut id = base32_13(self.id_seed);
-        id.push_str(&base32_13(low));
-        id
+        self.id_seed
     }
 
     /// Mint a fresh opaque id that can also be addressed as a `ResourceName`: a

@@ -89,6 +89,17 @@ uuid = "1"
 # accessors, so a document their operations wrote takes effect on the next request.
 service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# The RDS Data API is how an Aurora cluster's schema is read for a data source
+# introspection (`src/state/data_source_introspection.rs`): the cluster, its databases and
+# the login the secret carries all belong to that service, so the schema is ASKED of it —
+# the AWS SDK driven over the emulator's own in-process transport, through the operation
+# callback — rather than reconstructed here, and an emulator assembled without the Data API
+# is told apart from a cluster that holds no table.
+aws-sdk-rdsdata = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# Reads the column list of an index out of the `CREATE INDEX` statement the introspected
+# database's schema holds, with the same maintained SQL parser (and PostgreSQL dialect) the
+# Data API itself parses statements with, rather than by scanning the text here.
+sqlparser = { version = "0.59", default-features = false, features = ["std"] }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -105,6 +116,20 @@ tokio = { workspace = true, features = ["net", "time"] }
 # asserts the derivation over are DRAWN from the published validity window rather than
 # hand-picked. Test-only, seeded, and nothing of it reaches `src/`.
 rand = "0.9"
+# The owners of what a data source introspection reads — the Data API that serves the
+# cluster's databases, the RDS control plane that holds the cluster, and the Secrets Manager
+# (with the KMS the secret is sealed under) the login comes from — mounted beside this
+# service in the introspection suite, so what the introspection reports is the schema of a
+# real database of this emulator, created through those services' own operations.
+service-com-amazonaws-rdsdata-rdsdataservice = { workspace = true }
+service-com-amazonaws-rds-amazonrdsv19 = { workspace = true }
+service-com-amazonaws-secretsmanager-secretsmanager = { workspace = true }
+service-com-amazonaws-kms-trentservice = { workspace = true }
+# The clients those two control planes are driven through in that suite: RDS speaks
+# awsQuery and Secrets Manager restJson1, so a case creates its cluster and its secret with
+# the SDK rather than by hand-rolling either wire form.
+aws-sdk-rds = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-secretsmanager = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 
 [lints]
 workspace = true

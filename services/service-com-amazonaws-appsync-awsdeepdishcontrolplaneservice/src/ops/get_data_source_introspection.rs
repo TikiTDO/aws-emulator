@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetDataSourceIntrospection
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetDataSourceIntrospection`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetDataSourceIntrospection::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -163,20 +154,77 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetDataSourceIntrospection` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetDataSourceIntrospectionErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetDataSourceIntrospection"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(GetDataSourceIntrospectionErrorModeled::InternalFailureException(
+                InternalFailureException {
+                    message: Some("the appsync store is unavailable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+
+        let now = std::time::SystemTime::now();
+        let mut guard = state.lock();
+
+        // Materialise everything the clock already owes first, so this call is answered
+        // against the introspection state of THIS instant rather than the one the last
+        // caller left behind. This is the only write a read performs: the transition was
+        // owed at this instant whether or not anybody called.
+        guard.settle_data_source_introspections(now);
+
+        // "Retrieves the record of an existing introspection": an `introspectionId` this
+        // account holds no record for retrieves nothing.
+        let Some(record) = guard.data_source_introspections.get(&input.introspection_id) else {
+            return Err(GetDataSourceIntrospectionErrorModeled::NotFoundException(
+                NotFoundException {
+                    message: Some(crate::state::INTROSPECTION_NOT_FOUND_MESSAGE.to_string()),
+                },
+            )
+            .into());
+        };
+
+        // "If the retrieval is successful, the result of the instrospection will also be
+        // returned": an introspection that has not been performed yet, and one that
+        // failed, read no schema, so there is no result to report for either — the status
+        // and its detail are the whole answer.
+        let introspection_result = if record.has_result() {
+            // The models are held in the order their tables are named, which is a total
+            // order a cursor can resume from; the page is cut from that order.
+            let ordered: Vec<&crate::state::IntrospectedModel> = record.models.iter().collect();
+            let Some(page) = crate::state::paginate(
+                &ordered,
+                |model| model.name.as_str(),
+                input.next_token.as_deref(),
+                input.max_results,
+            ) else {
+                return Err(GetDataSourceIntrospectionErrorModeled::BadRequestException(
+                    BadRequestException {
+                        message: Some(crate::state::INVALID_PAGINATION_TOKEN_MESSAGE.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .into());
+            };
+            Some(DataSourceIntrospectionResult {
+                models: Some(
+                    page.items
+                        .iter()
+                        .map(|model| model.to_model(input.include_models_sdl))
+                        .collect(),
+                ),
+                next_token: page.next_token,
+            })
+        } else {
+            None
+        };
+
+        Ok(GetDataSourceIntrospectionOutput {
+            introspection_id: Some(record.introspection_id.clone()),
+            introspection_status: Some(record.status.clone()),
+            introspection_status_detail: record.detail.clone(),
+            introspection_result,
+        })
     }
 }

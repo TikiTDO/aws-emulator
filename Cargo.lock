@@ -1580,6 +1580,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-rdsdata"
+version = "1.124.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2557be0670e83f213024e8e58ea47f5d336e9d40454fb4ddb977c9a782516f2b"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json 0.65.1",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema 1.2.0",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-redshift"
 version = "1.130.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9183,6 +9208,9 @@ dependencies = [
  "aws-emulator-smithy-macros",
  "aws-emulator-smithy-schema-server",
  "aws-emulator-smithy-server-runtime",
+ "aws-sdk-rds",
+ "aws-sdk-rdsdata",
+ "aws-sdk-secretsmanager",
  "aws-smithy-runtime-api",
  "aws-smithy-schema 0.2.1",
  "aws-smithy-types",
@@ -9199,9 +9227,14 @@ dependencies = [
  "serde_json",
  "service-com-amazonaws-cloudwatch-graniteserviceversion20100801",
  "service-com-amazonaws-iam-awsidentitymanagementv20100508",
+ "service-com-amazonaws-kms-trentservice",
+ "service-com-amazonaws-rds-amazonrdsv19",
+ "service-com-amazonaws-rdsdata-rdsdataservice",
+ "service-com-amazonaws-secretsmanager-secretsmanager",
  "service-com-amazonaws-sts-awssecuritytokenservicev20110615",
  "service-common",
  "sha2 0.10.9",
+ "sqlparser",
  "tokio",
  "tokio-tungstenite",
  "tracing",
