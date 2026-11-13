@@ -67,6 +67,19 @@
 //! [`Authorized`] — which fronts [`ModelledValidation`] in the one table
 //! [`Service::override_operation`] serves this service's operations through — and
 //! nowhere else. [`authorization`] holds the store lookups and the sentence.
+//!
+//! ## What every call publishes once it has been answered
+//!
+//! The entitlements an accepted agreement grants are resources of two OTHER
+//! services — the Marketplace Entitlement Service holds the product entitlement
+//! a seller reads, and License Manager the licence an entitlement names — so
+//! they are published there rather than only reported from here
+//! ([`crate::state::granted_entitlements`]). That publication follows the
+//! agreements' status and the clock, which an acceptance, an amendment, a
+//! cancellation, a replacement, an expiry and a renewal all move, so it is made
+//! in [`Authorized`] after every call this service answers instead of from each
+//! handler: one place, which no handler can forget, and which the clock-owed
+//! transitions a reporting operation materialises reach as well.
 
 use smithy_server_runtime::{
     http, BoxFuture, DeserializableStruct, ErasedOperation, Operation, Refusal, Refused, Service,
@@ -196,6 +209,12 @@ impl<Op: Operation> ErasedOperation for ModelledValidation<Op> {
 /// handler does, so taking it once in front of every operation is what keeps any
 /// one handler from forgetting it — and it must be taken BEFORE the request's
 /// own input is read, which is where this wrapper sits.
+///
+/// The same engine is what the entitlements this service's agreements grant are
+/// published through once the request has been answered
+/// ([`crate::state::granted_entitlements::publish`]), for the reason the module
+/// docs give: that publication is a property of the agreements' status rather
+/// than of any one operation.
 struct Authorized<Op, Eng> {
     /// The validation front this wrapper hands an authorized request to. A
     /// zero-sized value naming the operation type, like the one it fronts.
@@ -230,7 +249,40 @@ impl<Op: Operation, Eng: Send + Sync + 'static> ErasedOperation for Authorized<O
             if let Err(denial) = authorization::authorize(&*self.engine, ctx, Op::NAME) {
                 return authorization::refusal_response(svc.definition().protocol(), &denial);
             }
-            self.validated.run(svc, req, ctx).await
+            let answered = self.validated.run(svc, req, ctx).await;
+            // The entitlements the agreements of this store now grant, published
+            // to the services that OWN them: the Marketplace Entitlement Service
+            // holds the product entitlement a seller reads, and License Manager
+            // the licence an entitlement names
+            // (`crate::state::granted_entitlements`). It is done HERE, once per
+            // call, rather than in each handler, because those grants follow the
+            // agreements' status and the clock: an acceptance grants them, an
+            // amendment restates them, and a cancellation, a replacement, an
+            // expiry or a renewal — the last two owed by the clock and
+            // materialised by whichever call next settles the chain — takes them
+            // away. Reconciling after every call is what keeps any one of those
+            // paths from forgetting, and a call that moved neither the store nor
+            // the clock past something due publishes nothing at all: the grants
+            // are derived, so there is nothing to restate until one of them
+            // changes (`crate::state::granted_entitlements::GrantSummary`).
+            //
+            // It is synchronous store work, so when a publication is OWED it
+            // runs on the BLOCKING pool rather than on the async worker this
+            // request is served on — which keeps this task yielding for its
+            // whole life — and it is awaited there, so a caller holding this
+            // call's answer already sees what it published. A call that owes
+            // none pays only for reading that summary, and a publication that
+            // panicked or was cancelled leaves the records to the next call and
+            // this answer untouched.
+            let now = ::std::time::SystemTime::now();
+            if crate::state::granted_entitlements::publication_due(&*self.engine, now) {
+                let engine = Arc::clone(&self.engine);
+                let _published = ::tokio::task::spawn_blocking(move || {
+                    crate::state::granted_entitlements::publish(&*engine, now);
+                })
+                .await;
+            }
+            answered
         })
     }
 

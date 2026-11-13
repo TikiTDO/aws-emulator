@@ -4,9 +4,19 @@
 //!
 //! The only resource this service models is the `Entitlement`, and the model declares
 //! no operation that creates one: in AWS an entitlement appears when a buyer subscribes
-//! to a listing, entirely out of band of this API. So the store below is populated
-//! through [`seed_entitlements`] — the emulator's fixture/admin seam standing in for
-//! that out-of-band creation — and `GetEntitlements` only ever reads it.
+//! to a listing or accepts an agreement, entirely out of band of this API. So the store
+//! below is written from outside this service and `GetEntitlements` only ever reads it,
+//! through two seams:
+//!
+//! * [`publish_license_entitlements`] — the entitlements an accepted AWS Marketplace
+//!   agreement grants. Accepting an agreement is what entitles the buyer to capacity in
+//!   the product it covers, and the seller reads exactly that entitlement here, so the
+//!   service that holds the agreement publishes its grants through this seam, keyed by
+//!   the licence each grant was granted under;
+//! * [`seed_entitlements`] — the emulator's fixture/admin seam, standing in for the
+//!   subscriptions no API in this emulator models.
+
+use std::collections::BTreeSet;
 
 /// The capacity an entitlement grants, mirroring the modeled `EntitlementValue`
 /// structure: AWS populates exactly ONE of the four members, the one matching the
@@ -173,6 +183,47 @@ where
 {
     let state = service_state(engine)?;
     let mut store = state.lock();
+    let before = store.entitlements.len();
+    store.entitlements.extend(records);
+    Some(store.entitlements.len() - before)
+}
+
+/// Make `records` the entitlements this service holds for the licences `licenses`
+/// names.
+///
+/// The other out-of-band creation seam, for the entitlements an AWS Marketplace
+/// agreement grants: `Entitlement$LicenseArn` "is a unique identifier for a specific
+/// granted license", so the licence an entitlement was granted under is what says which
+/// records belong to one grant — and the service that holds the agreement is the one
+/// copy of them. Every record stored under one of `licenses` is therefore replaced by
+/// `records` (which the caller gives for those licences only), so a grant that changed
+/// is restated and one the agreement no longer makes — its agreement cancelled, expired,
+/// replaced or renewed — stops being reported, without a second copy of the agreement's
+/// own state to keep in step here.
+///
+/// A record held under any OTHER licence, and one held under no licence at all, is left
+/// exactly where it is, so the cursors issued over what a fixture seeded
+/// ([`seed_entitlements`]) stay valid.
+///
+/// Answers `None` when `engine` is not the shared [`::engine::InMemoryEngine`] (so there
+/// is no store to write), otherwise the number of records now held for those licences.
+pub fn publish_license_entitlements<Eng, I>(
+    engine: &Eng,
+    licenses: &BTreeSet<String>,
+    records: I,
+) -> Option<usize>
+where
+    Eng: Send + Sync + 'static,
+    I: IntoIterator<Item = StoredEntitlement>,
+{
+    let state = service_state(engine)?;
+    let mut store = state.lock();
+    store.entitlements.retain(|entitlement| {
+        entitlement
+            .license_arn
+            .as_deref()
+            .is_none_or(|arn| !licenses.contains(arn))
+    });
     let before = store.entitlements.len();
     store.entitlements.extend(records);
     Some(store.entitlements.len() - before)

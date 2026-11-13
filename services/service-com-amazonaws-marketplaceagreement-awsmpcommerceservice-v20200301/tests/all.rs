@@ -55,6 +55,8 @@ mod end_time_behavior_projections;
 mod entitlement_resources;
 #[path = "all/error_bodies.rs"]
 mod error_bodies;
+#[path = "all/granted_entitlements.rs"]
+mod granted_entitlements;
 #[path = "all/idempotency_token_conflicts.rs"]
 mod idempotency_token_conflicts;
 #[path = "all/identity_authorization.rs"]

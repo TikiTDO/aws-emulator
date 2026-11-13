@@ -110,6 +110,10 @@ pub use purchase_orders::*;
 /// beside the shapes it holds rather than in this module root (`state/store.rs`).
 mod store;
 
+/// Publishing the entitlements an accepted agreement grants into the services
+/// that OWN them — the Marketplace Entitlement Service and License Manager.
+pub mod granted_entitlements;
+
 /// The `agreementType` every agreement this slice mints carries.
 ///
 /// `DescribeAgreementOutput$agreementType` documents two values,
@@ -3485,6 +3489,16 @@ pub struct ComAmazonawsMarketplaceagreementAwsmpcommerceserviceV20200301State {
     /// which is what keeps resolving an id this store holds nothing under from
     /// paying for the same walk again and again at one instant.
     pub settled_through: Option<SystemTime>,
+    /// What the last publication of this store's grants was made from
+    /// ([`granted_entitlements::publish`]), and `None` while none has been made.
+    ///
+    /// What bounds how often that publication does any work: the entitlements
+    /// the agreements of this store grant are a value DERIVED from those
+    /// agreements and the clock, so a publication made from a store that has not
+    /// moved since the last one would rebuild the same records and write them
+    /// again. One is therefore made only when this summary of the store differs
+    /// from the one the last publication was made from.
+    pub published_grants: Option<granted_entitlements::GrantSummary>,
 }
 
 /// This service's store in the shared engine: call it with a handler's `&*self.engine`.
