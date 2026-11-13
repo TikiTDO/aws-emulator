@@ -67,12 +67,14 @@ mod router_filters;
 mod routers;
 mod gateways;
 mod flows;
+mod vpc_placement;
 pub use flows::*;
 pub use gateways::*;
 pub use router_filters::*;
 pub use routers::*;
 pub use offerings::*;
 pub use arns::*;
+pub use vpc_placement::*;
 
 /// The `Status` enum the model declares for a flow
 /// (`smithy_query(query="shape",shape="Status")`: STANDBY | ACTIVE | UPDATING | DELETING

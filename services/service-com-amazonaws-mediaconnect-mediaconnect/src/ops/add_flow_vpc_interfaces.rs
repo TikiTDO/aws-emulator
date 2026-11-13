@@ -178,12 +178,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // Nothing in this operation's answer depends on request metadata: the flow ARN is
+        // Nothing in this operation's ANSWER depends on request metadata: the flow ARN is
         // an `@httpLabel` the deserializer already put on `input`, the VPC interfaces come
         // from the body, and the response is read back out of the stored flow. The elastic
-        // network interface ids this call mints are not ARNs, so the request's Region is not
-        // read either.
-        let _ = ctx;
+        // network interface ids this call mints are not ARNs, so the request's Region is
+        // read only to resolve the placement below against EC2.
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 AddFlowVpcInterfacesErrorModeled::InternalServerErrorException(
@@ -202,6 +201,59 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(bad_request(
                 "An add flow VPC interfaces request must include at least one VPC interface.",
             ));
+        }
+
+        // How many VPC interfaces one REQUEST may add is bounded from the request alone,
+        // before anything is resolved for its entries: the list is caller-sized and the
+        // resolution below is per entry, so the ceiling is applied first. A flow holds at
+        // most `MAX_FLOW_VPC_INTERFACES` of them, so a request naming more than that can
+        // never be stored whatever the flow already holds — what the flow holds is counted
+        // towards the same bound under the store lock further down, where the flow can be
+        // read.
+        if input.vpc_interfaces.len() > MAX_FLOW_VPC_INTERFACES {
+            return Err(bad_request(format!(
+                "A flow may hold at most {MAX_FLOW_VPC_INTERFACES} VPC interfaces; this \
+                 request adds {}.",
+                input.vpc_interfaces.len()
+            )));
+        }
+
+        // A VPC interface is an elastic network interface MediaConnect creates in the
+        // caller's own account ("IDs of the network interfaces created in customer's account
+        // by MediaConnect", `VpcInterface$NetworkInterfaceIds`): it goes in the subnet the
+        // entry names, under the security groups it names — EC2's resources, not this
+        // service's — so every entry is resolved against EC2 before anything is stored,
+        // through the one place this crate resolves a placement
+        // (`crate::state::unresolved_vpc_interface_placements`), which CreateFlow's own
+        // `VpcInterfaces` resolve through too. That resolution is dispatched IN PROCESS by
+        // the framework callback to the EC2 service mounted in this same emulator: no socket
+        // is opened, no address from the request is contacted and nothing leaves the host.
+        // It runs before the store is locked, because an in-process dispatch is a call into
+        // another service's own state.
+        //
+        // The Region selects which of this emulator's own regional state answers. The VPC
+        // interface is created for the flow this request addresses by ARN, and a flow lives
+        // in the Region segment of its own ARN — so that is the Region whose network holds
+        // the subnet, read by the one parse this tree reads a caller-supplied ARN's Region
+        // with (`service_common::arn::region_of`), with the Region the request was signed for
+        // as the fallback, read as a Region LABEL the same way
+        // (`service_common::arn::region_label`: non-empty, bounded, `[a-z0-9-]` only — the
+        // grammar every model's ARN pattern states for the field). A value outside it names
+        // no Region of this account, so there is nothing to resolve against and nothing to
+        // refuse on, exactly as a hop that could not be made grounds no refusal.
+        let signing_region = crate::state::request_region(ctx.parts());
+        let region = ::service_common::arn::region_of(&input.flow_arn, crate::state::SERVICE_NAMESPACE)
+            .or_else(|| ::service_common::arn::region_label(&signing_region));
+        if let Some(region) = region {
+            if let Some(detail) = crate::state::unresolved_vpc_interface_placements(
+                ctx,
+                region,
+                &input.vpc_interfaces,
+            )
+            .await
+            {
+                return Err(bad_request(detail));
+            }
         }
 
         let now = ::std::time::SystemTime::now();

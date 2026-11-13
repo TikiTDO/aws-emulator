@@ -87,6 +87,27 @@ impl Emulator {
         Self { router, engine }
     }
 
+    /// As [`Emulator::new`], with Amazon EC2 mounted beside this service on the SAME engine,
+    /// and the in-process callback a suite drives EC2's own operations through.
+    ///
+    /// A VPC placement names EC2's resources — the subnet an elastic network interface goes
+    /// in and the security groups it carries — so the suite covering it needs the owner of
+    /// those resources answering beside this service, over the very callback the handlers
+    /// resolve a placement through.
+    pub(crate) fn with_ec2() -> (Self, ::smithy_server_runtime::EmbeddedEmulator) {
+        let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+        let mut router = MultiServiceRouter::new();
+        router.set_request_authentication(false);
+        router.register_service(
+            service_com_amazonaws_mediaconnect_mediaconnect::EmulatedService::new(engine.clone()),
+        );
+        router.register_service(service_com_amazonaws_ec2_amazonec2::EmulatedService::new(
+            engine.clone(),
+        ));
+        let callback = ::smithy_server_runtime::EmbeddedEmulator::from_router(router.clone());
+        (Self { router, engine }, callback)
+    }
+
     /// Put `count` flows straight into the store, the way CreateFlow stores one.
     ///
     /// The store ceiling is a bound on what is STORED, so the suite that asserts it

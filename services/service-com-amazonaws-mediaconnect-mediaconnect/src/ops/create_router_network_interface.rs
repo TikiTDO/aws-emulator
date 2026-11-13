@@ -109,6 +109,28 @@ fn store_unavailable(detail: &str) -> CreateRouterNetworkInterfaceError {
     .into()
 }
 
+/// The ARN of the router network interface the `ClientToken` `token` has ALREADY minted in
+/// `store`, or `None` when no interface carries that token (and when the request named
+/// none).
+///
+/// `ClientToken` is this request's `@idempotencyToken`, "a unique identifier for the request
+/// to ensure idempotency", so a create replaying one answers with the interface it minted
+/// rather than minting a second one. The lookup is one function because it is made TWICE:
+/// once before the placement this request names is resolved (a replay mints nothing, so it
+/// needs no resolution), and again under the lock this call writes under, where a concurrent
+/// create carrying the same token may have minted the interface while the lock was released.
+fn minted_by_client_token(
+    store: &crate::state::ComAmazonawsMediaconnectMediaconnectState,
+    token: Option<&str>,
+) -> Option<String> {
+    let token = token?;
+    store
+        .router_network_interfaces
+        .values()
+        .find(|interface| interface.client_token.as_deref() == Some(token))
+        .map(|interface| interface.arn.clone())
+}
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -220,35 +242,88 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let now = ::std::time::SystemTime::now();
-        let mut store = state.lock();
-        // The state changes the clock already owes are materialised before anything is read,
-        // the way the reporting operations do it, so the replay below and the record this
-        // call stores both answer from the store as of `now`.
-        store.settle_due_transitions(now);
-
-        // `ClientToken` is the request's `@idempotencyToken`, "a unique identifier for the
-        // request to ensure idempotency": a create replaying a token this store already
-        // holds answers with the interface that token minted instead of minting a second
-        // one.
-        if let Some(token) = input.client_token.as_deref().filter(|t| !t.is_empty()) {
-            let minted = store
-                .router_network_interfaces
-                .values()
-                .find(|interface| interface.client_token.as_deref() == Some(token))
-                .map(|interface| interface.arn.clone());
-            if let Some(arn) = minted {
-                let router_network_interface = store
-                    .router_network_interface_projection(&arn)
-                    .ok_or_else(|| {
+        // A create replaying a `ClientToken` this store already holds answers with the
+        // interface that token minted (see [`minted_by_client_token`]) instead of minting a
+        // second one — so it resolves nothing further and writes nothing.
+        //
+        // The lock is taken and released around this read, because what follows it asks
+        // another service about the placement this request names; the same read is made
+        // again under the write lock below, so releasing it cannot mint a second interface
+        // for one token.
+        let client_token = input.client_token.clone().filter(|token| !token.is_empty());
+        let replayed = {
+            let mut store = state.lock();
+            // The state changes the clock already owes are materialised before anything is
+            // read, the way the reporting operations do it, so this read answers from the
+            // store as of `now`.
+            store.settle_due_transitions(now);
+            match minted_by_client_token(&store, client_token.as_deref()) {
+                None => None,
+                Some(arn) => Some(store.router_network_interface_projection(&arn).ok_or_else(
+                    || {
                         store_unavailable(
                             "the router network interface this ClientToken minted could not \
                              be read back",
                         )
-                    })?;
-                return Ok(CreateRouterNetworkInterfaceOutput {
-                    router_network_interface,
-                });
+                    },
+                )?),
             }
+        };
+        if let Some(router_network_interface) = replayed {
+            return Ok(CreateRouterNetworkInterfaceOutput {
+                router_network_interface,
+            });
+        }
+
+        // A VPC configuration places a MediaConnect elastic network interface in a subnet of
+        // the account, under the security groups it names — EC2's resources, not this
+        // service's — so they are resolved against EC2 before anything is stored, through
+        // the one place this crate resolves a placement
+        // (`crate::state::unresolved_router_network_interface_placement`), which bounds how
+        // many security group ids it resolves. A PUBLIC configuration names no EC2 resource,
+        // so it resolves nothing.
+        //
+        // That resolution is dispatched IN PROCESS by the framework callback to the EC2
+        // service mounted in this same emulator: no socket is opened, no address from the
+        // request is contacted and nothing leaves the host. The Region selects which of this
+        // emulator's own regional state answers — the interface is placed in the Region
+        // resolved above, so that is the one asked — read as a Region LABEL
+        // (`service_common::arn::region_label`, the grammar every model's ARN pattern states
+        // for the field) rather than taken as given; a value outside it names no Region of
+        // this account, so there is nothing to resolve against and nothing to refuse on.
+        if let Some(label) = ::service_common::arn::region_label(&region) {
+            if let Some(detail) = crate::state::unresolved_router_network_interface_placement(
+                ctx,
+                label,
+                &input.configuration,
+            )
+            .await
+            {
+                return Err(bad_request(detail));
+            }
+        }
+
+        let mut store = state.lock();
+        // The transitions the clock owes are settled again under the lock this call writes
+        // under: the read above released it, so the record this call stores answers from the
+        // store as of now.
+        store.settle_due_transitions(now);
+
+        // And the token is looked up once more under THIS lock: a concurrent create carrying
+        // the same `ClientToken` may have minted the interface while the lock was released
+        // for the resolution above, and one token mints one interface.
+        if let Some(arn) = minted_by_client_token(&store, client_token.as_deref()) {
+            let router_network_interface = store
+                .router_network_interface_projection(&arn)
+                .ok_or_else(|| {
+                    store_unavailable(
+                        "the router network interface this ClientToken minted could not be \
+                         read back",
+                    )
+                })?;
+            return Ok(CreateRouterNetworkInterfaceOutput {
+                router_network_interface,
+            });
         }
 
         // The store is bounded: nothing evicts a network interface and a read must still
@@ -300,7 +375,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     status: crate::state::ROUTER_NETWORK_INTERFACE_STATE_ACTIVE.to_string(),
                     due_at: now + crate::state::TRANSITION_SPAN,
                 }),
-                client_token: input.client_token.clone().filter(|t| !t.is_empty()),
+                client_token,
                 created_at: now,
                 updated_at: now,
                 // A new interface is live: only DeleteRouterNetworkInterface owes its

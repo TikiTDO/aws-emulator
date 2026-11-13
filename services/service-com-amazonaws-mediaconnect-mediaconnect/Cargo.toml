@@ -21,6 +21,15 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# The AWS SDK for EC2, driven over the in-process callback
+# (`OperationContext::callback`): a subnet and a security group are EC2's resources, so
+# every request that places a MediaConnect elastic network interface in a client VPC
+# resolves the ones it names against EC2 (`src/state/vpc_placement.rs`) before it stores
+# anything. Only the generated client is needed — the emulator supplies the transport.
+aws-sdk-ec2 = { version = "1", default-features = false }
+# `arn::region_label`: the ONE reading of a caller-supplied Region as a Region LABEL,
+# which is what the endpoint the EC2 call above is made at is built from.
+service-common = { path = "../common" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -28,6 +37,11 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+# The OWNER of the subnets and security groups a VPC placement names, mounted beside this
+# service in the test harness: Amazon EC2 holds the account's network, so the resolution
+# can only be driven end to end with it on the same engine.
+# DEV-ONLY: this crate depends on no other service's crate outside its tests.
+service-com-amazonaws-ec2-amazonec2 = { workspace = true }
 
 [lints]
 workspace = true

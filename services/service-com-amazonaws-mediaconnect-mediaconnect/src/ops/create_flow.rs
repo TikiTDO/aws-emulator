@@ -468,6 +468,38 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(bad_request(rejection));
         }
 
+        // A VPC interface is an elastic network interface MediaConnect creates in the
+        // caller's own account ("IDs of the network interfaces created in customer's account
+        // by MediaConnect", `VpcInterface$NetworkInterfaceIds`): it goes in the subnet the
+        // entry names, under the security groups it names — EC2's resources, not this
+        // service's — so every entry is resolved against EC2 before anything is stored,
+        // through the one place this crate resolves a placement
+        // (`crate::state::unresolved_vpc_interface_placements`), which AddFlowVpcInterfaces
+        // resolves through too. How many entries one request may carry was bounded above
+        // (`VpcInterfaces` at `crate::state::MAX_FLOW_COLLECTION_ENTRIES`), so the count of
+        // resolutions is capped before the first one runs.
+        //
+        // That resolution is dispatched IN PROCESS by the framework callback to the EC2
+        // service mounted in this same emulator: no socket is opened, no address from the
+        // request is contacted and nothing leaves the host. It runs before the store is
+        // locked, because an in-process dispatch is a call into another service's own state.
+        // The Region selects which of this emulator's own regional state answers, and it is
+        // the Region resolved above, read as a Region LABEL
+        // (`service_common::arn::region_label`, the grammar every model's ARN pattern states
+        // for the field) rather than taken as given; a value outside it names no Region of
+        // this account, so there is nothing to resolve against and nothing to refuse on.
+        if let Some(label) = ::service_common::arn::region_label(&region) {
+            if let Some(detail) = crate::state::unresolved_vpc_interface_placements(
+                ctx,
+                label,
+                input.vpc_interfaces.as_deref().unwrap_or_default(),
+            )
+            .await
+            {
+                return Err(bad_request(detail));
+            }
+        }
+
         let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
 

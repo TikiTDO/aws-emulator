@@ -99,6 +99,23 @@ fn refused_by_interface(detail: impl Into<String>) -> UpdateRouterNetworkInterfa
     .into()
 }
 
+/// Refuse the request with the same `BadRequestException`, in the envelope this service
+/// words a refusal about the request's CONTENT in ([`crate::state::validation_failed_message`]),
+/// which is what a member naming a resource the account does not hold is: the value is
+/// unacceptable, rather than the interface refusing a change it cannot make.
+fn refused_by_request(detail: impl Into<String>) -> UpdateRouterNetworkInterfaceError {
+    UpdateRouterNetworkInterfaceErrorModeled::BadRequestException(BadRequestException {
+        message: crate::state::validation_failed_message(&detail.into()),
+    })
+    .into()
+}
+
+/// What this operation answers for an ARN that addresses no interface of this store: the
+/// one sentence, so the pre-check and the write path cannot word it two ways.
+fn no_such_interface(arn: &str) -> String {
+    format!("No router network interface exists for {arn}.")
+}
+
 /// The server-side failure for a store this service cannot reach.
 fn store_unavailable(detail: &str) -> UpdateRouterNetworkInterfaceError {
     UpdateRouterNetworkInterfaceErrorModeled::InternalServerErrorException(
@@ -182,74 +199,85 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         mut input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(store_unavailable(
                 "the mediaconnect router network interface store is unavailable",
             ));
         };
 
-        let now = ::std::time::SystemTime::now();
-        let mut store = state.lock();
-        // The state changes the clock already owes are materialised before anything is read
-        // or written, exactly as the reporting operations do it, so an interface whose create
-        // has settled is updated rather than refused for a transition that is no longer in
-        // flight.
-        store.settle_due_transitions(now);
-
-        // The model declares NO `NotFoundException` for this operation
-        // (`smithy_query(query="operation",operation="UpdateRouterNetworkInterface")` lists
-        // BadRequestException, ConflictException, ForbiddenException,
-        // InternalServerErrorException, ServiceUnavailableException and
-        // TooManyRequestsException), so an ARN that addresses no interface is answered with
-        // the client-input error this operation DOES model rather than with a 404 it does
-        // not: there is nothing to update, which is the semantic error `BadRequestException`
-        // describes.
-        let Some(interface) = store.router_network_interfaces.get_mut(&input.arn) else {
-            return Err(refused_by_interface(format!(
-                "No router network interface exists for {}.",
-                input.arn
-            )));
-        };
-
-        // An update moves the interface's state (see below), so it cannot be accepted while
-        // the clock already owes it a different one: the interface is between two states,
-        // which is the conflict `ConflictException` describes ("would cause a conflict with
-        // the current state of a service resource associated with the request", 409 and
-        // retryable — the caller retries once the transition it is waiting on has settled).
-        // The same precondition, read the same way, as RestartRouterInput's.
-        if interface.is_transitioning() {
-            return Err(
-                UpdateRouterNetworkInterfaceErrorModeled::ConflictException(ConflictException {
-                    message: format!(
-                        "Router network interface {} is in state {} and a state change is \
-                         already in progress, so it cannot be updated yet.",
-                        interface.arn, interface.state
-                    ),
-                })
-                .into(),
-            );
-        }
-
-        // "The updated configuration settings for the router network interface. Changing the
-        // type of the configuration is not supported"
-        // (`smithy_query(query="doc",shape="UpdateRouterNetworkInterfaceRequest",
-        // member="Configuration")`). The interface's type IS the variant of its
-        // configuration union (`crate::state::router_network_interface_type`), so a request
-        // naming the other variant asks for a type change and is refused — before anything
-        // is written, so a refused update leaves the interface exactly as it was.
-        if let Some(requested) = input.configuration.as_ref() {
-            let requested_type = crate::state::router_network_interface_type(requested);
-            let stored_type = interface.network_interface_type();
-            if requested_type != stored_type {
-                return Err(refused_by_interface(format!(
-                    "Changing the configuration type of a router network interface is not \
-                     supported: {} is a {stored_type} interface and the request's \
-                     Configuration is a {requested_type} one.",
-                    interface.arn
-                )));
+        // The interface this request addresses, and its own refusals, FIRST: a request that
+        // addresses no interface, or one the interface's state does not admit, is answered
+        // with that refusal rather than with anything about the request's configuration —
+        // the precedence the create path has, where there is no addressed resource to
+        // refuse. The lock is then released, because resolving the placement below asks
+        // another service, and every one of these refusals is checked again under the lock
+        // this call writes under (see [`refused_by_the_interface`]).
+        {
+            let mut store = state.lock();
+            // The state changes the clock already owes are materialised before anything is
+            // read or written, exactly as the reporting operations do it, so an interface
+            // whose create has settled is updated rather than refused for a transition that
+            // is no longer in flight.
+            store.settle_due_transitions(::std::time::SystemTime::now());
+            if let Some(refusal) =
+                refused_by_the_interface(&store, &input.arn, input.configuration.as_ref())
+            {
+                return Err(refusal);
             }
         }
+
+        // A VPC configuration places a MediaConnect elastic network interface in a subnet of
+        // the account, under the security groups it names — EC2's resources, not this
+        // service's — so a replacement configuration is resolved against EC2 before anything
+        // is written, through the one place this crate resolves a placement
+        // (`crate::state::unresolved_router_network_interface_placement`), which the create
+        // path resolves through too and which bounds how many security group ids it resolves.
+        //
+        // That resolution is dispatched IN PROCESS by the framework callback to the EC2
+        // service mounted in this same emulator: no socket is opened, no address from the
+        // request is contacted and nothing leaves the host. The Region selects which of this
+        // emulator's own regional state answers: the interface lives in the Region segment of
+        // the ARN this request addresses it by, read as a Region LABEL by the one parse this
+        // tree reads a caller-supplied ARN's Region with (`service_common::arn::region_of`),
+        // falling back to the Region the request was signed for, read the same way. A value
+        // that is no Region label names no Region of this account, so there is nothing to
+        // resolve against and nothing to refuse on — as a hop that could not be made grounds
+        // no refusal.
+        if let Some(configuration) = input.configuration.as_ref() {
+            let signing_region = crate::state::request_region(ctx.parts());
+            let region = ::service_common::arn::region_of(&input.arn, crate::state::SERVICE_NAMESPACE)
+                .or_else(|| ::service_common::arn::region_label(&signing_region));
+            if let Some(region) = region {
+                if let Some(detail) = crate::state::unresolved_router_network_interface_placement(
+                    ctx,
+                    region,
+                    configuration,
+                )
+                .await
+                {
+                    return Err(refused_by_request(detail));
+                }
+            }
+        }
+
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        // Settled again under the lock this call WRITES under: the read above released it, so
+        // what is refused and what is written both answer from the store as of `now`.
+        store.settle_due_transitions(now);
+
+        // And the interface's own refusals are checked again here, for the same reason: the
+        // interface could have been deleted, or started a transition of its own, while the
+        // lock was released for the resolution above.
+        if let Some(refusal) =
+            refused_by_the_interface(&store, &input.arn, input.configuration.as_ref())
+        {
+            return Err(refusal);
+        }
+        let interface = store
+            .router_network_interfaces
+            .get_mut(&input.arn)
+            .ok_or_else(|| refused_by_interface(no_such_interface(&input.arn)))?;
 
         // Both updatable members are optional: each one the request names replaces the
         // stored value, and each one it omits leaves the stored value alone. A request that
@@ -293,5 +321,68 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             router_network_interface,
         })
     }
+}
+
+/// Why the interface `arn` addresses does not admit this update, or `None` when it does.
+///
+/// Every refusal the ADDRESSED resource earns, in one place, because it is answered twice:
+/// before the placement a replacement `configuration` names is resolved — so a request that
+/// addresses nothing is answered about that rather than about its configuration — and again
+/// under the lock the update is applied under, where the record may have changed while the
+/// lock was released for that resolution.
+fn refused_by_the_interface(
+    store: &crate::state::ComAmazonawsMediaconnectMediaconnectState,
+    arn: &str,
+    configuration: Option<&RouterNetworkInterfaceConfiguration>,
+) -> Option<UpdateRouterNetworkInterfaceError> {
+    // The model declares NO `NotFoundException` for this operation
+    // (`smithy_query(query="operation",operation="UpdateRouterNetworkInterface")` lists
+    // BadRequestException, ConflictException, ForbiddenException,
+    // InternalServerErrorException, ServiceUnavailableException and
+    // TooManyRequestsException), so an ARN that addresses no interface is answered with the
+    // client-input error this operation DOES model rather than with a 404 it does not:
+    // there is nothing to update, which is the semantic error `BadRequestException`
+    // describes.
+    let Some(interface) = store.router_network_interfaces.get(arn) else {
+        return Some(refused_by_interface(no_such_interface(arn)));
+    };
+
+    // An update moves the interface's state, so it cannot be accepted while the clock
+    // already owes it a different one: the interface is between two states, which is the
+    // conflict `ConflictException` describes ("would cause a conflict with the current state
+    // of a service resource associated with the request", 409 and retryable — the caller
+    // retries once the transition it is waiting on has settled). The same precondition, read
+    // the same way, as RestartRouterInput's.
+    if interface.is_transitioning() {
+        return Some(
+            UpdateRouterNetworkInterfaceErrorModeled::ConflictException(ConflictException {
+                message: format!(
+                    "Router network interface {} is in state {} and a state change is \
+                     already in progress, so it cannot be updated yet.",
+                    interface.arn, interface.state
+                ),
+            })
+            .into(),
+        );
+    }
+
+    // "The updated configuration settings for the router network interface. Changing the
+    // type of the configuration is not supported"
+    // (`smithy_query(query="doc",shape="UpdateRouterNetworkInterfaceRequest",
+    // member="Configuration")`). The interface's type IS the variant of its configuration
+    // union (`crate::state::router_network_interface_type`), so a request naming the other
+    // variant asks for a type change and is refused — before anything is written, so a
+    // refused update leaves the interface exactly as it was.
+    let requested = configuration?;
+    let requested_type = crate::state::router_network_interface_type(requested);
+    let stored_type = interface.network_interface_type();
+    (requested_type != stored_type).then(|| {
+        refused_by_interface(format!(
+            "Changing the configuration type of a router network interface is not supported: \
+             {} is a {stored_type} interface and the request's Configuration is a \
+             {requested_type} one.",
+            interface.arn
+        ))
+    })
 }
 
