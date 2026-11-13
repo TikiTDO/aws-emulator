@@ -155,16 +155,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .ok_or_else(crate::state::state_unavailable)?;
 
         // A profile vends credentials for the roles it names, so every entry has to be
-        // an IAM role ARN. `RoleArnList`'s member carries no `@pattern` for the
-        // boundary validator to enforce, so the check lives here.
-        for (index, role_arn) in input.role_arns.iter().enumerate() {
-            if !is_iam_role_arn(role_arn) {
-                return Err(validation(
-                    &format!("roleArns.{index}.member"),
-                    "Member must be an IAM role ARN of the form \
-                     arn:<partition>:iam::<account>:role/<name>",
-                ));
-            }
+        // an IAM role ARN — judged by the shared rule every operation that accepts a
+        // `roleArns` list judges one by.
+        if let Some((member, constraint)) = crate::state::role_arns_rejection(&input.role_arns) {
+            return Err(validation(&member, constraint));
         }
 
         // A resource's tag set is addressed by key and bounded by the per-resource
@@ -233,29 +227,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             profile: Some(profile),
         })
     }
-}
-
-/// Whether `candidate` is an IAM role ARN: `arn:<partition>:iam::<account>:role/<path>`.
-///
-/// IAM is a global service, so the region segment of an IAM ARN is empty — which is
-/// why the segments are checked rather than just the prefix.
-fn is_iam_role_arn(candidate: &str) -> bool {
-    let mut segments = candidate.splitn(6, ':');
-    let (Some("arn"), Some(partition), Some("iam"), Some(""), Some(account), Some(resource)) = (
-        segments.next(),
-        segments.next(),
-        segments.next(),
-        segments.next(),
-        segments.next(),
-        segments.next(),
-    ) else {
-        return false;
-    };
-    !partition.is_empty()
-        && account.chars().all(|c| c.is_ascii_digit())
-        && !account.is_empty()
-        && resource.starts_with("role/")
-        && resource.len() > "role/".len()
 }
 
 /// Refuse the request with this operation's own modelled `ValidationException`

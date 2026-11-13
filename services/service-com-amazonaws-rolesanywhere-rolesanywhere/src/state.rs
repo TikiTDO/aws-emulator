@@ -822,6 +822,52 @@ pub fn source_rejection(source: &Source) -> Option<(&'static str, String)> {
         })
 }
 
+/// The failure a `roleArns` list carries when one of its entries is not an IAM role ARN,
+/// as the `(member, constraint)` pair [`validation_message`] words a refusal from — or
+/// `None` when every entry is one.
+///
+/// A profile vends credentials for the roles it names, so every entry has to be an IAM
+/// role ARN. Shared, because every operation that accepts a `roleArns` list has to judge
+/// it the same way: a list one of them stores is a list the others accept.
+pub fn role_arns_rejection(role_arns: &[String]) -> Option<(String, &'static str)> {
+    role_arns
+        .iter()
+        .position(|role_arn| !is_iam_role_arn(role_arn))
+        .map(|index| {
+            (
+                // Elements are numbered from one, the way the boundary validator numbers
+                // the element of a list its own constraint check refuses, so one list is
+                // addressed identically whichever check catches it.
+                format!("roleArns.{}.member", index + 1),
+                "Member must be an IAM role ARN of the form \
+                 arn:<partition>:iam::<account>:role/<name>",
+            )
+        })
+}
+
+/// Whether `candidate` is an IAM role ARN: `arn:<partition>:iam::<account>:role/<path>`.
+///
+/// IAM is a global service, so the region segment of an IAM ARN is empty — which is
+/// why the segments are checked rather than just the prefix.
+fn is_iam_role_arn(candidate: &str) -> bool {
+    let mut segments = candidate.splitn(6, ':');
+    let (Some("arn"), Some(partition), Some("iam"), Some(""), Some(account), Some(resource)) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return false;
+    };
+    !partition.is_empty()
+        && account.chars().all(|c| c.is_ascii_digit())
+        && !account.is_empty()
+        && resource.starts_with("role/")
+        && resource.len() > "role/".len()
+}
+
 /// The failure a handler answers when this service's state cannot be reached — i.e.
 /// the emulator was built on an engine type this service cannot use, so the operation
 /// cannot be served at all. Unreachable in the assembled emulator, which builds exactly

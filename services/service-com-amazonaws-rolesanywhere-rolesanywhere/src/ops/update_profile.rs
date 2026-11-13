@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateProfile
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateProfile`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateProfile::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! A partial write over one stored profile: every member the request carries replaces
+//! that member of the record, every member it omits keeps the value it had, and the
+//! members this operation does not model — the enablement flag, the identifiers, the
+//! creating account, the attribute mappings, the tags and the instant of creation — are
+//! left exactly as they were. The instant of last update moves, because the call wrote
+//! to the record, and the whole record as it now stands is what the call answers and
+//! every later `GetProfile` / `ListProfiles` reports.
+//!
+//! An id no stored profile carries is the modelled 404 and writes nothing, and a
+//! `roleArns` list carrying an entry that is not an IAM role ARN is refused with the
+//! same validation error `CreateProfile` refuses one with, before anything is written.
 //!
 //! ## Shape of an operation
 //!
@@ -155,18 +158,70 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateProfile` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateProfileErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateProfile"))
+        // A submitted `roleArns` list is judged exactly as `CreateProfile` judges one,
+        // and before anything is written, so a list naming something that is not an IAM
+        // role never replaces a usable one.
+        if let Some((member, constraint)) = input
+            .role_arns
+            .as_deref()
+            .and_then(crate::state::role_arns_rejection)
+        {
+            return Err(UpdateProfileErrorModeled::ValidationException(ValidationException {
+                message: Some(crate::state::validation_message(&member, constraint)),
+            })
+            .into());
+        }
+
+        let state = crate::state::service_state(&*self.engine)
+            .ok_or_else(crate::state::state_unavailable)?;
+        let mut store = state.lock();
+
+        // An id no stored profile carries — never created, or already deleted — is a
+        // 404, never an update that lands nowhere. The refusal reports the profile by
+        // the ARN the id names in this request's Region, the wording this service words
+        // an ARN-keyed miss with.
+        let record = store.profiles.get_mut(&input.profile_id).ok_or_else(|| {
+            UpdateProfileErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+                message: Some(crate::state::arn_not_found_message(
+                    &crate::state::profile_arn(
+                        &crate::state::request_region(ctx.parts()),
+                        &input.profile_id,
+                    ),
+                )),
+            })
+        })?;
+
+        // Every member but the addressed id is optional: this is a partial update, so
+        // only what the request carried is written, and a member the request omits keeps
+        // the value it had.
+        if let Some(name) = input.name {
+            record.name = name;
+        }
+        if let Some(session_policy) = input.session_policy {
+            record.session_policy = Some(session_policy);
+        }
+        if let Some(role_arns) = input.role_arns {
+            record.role_arns = role_arns;
+        }
+        if let Some(managed_policy_arns) = input.managed_policy_arns {
+            record.managed_policy_arns = managed_policy_arns;
+        }
+        // The modelled `@range(900, 43200)` on the request member is already enforced by
+        // the time this handler runs.
+        if let Some(duration_seconds) = input.duration_seconds {
+            record.duration_seconds = duration_seconds;
+        }
+        if let Some(accept_role_session_name) = input.accept_role_session_name {
+            record.accept_role_session_name = accept_role_session_name;
+        }
+        // `enabled` is not a member of this request — `DisableProfile` / `EnableProfile`
+        // are what move it — so an update of a disabled profile leaves it disabled; the
+        // same holds for `requireInstanceProperties`, the identifiers, the creating
+        // account, the attribute mappings, the tags and the instant of creation.
+        record.updated_at = ::std::time::SystemTime::now();
+
+        Ok(UpdateProfileOutput {
+            profile: Some(record.to_detail()),
+        })
     }
 }
