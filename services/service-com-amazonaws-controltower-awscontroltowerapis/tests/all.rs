@@ -145,6 +145,8 @@ mod resource_identifier_form;
 mod resource_tags;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/tag_plane_arn_syntax.rs"]
+mod tag_plane_arn_syntax;
 #[path = "all/untag_resource.rs"]
 mod untag_resource;
 #[path = "all/unknown_landing_zone_identifier.rs"]

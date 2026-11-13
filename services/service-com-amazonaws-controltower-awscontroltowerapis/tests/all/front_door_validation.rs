@@ -17,6 +17,11 @@
 //! * a request the front door passed and the HANDLER then refuses keeps the
 //!   operation's own modeled `ValidationException`.
 //!
+//! The one parameter this service words a refusal of differently — the tag plane's
+//! `resourceArn` path label, which takes a sentence about that parameter rather than the
+//! generic one — is the subject of [`crate::tag_plane_arn_syntax`]; no row below carries
+//! it.
+//!
 //! Every row names the model member and the constraint it violates; the bounds come
 //! from `smithy_query(query="shape", shape="ListControlOperationsMaxResults,Arn,
 //! ListEnabledBaselinesMaxResults,ListControlOperationsNextToken")` on this crate's
@@ -29,7 +34,7 @@ pub(crate) const FRONT_DOOR_CODE: &str = "BadRequestException";
 
 /// The message that refusal carries. Constant: the front door refuses before the
 /// request is dispatched, so it names neither the member nor the constraint.
-const FRONT_DOOR_MESSAGE: &str = "Invalid request body";
+pub(crate) const FRONT_DOOR_MESSAGE: &str = "Invalid request body";
 
 /// An ARN-shaped value of exactly `length` characters that satisfies `Arn`'s
 /// `@pattern ^arn:aws[0-9a-zA-Z_\-:\/]+$`, so the only constraint a row varies is
