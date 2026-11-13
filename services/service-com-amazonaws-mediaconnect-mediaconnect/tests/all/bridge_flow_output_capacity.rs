@@ -39,7 +39,11 @@ use crate::update_flow_source::update_flow_source;
 
 /// `PUT /v1/bridges/{BridgeArn}` — the UpdateBridge binding
 /// (`smithy_query(query="operation",operation="UpdateBridge")`).
-async fn update_bridge(emulator: &Emulator, arn: &str, body: Value) -> (u16, Option<String>, Value) {
+pub(crate) async fn update_bridge(
+    emulator: &Emulator,
+    arn: &str,
+    body: Value,
+) -> (u16, Option<String>, Value) {
     emulator
         .send("PUT", &format!("/v1/bridges/{arn}"), Some(body))
         .await
@@ -55,7 +59,7 @@ async fn delete_flow(emulator: &Emulator, flow_arn: &str) -> (u16, Option<String
 
 /// A source of a flow that takes the bridge `bridge_arn` as its source, as a request
 /// configures one.
-fn bridge_source(name: &str, bridge_arn: &str) -> Value {
+pub(crate) fn bridge_source(name: &str, bridge_arn: &str) -> Value {
     json!({ "name": name, "gatewayBridgeSource": { "bridgeArn": bridge_arn } })
 }
 
@@ -66,7 +70,11 @@ fn plain_source(name: &str) -> Value {
 
 /// The flow outputs `bridge_arn` reports — the `Bridge$Outputs` entries carrying a
 /// `flowOutput`, which is every output a ground-to-cloud bridge has.
-async fn reported_flow_outputs(emulator: &Emulator, case: &str, bridge_arn: &str) -> Vec<Value> {
+pub(crate) async fn reported_flow_outputs(
+    emulator: &Emulator,
+    case: &str,
+    bridge_arn: &str,
+) -> Vec<Value> {
     let (status, code, described) = describe_bridge(emulator, bridge_arn).await;
     assert_eq!(
         (status, code.as_deref()),
@@ -155,7 +163,7 @@ async fn egress_bridge(
 }
 
 /// A refusal of this service states what was unacceptable inside its validation envelope.
-fn assert_refused(case: &str, status: u16, code: Option<&str>, answered: &Value) {
+pub(crate) fn assert_refused(case: &str, status: u16, code: Option<&str>, answered: &Value) {
     assert_eq!(
         (status, code),
         (400, Some("BadRequestException")),

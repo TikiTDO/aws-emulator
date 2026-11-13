@@ -259,3 +259,5 @@ mod flow_label_not_found_wording;
 mod router_filter_limits;
 #[path = "all/flow_ndi_machine_name.rs"]
 mod flow_ndi_machine_name;
+#[path = "all/update_bridge_declared_output_bound.rs"]
+mod update_bridge_declared_output_bound;
