@@ -57,6 +57,14 @@ impl Emulator {
         Self::mounted(false, true, false, false)
     }
 
+    /// One emulator with AWS Lambda, CloudWatch *and* IAM mounted beside CodeDeploy
+    /// on the SAME engine, for a suite about what a deployment's SERVICE ROLE lets
+    /// it do: the role and its policies belong to IAM, the alias the deployment
+    /// moves to Lambda, and the alarms its group polls to CloudWatch.
+    pub(crate) fn with_lambda_cloudwatch_and_iam() -> Self {
+        Self::mounted(true, true, true, false)
+    }
+
     /// One emulator with CloudWatch *and* AWS Lambda mounted beside CodeDeploy on
     /// the SAME engine, for a suite about a shift an ALARM interrupts: the alarm
     /// belongs to one of them and the alias to the other.

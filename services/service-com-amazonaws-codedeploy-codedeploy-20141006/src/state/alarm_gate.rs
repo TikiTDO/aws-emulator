@@ -190,17 +190,7 @@ fn gate_of(
     if !configuration.enabled {
         return None;
     }
-    let mut seen = BTreeSet::new();
-    let alarms: Vec<String> = configuration
-        .alarms
-        .iter()
-        .flatten()
-        .filter_map(|alarm| alarm.name.as_deref())
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .filter(|name| seen.insert(name.to_string()))
-        .map(str::to_string)
-        .collect();
+    let alarms = polled_alarms(configuration);
     if alarms.is_empty() {
         return None;
     }
@@ -210,6 +200,26 @@ fn gate_of(
         ignore_poll_alarm_failure: configuration.ignore_poll_alarm_failure,
         rolls_back: rolls_back_on_alarm(state, deployment),
     })
+}
+
+/// The alarms `configuration` POLLS, in the order it lists them, with duplicates
+/// and blank names dropped.
+///
+/// The one reading of that list, so the gate that polls them and the service-role
+/// pre-flight that asks whether the role may poll them at all
+/// ([`super::service_role_permissions`]) are about the same alarms.
+pub(super) fn polled_alarms(configuration: &AlarmConfiguration) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    configuration
+        .alarms
+        .iter()
+        .flatten()
+        .filter_map(|alarm| alarm.name.as_deref())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .filter(|name| seen.insert(name.to_string()))
+        .map(str::to_string)
+        .collect()
 }
 
 /// The deployment group `deployment` was created against, when the store still
@@ -223,7 +233,11 @@ fn group_of<'a>(
 
 /// The alarm configuration `deployment` runs under: its own override, else its
 /// deployment group's.
-fn effective_alarm_configuration<'a>(
+///
+/// The one resolution of that precedence, so the gate and the service-role
+/// pre-flight that asks whether the role may poll those alarms
+/// ([`super::service_role_permissions`]) read one configuration.
+pub(super) fn effective_alarm_configuration<'a>(
     state: &'a ComAmazonawsCodedeployCodedeploy20141006State,
     deployment: &'a Deployment,
 ) -> Option<&'a AlarmConfiguration> {

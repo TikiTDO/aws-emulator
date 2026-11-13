@@ -78,12 +78,10 @@ pub enum TrafficShiftProgress {
 struct Claim {
     /// The deployment the increment belongs to.
     deployment_id: String,
-    /// The function whose alias moves.
+    /// The function whose alias moves, which is what a refusal names.
     function_name: String,
     /// The alias that moves.
     alias_name: String,
-    /// The version traffic is being shifted to, which is what a refusal names.
-    target_version: String,
     /// The write this increment is.
     alias_move: AliasMove,
     /// Which increment of the schedule it is, and whether it completes the move.
@@ -135,9 +133,11 @@ pub fn apply_due_shifts<Eng: Send + Sync + 'static>(engine: &Eng) {
     for (claim, outcome) in &attempted {
         match outcome {
             Ok(()) => record_applied(&mut store, claim),
-            Err(unresolved) => {
-                fail_deployment(&mut store, claim, &Denial::of(claim, *unresolved), now);
-            }
+            // WHICH of the function, the version and the alias could not be
+            // resolved does not change the outcome CodeDeploy reports (see
+            // [`Denial::of`]), so that the move was refused is all that is read
+            // here.
+            Err(_) => fail_deployment(&mut store, claim, &Denial::of(claim), now),
         }
     }
 }
@@ -209,7 +209,6 @@ fn due_claim(deployment_id: &str, deployment: &Deployment, now_ms: i64) -> Optio
         deployment_id: deployment_id.to_string(),
         function_name: declared.function_name.clone(),
         alias_name: declared.alias_name.clone(),
-        target_version: declared.target_version.clone(),
         alias_move: increment.alias_move(declared),
         index,
         completes_the_move: index + 1 == deployment.traffic_increments.len(),
@@ -227,49 +226,34 @@ struct Denial {
 }
 
 impl Denial {
-    /// The denial for the Lambda resource an attempted move could not resolve.
-    fn of(claim: &Claim, unresolved: Unresolved) -> Self {
-        let message = match unresolved {
-            Unresolved::Function => lambda_function_missing_message(&claim.function_name),
-            Unresolved::Alias => {
-                lambda_alias_missing_message(&claim.function_name, &claim.alias_name)
-            }
-            Unresolved::Version => lambda_target_version_missing_message(
-                &claim.function_name,
-                &claim.target_version,
-            ),
-        };
+    /// The denial for a Lambda resource an attempted move could not resolve.
+    ///
+    /// ONE denial for all three: WHICH of the function, the version and the alias
+    /// was missing is deliberately not disclosed (see
+    /// [`invalid_lambda_function_message`]), so the claim's own function name is
+    /// all that goes into it.
+    fn of(claim: &Claim) -> Self {
         Self {
             code: ERROR_CODE_INVALID_LAMBDA_FUNCTION,
-            message,
+            message: invalid_lambda_function_message(&claim.function_name),
         }
     }
 }
 
-/// The message a deployment whose AppSpec names a function AWS Lambda does not
-/// hold fails with, naming that function.
+/// The message a deployment whose declared traffic shift names a Lambda resource
+/// AWS Lambda does not hold fails with.
+///
+/// A FIXED sentence whose only variable part is the function the AppSpec's
+/// `Resources` entry names: CodeDeploy reports the same message whether the
+/// function, the version or the alias was the thing it could not find, and names
+/// neither the version nor the alias. One sentence for the three cases is the
+/// contract — a client triaging a failed release matches on it, and on exactly
+/// that ambiguity — so nothing here narrows it down.
 #[must_use]
-pub fn lambda_function_missing_message(function_name: &str) -> String {
-    format!("The Lambda function {function_name} specified in the AppSpec file does not exist")
-}
-
-/// The message a deployment whose AppSpec names an alias the function does not
-/// hold fails with, naming both.
-#[must_use]
-pub fn lambda_alias_missing_message(function_name: &str, alias_name: &str) -> String {
+pub fn invalid_lambda_function_message(function_name: &str) -> String {
     format!(
-        "The alias {alias_name} specified in the AppSpec file does not exist on the Lambda \
-         function {function_name}"
-    )
-}
-
-/// The message a deployment whose AppSpec targets a version the function has not
-/// published fails with, naming both.
-#[must_use]
-pub fn lambda_target_version_missing_message(function_name: &str, target_version: &str) -> String {
-    format!(
-        "The TargetVersion {target_version} specified in the AppSpec file is not a published \
-         version of the Lambda function {function_name}"
+        "The deployment failed because either the target Lambda function {function_name} does \
+         not exist or the specified function version or alias cannot be found"
     )
 }
 

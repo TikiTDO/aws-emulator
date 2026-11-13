@@ -67,6 +67,14 @@ pub mod trigger_notifications;
 /// account's own IAM records: the one place a `serviceRoleArn` is asked about.
 pub mod service_role;
 
+/// Whether that service role AUTHORIZES the calls a deployment makes: the one
+/// place a deployment is failed for the permissions its role withholds.
+pub mod service_role_permissions;
+
+/// The SHA256 digest of a revision that carries its content inline: the one place
+/// that digest is computed, where such a revision is recorded.
+pub mod revision_digest;
+
 use crate::ops::types::{
     AlarmConfiguration, AutoRollbackConfiguration, BlueGreenDeploymentConfiguration,
     DeploymentStyle, EC2DeploymentOptions, EC2TagFilter, EC2TagSet, ECSService, LoadBalancerInfo,
@@ -1315,8 +1323,9 @@ pub struct Application {
 /// reports it.
 #[derive(Debug, Clone)]
 pub struct ApplicationRevision {
-    /// The location exactly as the caller supplied it; nothing about a revision
-    /// is inferred into the stored record.
+    /// The location as the caller supplied it, carrying the digest of its inline
+    /// content ([`revision_digest`]): nothing else about a revision is inferred
+    /// into the stored record.
     pub revision: RevisionLocation,
     pub description: Option<String>,
     pub register_time_ms: i64,
@@ -1374,7 +1383,10 @@ impl Application {
             self.revisions.insert(
                 key.clone(),
                 ApplicationRevision {
-                    revision,
+                    // An inline revision carries the digest of its content,
+                    // computed once here so every read of this registry entry
+                    // reports it.
+                    revision: revision_digest::with_content_digest(revision),
                     description: None,
                     register_time_ms: now_ms,
                     first_used_time_ms: None,
@@ -1439,9 +1451,10 @@ pub struct DeploymentGroup {
     pub region: String,
 }
 
-/// A deployment. `revision` is held exactly as the request supplied it: nothing
-/// about a revision is inferred into the stored record, so reading a deployment
-/// back returns the caller's own revision.
+/// A deployment. `revision` is held as the request supplied it, carrying the
+/// digest of its inline content ([`revision_digest`]): nothing else about a
+/// revision is inferred into the stored record, so reading a deployment back
+/// returns the caller's own revision.
 #[derive(Debug, Clone)]
 pub struct Deployment {
     pub deployment_id: String,
@@ -2361,6 +2374,13 @@ impl ComAmazonawsCodedeployCodedeploy20141006State {
     /// past [`MAX_DEPLOYMENT_HISTORY`] so the store stays bounded however many
     /// deployments a caller creates.
     pub fn record_deployment(&mut self, deployment: Deployment) {
+        let mut deployment = deployment;
+        // An inline revision carries the digest of its content, computed once
+        // here so every read of this deployment's revision reports it.
+        deployment.revision = deployment.revision.map(revision_digest::with_content_digest);
+        deployment.previous_revision = deployment
+            .previous_revision
+            .map(revision_digest::with_content_digest);
         let id = deployment.deployment_id.clone();
         self.deployments.insert(id.clone(), deployment);
         self.deployment_order.push(id.clone());
@@ -4407,15 +4427,20 @@ fn content_digest(content: &str) -> String {
 /// clock-owed deployment transition already applied.
 ///
 /// EVERY handler goes through here, so no handler can observe an unseeded store,
-/// a deployment that should already have completed, one the alarms its group
-/// polls have already stopped, or one reporting success for a traffic shift that
-/// was never carried out. `None` means the engine is not the shared in-memory one
+/// a deployment that should already have completed, one its deployment group's
+/// service role never authorized, one the alarms its group polls have already
+/// stopped, or one reporting success for a traffic shift that was never carried
+/// out. `None` means the engine is not the shared in-memory one
 /// — answer it with a modelled server error.
 pub fn with_state<Eng: Send + Sync + 'static, R>(
     engine: &Eng,
     body: impl FnOnce(&mut ComAmazonawsCodedeployCodedeploy20141006State) -> R,
 ) -> Option<R> {
     let state = service_state(engine)?;
+    // The service role the deployments in flight run as is consulted FIRST: a
+    // deployment its role does not authorize must have no effect at all, so it is
+    // failed before any alarm is polled and before any traffic moves.
+    service_role_permissions::refuse_unauthorized_deployments(engine);
     // The alarm gate reads CloudWatch's own alarm store, so it runs with THIS
     // store unlocked — the two are never held at once — and BEFORE the clock
     // settles anything: a deployment the alarms had already stopped must not

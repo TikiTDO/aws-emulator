@@ -105,6 +105,10 @@ mod refusal_sentence_templates;
 mod resource_tag_removal;
 #[path = "all/resource_tagging.rs"]
 mod resource_tagging;
+#[path = "all/revision_content_digest.rs"]
+mod revision_content_digest;
+#[path = "all/service_role_permissions.rs"]
+mod service_role_permissions;
 #[path = "all/service_role_validation.rs"]
 mod service_role_validation;
 #[path = "all/state_roundtrip.rs"]

@@ -168,6 +168,18 @@ fn app_spec_revision(content: &str) -> Value {
     json!({"revisionType": "AppSpecContent", "appSpecContent": {"content": content}})
 }
 
+/// AWS's fixed sentence for the `INVALID_LAMBDA_FUNCTION` error code, spelled out
+/// here as a client matching on it reads it: the only variable part is the function
+/// the AppSpec's `Resources` entry names, and the sentence deliberately says
+/// neither which of the function, the version and the alias was missing nor what
+/// the alias was called.
+fn invalid_lambda_function_message(function: &str) -> String {
+    format!(
+        "The deployment failed because either the target Lambda function {function} does not \
+         exist or the specified function version or alias cannot be found"
+    )
+}
+
 /// A `string` revision carrying `content`: "the location of an Lambda deployment
 /// revision stored as a RawString".
 fn raw_string_revision(content: &str) -> Value {
@@ -396,8 +408,9 @@ async fn a_revision_that_declares_no_shift_moves_no_alias() {
 
 /// RULE: a deployment whose declared shift cannot be carried out reports no
 /// success for it: it ends `Failed`, with the `INVALID_LAMBDA_FUNCTION` error
-/// information naming the Lambda resource the AppSpec asked for, and no alias
-/// moves.
+/// information naming the FUNCTION its AppSpec asked for — one fixed sentence for
+/// all three missing resources, which deliberately does not say which of them was
+/// missing — and no alias moves.
 #[tokio::test]
 async fn a_shift_that_cannot_be_carried_out_fails_the_deployment() {
     let emulator = Emulator::with_lambda();
@@ -406,32 +419,29 @@ async fn a_shift_that_cannot_be_carried_out_fails_the_deployment() {
     given_alias(&emulator, "handler", "live", "1", None).await;
 
     // Rows differ along which part of the AppSpec names something AWS Lambda does
-    // not hold: the function, the alias, or the version traffic would move to.
+    // not hold: the function, the alias, or the version traffic would move to. All
+    // three earn the same sentence, naming only the function.
     let cases: &[(&str, &str, &str, &str, String)] = &[
         (
             "a function nothing created",
             "absent",
             "live",
             "2",
-            "The Lambda function absent specified in the AppSpec file does not exist".to_string(),
+            invalid_lambda_function_message("absent"),
         ),
         (
             "an alias the function does not hold",
             "handler",
             "blue",
             "2",
-            "The alias blue specified in the AppSpec file does not exist on the Lambda function \
-             handler"
-                .to_string(),
+            invalid_lambda_function_message("handler"),
         ),
         (
             "a target version the function never published",
             "handler",
             "live",
             "9",
-            "The TargetVersion 9 specified in the AppSpec file is not a published version of the \
-             Lambda function handler"
-                .to_string(),
+            invalid_lambda_function_message("handler"),
         ),
     ];
 
