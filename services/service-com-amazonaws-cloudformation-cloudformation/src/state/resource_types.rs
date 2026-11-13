@@ -472,6 +472,7 @@ pub const AWS_RESOURCE_TYPES: &[&str] = &[
     "AWS::EC2::VPCPeeringConnection",
     "AWS::EC2::VPNConnection",
     "AWS::EC2::VPNGateway",
+    "AWS::EC2::VPNGatewayRoutePropagation",
     "AWS::EC2::Volume",
     "AWS::EC2::VolumeAttachment",
     // Amazon ECR, private registry and public gallery
@@ -794,10 +795,12 @@ pub const AWS_RESOURCE_TYPES: &[&str] = &[
     "AWS::S3Vectors::VectorBucket",
     // Amazon SES
     "AWS::SES::ConfigurationSet",
+    "AWS::SES::ConfigurationSetEventDestination",
     "AWS::SES::EmailIdentity",
     "AWS::SES::ReceiptRule",
     "AWS::SES::ReceiptRuleSet",
     "AWS::SES::Template",
+    "AWS::SES::VdmAttributes",
     // Amazon SNS
     "AWS::SNS::Subscription",
     "AWS::SNS::Topic",
@@ -923,6 +926,7 @@ pub const AWS_RESOURCE_TYPES: &[&str] = &[
     "AWS::WAFRegional::XssMatchSet",
     // AWS WAF v2
     "AWS::WAFv2::IPSet",
+    "AWS::WAFv2::LoggingConfiguration",
     "AWS::WAFv2::RegexPatternSet",
     "AWS::WAFv2::RuleGroup",
     "AWS::WAFv2::WebACL",
