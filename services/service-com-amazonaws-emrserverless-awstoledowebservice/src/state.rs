@@ -27,6 +27,16 @@
 //! Each record holds the MODELLED shape (`Application`, `JobRun`) verbatim, so a
 //! reporting operation returns exactly what the mutating one stored rather than
 //! re-deriving anything from a request.
+//!
+//! One thing a record owes beyond its own members is the LOG ARTIFACTS a finished job run
+//! publishes to the Amazon S3 destination its monitoring configuration names, which the
+//! clock owes at the instant the run finished: [`job_run_logs`] states what is written,
+//! where, and which call writes it.
+
+/// The log artifacts a finished job run publishes into the destination its
+/// `monitoringConfiguration` names, and the publication every call that settles this store
+/// drains.
+pub mod job_run_logs;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::Debug;
@@ -722,6 +732,18 @@ pub struct JobRunRecord {
     /// one rather than a repeat of the last.
     pub dashboard: Option<DashboardGrant>,
     pub dashboard_grants: u64,
+    /// Where this run's log artifacts are published, as the configuration the SUBMIT
+    /// carried resolved it ([`job_run_logs::log_destination`]), or `None` when neither
+    /// the application nor the run named an Amazon S3 destination.
+    pub log_destination: Option<job_run_logs::LogDestination>,
+    /// The lifecycle this run's driver log reports: the submit, and every state the clock
+    /// or a cancel moved it to since. Bounded by
+    /// [`job_run_logs::MAX_JOB_RUN_LOG_EVENTS`].
+    pub log_events: Vec<job_run_logs::JobRunLogEvent>,
+    /// Whether the clock owes this run's artifacts a publication: set when the run
+    /// reaches a state it never leaves, and cleared by the call that writes them, so one
+    /// finished run publishes once however many calls arrive afterwards.
+    pub log_publication_due: bool,
 }
 
 /// A dashboard URL this service minted for one job run: the token the URL carries and
@@ -760,13 +782,35 @@ impl JobRunRecord {
             }
             self.job_run.updated_at = at;
             self.job_run.attempt_updated_at = Some(at);
+            self.record_lifecycle(pending.due);
             if is_terminal_job_run_state(&self.job_run.state) {
                 self.job_run.ended_at = Some(at);
                 self.pending.clear();
                 finished_at = Some(pending.due);
+                // The artifacts a finished run leaves in its configured destination are
+                // owed from THIS instant, whether or not anybody was reading: see
+                // [`job_run_logs`] for what is written and which call writes it.
+                self.log_publication_due = self.log_destination.is_some();
             }
         }
         finished_at
+    }
+
+    /// Record the state this run carries now as a line of its driver log, stamped at the
+    /// instant the change happened rather than at whoever observed it.
+    ///
+    /// The lines are what the published log reports ([`job_run_logs::driver_log_text`]).
+    /// Past [`job_run_logs::MAX_JOB_RUN_LOG_EVENTS`] a line is dropped rather than
+    /// queued, so a run nobody reads cannot grow the record without limit.
+    pub fn record_lifecycle(&mut self, at: SystemTime) {
+        if self.log_events.len() >= job_run_logs::MAX_JOB_RUN_LOG_EVENTS {
+            return;
+        }
+        self.log_events.push(job_run_logs::JobRunLogEvent {
+            at,
+            state: self.job_run.state.clone(),
+            state_details: Some(self.job_run.state_details.clone()),
+        });
     }
 
     /// The `JobRunSummary` projection `ListJobRuns` returns: the stored record's own
@@ -1192,6 +1236,30 @@ impl ComAmazonawsEmrserverlessAwstoledowebserviceState {
         for record in self.applications.values_mut() {
             record.settle(now);
         }
+    }
+
+    /// Take the log artifacts the clock owes every job run that has just finished, so the
+    /// caller can write them with this store's guard released.
+    ///
+    /// Each run's artifacts are handed out ONCE: the record's owed flag is cleared here,
+    /// so however many calls settle the store afterwards, one finished run publishes one
+    /// set of artifacts. See [`job_run_logs`] for what they are and where they go.
+    pub fn take_due_job_run_log_publications(
+        &mut self,
+    ) -> Vec<job_run_logs::PendingPublication> {
+        let mut publications = Vec::new();
+        for application in self.applications.values_mut() {
+            for record in application.job_runs.values_mut() {
+                if !record.log_publication_due {
+                    continue;
+                }
+                record.log_publication_due = false;
+                if let Some(publication) = job_run_logs::publication(record) {
+                    publications.push(publication);
+                }
+            }
+        }
+        publications
     }
 
     /// The application the ARN `application_arn` names.

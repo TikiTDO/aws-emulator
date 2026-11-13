@@ -139,7 +139,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // The log artifacts the clock owes a job run that has just finished, published
+        // before this call reads the store it settles (`crate::state::job_run_logs`).
+        crate::state::job_run_logs::publish_due(&*self.engine, ctx).await;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(CancelJobRunErrorModeled::InternalServerException(
                 InternalServerException {
@@ -212,6 +214,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     state: "CANCELLED".to_string(),
                     state_details: Some(crate::state::CANCELLED_STATE_DETAILS.to_string()),
                 });
+                // The cancellation is a line of the run's driver log, the same way every
+                // state the clock moves it to is: see `crate::state::job_run_logs`.
+                job_run.record_lifecycle(now);
             }
 
             CancelJobRunOutput {

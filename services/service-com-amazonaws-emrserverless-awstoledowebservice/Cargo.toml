@@ -29,9 +29,29 @@ hex = { workspace = true }
 # Digests the rendered `CreateApplication` request behind the idempotency-token
 # fingerprint, and the grant behind a `GetDashboardForJobRun` URL's token.
 sha2 = { workspace = true }
+# The Amazon S3 client a finished job run's log artifacts are PUBLISHED through, over the
+# in-process callback into this same emulator (the client itself is `service-common`'s one
+# builder; this is the `ByteStream` the object's bytes are handed over as). No network
+# client feature is enabled: the transport is the emulator's own.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# A published log artifact IS a gzip stream, so it is framed with the maintained DEFLATE
+# implementation this workspace already compresses with rather than by hand.
+flate2 = "1"
+# The `s3MonitoringConfiguration.logUri` a client configures log publishing with is a
+# caller-supplied URI, read by the maintained URL parser rather than split by hand.
+url = "2"
+# ... and that URI's path spells an Amazon S3 key prefix, whose percent-escaping is
+# resolved by the maintained encoder the URL parser itself uses.
+percent-encoding = "2"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
+
+[dev-dependencies]
+# The log-publication suite mounts Amazon S3 beside this service on ONE engine, because a
+# finished job run publishes its log artifacts there — what the assembled emulator does —
+# and reads them back through the object store's own `ListObjectsV2` / `GetObject`.
+service-com-amazonaws-s3-amazons3 = { workspace = true }
 
 [lints]
 workspace = true

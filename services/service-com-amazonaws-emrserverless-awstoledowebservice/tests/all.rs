@@ -23,6 +23,8 @@ mod effective_configuration_projection;
 mod idempotency_and_idle_lifecycle;
 #[path = "all/idle_timeout_observability.rs"]
 mod idle_timeout_observability;
+#[path = "all/job_run_log_publication.rs"]
+mod job_run_log_publication;
 #[path = "all/refusal_wording.rs"]
 mod refusal_wording;
 #[path = "all/resource_tagging.rs"]

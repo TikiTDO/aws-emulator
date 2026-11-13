@@ -163,6 +163,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // The log artifacts the clock owes a job run that has just finished, published
+        // before this call reads the store it settles (`crate::state::job_run_logs`).
+        crate::state::job_run_logs::publish_due(&*self.engine, ctx).await;
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(StartJobRunErrorModeled::InternalServerException(
                 InternalServerException {
@@ -258,6 +262,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let job_run_id = record.mint_job_run_id();
         let arn = crate::state::job_run_arn(&record.application.arn, &job_run_id);
         let created_at = crate::state::now_timestamp(now);
+        // The overrides this submit carried: reported back on the run verbatim, and read
+        // once more below for the monitoring destination they may redirect.
+        let configuration_overrides = input.configuration_overrides;
         let job_run = JobRun {
             application_id: record.application.application_id.clone(),
             job_run_id: job_run_id.clone(),
@@ -272,7 +279,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             state_details: crate::state::SUBMITTED_STATE_DETAILS.to_string(),
             // The release the job runs on is the application's, never the request's.
             release_label: record.application.release_label.clone(),
-            configuration_overrides: input.configuration_overrides,
+            configuration_overrides: configuration_overrides.clone(),
             job_driver,
             tags: input.tags,
             // Resource utilisation is measured while a job executes. Nothing executes
@@ -315,8 +322,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 pending: crate::state::job_run_stages(now),
                 dashboard: None,
                 dashboard_grants: 0,
+                // Where this run's log artifacts are published, resolved HERE from the
+                // application's `monitoringConfiguration` and this request's
+                // `configurationOverrides`, so a later update of the application cannot
+                // move the artifacts of a run already in flight. See
+                // `crate::state::job_run_logs`.
+                log_destination: crate::state::job_run_logs::log_destination(
+                    record.application.monitoring_configuration.as_ref(),
+                    configuration_overrides.as_ref(),
+                ),
+                log_events: Vec::new(),
+                log_publication_due: false,
             },
         );
+        // The submit is the first line of the run's driver log: the state it carries from
+        // here, stamped at the instant it was accepted.
+        if let Some(stored) = record.job_runs.get_mut(&job_run_id) {
+            stored.record_lifecycle(now);
+        }
         record
             .job_run_tokens
             .insert(input.client_token, job_run_id.clone());
