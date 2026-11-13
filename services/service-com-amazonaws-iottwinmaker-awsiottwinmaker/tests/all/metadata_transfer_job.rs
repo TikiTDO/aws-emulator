@@ -10,10 +10,17 @@
 //! case: what a `CreateMetadataTransferJob` persists is exactly what
 //! `GetMetadataTransferJob` reports, whatever end types and optional members
 //! the create carried; the create answers the non-terminal `VALIDATING` and the
-//! CLOCK — not a caller — settles the job's outcome; a configuration that does
-//! not match the `type` beside it, or that names a workspace this service does
-//! not hold, is refused with the modelled error and persists nothing; and a
-//! taken id conflicts.
+//! CLOCK — not a caller — settles the job in the outcome its RUN earned; a
+//! configuration that does not match the `type` beside it, or that names a
+//! workspace this service does not hold, is refused with the modelled error and
+//! persists nothing; and a taken id conflicts.
+//!
+//! No object store is mounted beside this service here, so a job whose source
+//! is an Amazon S3 document has nothing to read: that is the FAILURE half of
+//! the rule, which this file asserts. The COMPLETED half — a document really
+//! read out of the object store and really written into a workspace — needs the
+//! owner of objects on the same engine and lives in
+//! `tests/all/metadata_transfer_run.rs`.
 
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
@@ -24,9 +31,8 @@ use service_com_amazonaws_iottwinmaker_awsiottwinmaker::ops::types::{
 };
 use service_com_amazonaws_iottwinmaker_awsiottwinmaker::state::{
     metadata_transfer_job_role, MetadataTransferJob, MAX_METADATA_TRANSFER_JOBS,
-    METADATA_TRANSFER_JOB_ERROR_CODE, METADATA_TRANSFER_JOB_ERROR_MESSAGE,
-    METADATA_TRANSFER_JOB_SETTLE_SPAN, METADATA_TRANSFER_JOB_STATE_ERROR,
-    METADATA_TRANSFER_JOB_STATE_VALIDATING,
+    METADATA_TRANSFER_JOB_ERROR_CODE, METADATA_TRANSFER_JOB_SETTLE_SPAN,
+    METADATA_TRANSFER_JOB_STATE_ERROR, METADATA_TRANSFER_JOB_STATE_VALIDATING,
 };
 
 use crate::harness::{metadata_transfer_job_arn, workspace_arn, Emulator, Resp, REGION};
@@ -314,8 +320,14 @@ async fn a_metadata_transfer_job_reads_back_exactly_what_was_created() {
 
 /// RULE: an accepted job is reported in the non-terminal `VALIDATING` state
 /// until the instant its outcome falls due, and the CLOCK — not a caller's poll
-/// — then settles it in the modelled failure state carrying the reason the
-/// transfer did not run; the settled job is stable across reads.
+/// — then settles it in the outcome its RUN earned; a run whose source could not
+/// be read settles in the modelled failure state carrying the reason, and the
+/// settled job is stable across reads.
+///
+/// Nothing holds the Amazon S3 document these rows name here (this harness
+/// mounts no object store), so the outcome the run earns is the failure — and
+/// the message names the source it could not read rather than stating a
+/// limitation of the transfer itself.
 #[tokio::test]
 async fn an_accepted_job_settles_in_the_outcome_the_clock_owes() {
     let emulator = emulator_with_workspaces().await;
@@ -360,19 +372,21 @@ async fn an_accepted_job_settles_in_the_outcome_the_clock_owes() {
         assert_eq!(
             reported_state(&settled),
             Some(METADATA_TRANSFER_JOB_STATE_ERROR),
-            "case {case:?}: the outcome has fallen due, and this emulator transfers no \
-             metadata, got {settled:?}"
+            "case {case:?}: the outcome has fallen due, and the run had no source document to \
+             read, got {settled:?}"
         );
+        let error = &settled.member("status")["error"];
         assert_eq!(
-            (
-                settled.member("status")["error"]["code"].as_str(),
-                settled.member("status")["error"]["message"].as_str(),
-            ),
-            (
-                Some(METADATA_TRANSFER_JOB_ERROR_CODE),
-                Some(METADATA_TRANSFER_JOB_ERROR_MESSAGE),
-            ),
-            "case {case:?}: a failed job must say why it failed, got {settled:?}"
+            error["code"].as_str(),
+            Some(METADATA_TRANSFER_JOB_ERROR_CODE),
+            "case {case:?}: a failed run carries the processing error, got {settled:?}"
+        );
+        // The message names the source the run could not read — the address
+        // from the request — rather than restating what the emulator does.
+        let message = error["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("metadata-bucket/in.json"),
+            "case {case:?}: the reason must name the source it could not read, got {settled:?}"
         );
         // The outcome fell due at the stored instant, not when a caller asked,
         // so two reads of a settled job report the same `updateDateTime` — and
@@ -393,10 +407,11 @@ async fn an_accepted_job_settles_in_the_outcome_the_clock_owes() {
             (Some(METADATA_TRANSFER_JOB_STATE_ERROR), update_date_time),
             "case {case:?}: a read must not move a settled job again, got {again:?}"
         );
-        // Still nothing ran, so there is still nothing to count.
+        // The run never got as far as walking an entry, so there is nothing to
+        // count.
         assert!(
             again.member("progress").is_null(),
-            "case {case:?}: a failed transfer counts nothing, got {again:?}"
+            "case {case:?}: a run that read no document counts nothing, got {again:?}"
         );
     }
 }

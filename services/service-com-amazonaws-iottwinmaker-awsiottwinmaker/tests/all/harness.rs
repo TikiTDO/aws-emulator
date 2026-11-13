@@ -83,6 +83,34 @@ impl Emulator {
         Self { router, engine }
     }
 
+    /// One emulator carrying BOTH this service and the emulator's own Amazon S3
+    /// over the SAME engine — exactly as the assembled router mounts them.
+    ///
+    /// A metadata transfer job's Amazon S3 end is an object of that store, so a
+    /// suite about what a transfer READS out of a document and WRITES back into
+    /// one needs the owner of objects mounted beside this service; the document
+    /// it reads is then an object a `PutObject` really stored. Every other suite
+    /// uses [`Emulator::new`], which mounts this service alone and leaves the
+    /// object store absent.
+    pub(crate) fn with_object_store() -> Self {
+        let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+        let mut router = MultiServiceRouter::new();
+        router.set_request_authentication(false);
+        router.register_service(
+            service_com_amazonaws_iottwinmaker_awsiottwinmaker::EmulatedService::new(engine.clone()),
+        );
+        router.register_service(service_com_amazonaws_s3_amazons3::EmulatedService::new(
+            engine.clone(),
+        ));
+        Self { router, engine }
+    }
+
+    /// The router every request goes through, for a suite that drives another
+    /// mounted service through its own SDK client over the in-process callback.
+    pub(crate) fn router(&self) -> &MultiServiceRouter {
+        &self.router
+    }
+
     /// Create an IAM role carrying `document` as its trust policy, and answer
     /// the ARN IAM minted for it.
     ///

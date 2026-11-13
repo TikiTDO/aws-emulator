@@ -661,44 +661,14 @@ fn require_property_types(
 ) -> Result<(), CreateEntityErrorModeled> {
     let properties: ::std::collections::BTreeMap<&String, &PropertyRequest> =
         properties.into_iter().flatten().collect();
-    for (property_name, property) in properties {
-        if property.definition.as_ref().is_some_and(|definition| {
-            workspace.component_property_definition_needs_data_type(
-                component_type_id,
-                property_name,
-                definition,
-            )
-        }) {
-            return Err(validation(format!(
-                "{member_path}.properties.{property_name}.definition.dataType is required"
-            )));
-        }
-        // Asked of the value the create would STORE, before anything is
-        // stored: a property with no declaration of its own is still judged
-        // against the definition it inherits.
-        if let Some(value) = property.value.as_ref() {
-            if let Some(violation) = workspace.component_property_value_violation(
-                component_type_id,
-                property_name,
-                property.definition.as_ref(),
-                value,
-            ) {
-                return Err(validation(violation));
-            }
-        }
-        // The `defaultValue` a declaration carries is a value of the property
-        // too — a read reports it as the property's value for as long as
-        // nothing has been written to the property — so it is held to the same
-        // rule the value above is
-        // (`crate::state::Workspace::component_property_default_violation`),
-        // against the `dataType` the property's definition resolves to.
-        if let Some(violation) = workspace.component_property_default_violation(
-            component_type_id,
-            property_name,
-            property.definition.as_ref(),
-        ) {
-            return Err(validation(violation));
-        }
+    match workspace.component_property_violation(
+        component_type_id,
+        member_path,
+        properties
+            .into_iter()
+            .map(|(property_name, property)| (property_name.as_str(), property)),
+    ) {
+        Some(violation) => Err(validation(violation)),
+        None => Ok(()),
     }
-    Ok(())
 }

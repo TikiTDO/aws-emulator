@@ -368,9 +368,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // `GetMetadataTransferJob` reports from, so one job reads the
                 // same whichever operation reports it.
                 status: job.status(),
-                // Absent for the reason the read leaves it absent: a progress
-                // count counts what a transfer moved, and no transfer ran.
-                progress: None,
+                // The counts the job's own run measured, read through the same
+                // accessor `GetMetadataTransferJob` reports from, so one job
+                // reads the same whichever operation reports it.
+                progress: job.progress(),
             });
         }
         // The token the next call resumes at: the first job this page left over.

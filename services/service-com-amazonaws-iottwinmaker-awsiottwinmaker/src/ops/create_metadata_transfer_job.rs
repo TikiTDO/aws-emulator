@@ -14,13 +14,15 @@
 //! [`crate::state::METADATA_TRANSFER_JOB_STATE_VALIDATING`] state, with the
 //! instant its outcome falls due stored beside it
 //! ([`crate::state::METADATA_TRANSFER_JOB_SETTLE_SPAN`]); a reader materialises
-//! that outcome rather than sleeping for it. The outcome itself is the modelled
-//! failure state: transferring metadata means reading an Amazon S3 object, an
-//! IoT SiteWise asset model or a workspace's metadata document and writing what
-//! it describes into the destination, and this emulator performs none of that
-//! work, so a job nothing ran ends in `ERROR` carrying the `PROCESSING_ERROR`
-//! that says so ([`crate::state::METADATA_TRANSFER_JOB_ERROR_CODE`]) instead of
-//! reporting a `COMPLETED` transfer that never happened.
+//! that outcome rather than sleeping for it. The outcome itself is what the
+//! job's RUN established, and this call is where that run happens
+//! ([`crate::state::perform_transfer`]): it is the one place with a request
+//! context to reach the emulator's own Amazon S3 through, so the source is read
+//! and the destination written here, and what the run established — the state,
+//! the counts and the report — is stored beside the job for the clock to make
+//! due. A run that read its source and wrote its destination earns
+//! `COMPLETED`; one that could not earns the modelled failure state carrying
+//! the reason ([`crate::state::METADATA_TRANSFER_JOB_ERROR_CODE`]).
 //!
 //! The refusals this handler owns:
 //!
@@ -33,9 +35,10 @@
 //!   jobs — a `ServiceQuotaExceededException`.
 //!
 //! Two deliberate gaps. An Amazon S3 `location` is stored WITHOUT checking that
-//! the object or prefix it names exists: it lives in the caller's bucket, which
-//! this emulator does not reach. Authorization is not emulated, so the modelled
-//! `AccessDeniedException` is never returned.
+//! the object or prefix it names exists: whether the store holds it is the
+//! RUN's business, and a source it holds nothing at is the job's own failure
+//! rather than a refusal of this request. Authorization is not emulated, so the
+//! modelled `AccessDeniedException` is never returned.
 //!
 //! ## Shape of an operation
 //!
@@ -206,30 +209,46 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 },
             )
         })?;
-        let mut state = state.lock();
-        // Nothing is created in a further Region once this store holds
-        // resources for as many as it may: the Region is the caller's own
-        // credential scope, so without a ceiling a caller could repeat a create
-        // under fresh Region names until the process ran out of memory.
-        if state.region_ceiling_reached(&region) {
-            return Err(
-                CreateMetadataTransferJobErrorModeled::ServiceQuotaExceededException(
-                    ServiceQuotaExceededException {
-                        message: Some(crate::state::region_ceiling_message()),
-                    },
-                )
-                .into(),
-            );
-        }
-        let state = state.region_mut(&region);
+        // The whole store-bound part of this call, in a scope of its own: every
+        // refusal is decided and the job is stored under ONE hold of the store,
+        // and the hold is released before the transfer below runs — which it has
+        // to be, since the run takes the store itself to read or write a
+        // workspace.
+        let (metadata_transfer_job_id, arn, now, status) = {
+            let mut state_guard = state.lock();
+            // Nothing is created in a further Region once this store holds
+            // resources for as many as it may: the Region is the caller's own
+            // credential scope, so without a ceiling a caller could repeat a
+            // create under fresh Region names until the process ran out of
+            // memory.
+            if state_guard.region_ceiling_reached(&region) {
+                return Err(
+                    CreateMetadataTransferJobErrorModeled::ServiceQuotaExceededException(
+                        ServiceQuotaExceededException {
+                            message: Some(crate::state::region_ceiling_message()),
+                        },
+                    )
+                    .into(),
+                );
+            }
+            let state = state_guard.region_mut(&region);
 
-        // A configuration that does not match the `type` beside it describes no
-        // transfer the service could run, so it is refused rather than stored:
-        // `SourceConfiguration` and `DestinationConfiguration` each carry one
-        // optional member per end type, and the model cannot say which one a
-        // given `type` requires.
-        for (index, source) in input.sources.iter().enumerate() {
-            if let Some(message) = source_configuration_error(index, source) {
+            // A configuration that does not match the `type` beside it describes
+            // no transfer the service could run, so it is refused rather than
+            // stored: `SourceConfiguration` and `DestinationConfiguration` each
+            // carry one optional member per end type, and the model cannot say
+            // which one a given `type` requires.
+            for (index, source) in input.sources.iter().enumerate() {
+                if let Some(message) = source_configuration_error(index, source) {
+                    return Err(CreateMetadataTransferJobErrorModeled::ValidationException(
+                        ValidationException {
+                            message: Some(message),
+                        },
+                    )
+                    .into());
+                }
+            }
+            if let Some(message) = destination_configuration_error(&input.destination) {
                 return Err(CreateMetadataTransferJobErrorModeled::ValidationException(
                     ValidationException {
                         message: Some(message),
@@ -237,92 +256,125 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
                 .into());
             }
-        }
-        if let Some(message) = destination_configuration_error(&input.destination) {
-            return Err(CreateMetadataTransferJobErrorModeled::ValidationException(
-                ValidationException {
-                    message: Some(message),
-                },
-            )
-            .into());
-        }
 
-        // Every IoT TwinMaker end of the transfer names a workspace by ARN, and
-        // a workspace this service does not hold is one no transfer could read
-        // or write — the `ResourceNotFoundException` this operation models
-        // (unlike `CreateScene`, which models none and refuses with a
-        // `ValidationException`).
-        for workspace in referenced_workspaces(&input) {
-            if state.resolve_workspace_id(workspace).is_none() {
+            // Every IoT TwinMaker end of the transfer names a workspace by ARN,
+            // and a workspace this service does not hold is one no transfer
+            // could read or write — the `ResourceNotFoundException` this
+            // operation models (unlike `CreateScene`, which models none and
+            // refuses with a `ValidationException`).
+            for workspace in referenced_workspaces(&input) {
+                if state.resolve_workspace_id(workspace).is_none() {
+                    return Err(
+                        CreateMetadataTransferJobErrorModeled::ResourceNotFoundException(
+                            ResourceNotFoundException {
+                                message: Some(crate::state::workspace_not_found_message(
+                                    workspace,
+                                )),
+                            },
+                        )
+                        .into(),
+                    );
+                }
+            }
+
+            // A `metadataTransferJobId` the caller did not supply is minted
+            // here, as the uuid `CreateEntity` mints an `entityId` as: the
+            // member is optional on the request and required on the response,
+            // so the service is what names such a job.
+            let metadata_transfer_job_id = input
+                .metadata_transfer_job_id
+                .clone()
+                .unwrap_or_else(|| ::uuid::Uuid::new_v4().to_string());
+
+            if state
+                .metadata_transfer_jobs
+                .contains_key(&metadata_transfer_job_id)
+            {
+                return Err(CreateMetadataTransferJobErrorModeled::ConflictException(
+                    ConflictException {
+                        message: Some(crate::state::already_exists_message(
+                            "MetadataTransferJob",
+                            &metadata_transfer_job_id,
+                            None,
+                        )),
+                    },
+                )
+                .into());
+            }
+
+            // The emulator's declared ceiling on the store, checked AFTER the
+            // identity conflict above so re-creating a taken id in a full
+            // account is still the ConflictException the id deserves.
+            if state.metadata_transfer_jobs.len() >= crate::state::MAX_METADATA_TRANSFER_JOBS {
                 return Err(
-                    CreateMetadataTransferJobErrorModeled::ResourceNotFoundException(
-                        ResourceNotFoundException {
-                            message: Some(crate::state::workspace_not_found_message(workspace)),
+                    CreateMetadataTransferJobErrorModeled::ServiceQuotaExceededException(
+                        ServiceQuotaExceededException {
+                            message: Some(format!(
+                                "this account has reached the limit of {} metadata transfer jobs",
+                                crate::state::MAX_METADATA_TRANSFER_JOBS
+                            )),
                         },
                     )
                     .into(),
                 );
             }
-        }
 
-        // A `metadataTransferJobId` the caller did not supply is minted here,
-        // as the uuid `CreateEntity` mints an `entityId` as: the member is
-        // optional on the request and required on the response, so the service
-        // is what names such a job.
-        let metadata_transfer_job_id = input
-            .metadata_transfer_job_id
-            .clone()
-            .unwrap_or_else(|| ::uuid::Uuid::new_v4().to_string());
-
-        if state
-            .metadata_transfer_jobs
-            .contains_key(&metadata_transfer_job_id)
-        {
-            return Err(CreateMetadataTransferJobErrorModeled::ConflictException(
-                ConflictException {
-                    message: Some(crate::state::already_exists_message(
-                        "MetadataTransferJob",
-                        &metadata_transfer_job_id,
-                        None,
-                    )),
-                },
-            )
-            .into());
-        }
-
-        // The emulator's declared ceiling on the store, checked AFTER the
-        // identity conflict above so re-creating a taken id in a full account
-        // is still the ConflictException the id deserves.
-        if state.metadata_transfer_jobs.len() >= crate::state::MAX_METADATA_TRANSFER_JOBS {
-            return Err(
-                CreateMetadataTransferJobErrorModeled::ServiceQuotaExceededException(
-                    ServiceQuotaExceededException {
-                        message: Some(format!(
-                            "this account has reached the limit of {} metadata transfer jobs",
-                            crate::state::MAX_METADATA_TRANSFER_JOBS
-                        )),
-                    },
-                )
-                .into(),
+            let arn = crate::state::metadata_transfer_job_arn(&region, &metadata_transfer_job_id);
+            let now = ::std::time::SystemTime::now();
+            let job = crate::state::MetadataTransferJob::accepted(
+                metadata_transfer_job_id.clone(),
+                arn.clone(),
+                input.description.clone(),
+                input.sources.clone(),
+                input.destination.clone(),
+                now,
             );
+            // Reported from the record that was stored, so this answer and the
+            // read that follows it report one job's status from one place.
+            let status = job.status();
+            state
+                .metadata_transfer_jobs
+                .insert(metadata_transfer_job_id.clone(), job);
+            (metadata_transfer_job_id, arn, now, status)
+        };
+
+        // The transfer itself, performed HERE because this is the one place with
+        // a request context to reach the object store through. What it
+        // establishes is the OUTCOME the clock owes the job, stored beside it:
+        // the instant that outcome falls due was fixed when the job was
+        // accepted, so nothing a caller can observe moves early.
+        let outcome = crate::state::perform_transfer(
+            &*self.engine,
+            ctx,
+            &region,
+            &metadata_transfer_job_id,
+            &input.sources,
+            &input.destination,
+        )
+        .await;
+        let settles_to = outcome.state.clone();
+        if let Some(state) = crate::state::service_state(&*self.engine) {
+            if let Some(job) = state
+                .lock()
+                .region_mut(&region)
+                .metadata_transfer_jobs
+                .get_mut(&metadata_transfer_job_id)
+            {
+                job.record_transfer(outcome);
+            }
         }
 
-        let arn = crate::state::metadata_transfer_job_arn(&region, &metadata_transfer_job_id);
-        let now = ::std::time::SystemTime::now();
-        let job = crate::state::MetadataTransferJob::accepted(
-            metadata_transfer_job_id.clone(),
-            arn.clone(),
-            input.description,
-            input.sources,
-            input.destination,
-            now,
+        // The outcome is recorded too, so the record of this call says what the
+        // run did and not only that a job was accepted. The job's own id and
+        // the state it is owed are the service's values, never the caller's
+        // text.
+        ::tracing::info!(
+            operation = "CreateMetadataTransferJob",
+            outcome = "accepted",
+            metadata_transfer_job_id = %metadata_transfer_job_id,
+            settles_to = %settles_to,
+            "served a request"
         );
-        // Reported from the record that was stored, so this answer and the read
-        // that follows it report one job's status from one place.
-        let status = job.status();
-        state
-            .metadata_transfer_jobs
-            .insert(metadata_transfer_job_id.clone(), job);
 
         Ok(CreateMetadataTransferJobOutput {
             metadata_transfer_job_id,

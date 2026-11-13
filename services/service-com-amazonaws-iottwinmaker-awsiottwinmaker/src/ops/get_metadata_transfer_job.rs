@@ -12,11 +12,11 @@
 //! `metadataTransferJobRole` is reported as the role the service runs the
 //! transfer under ([`crate::state::metadata_transfer_job_role`]): the create
 //! accepts no role, so this member is never the caller's input.
-//! `progress` and `reportUrl` are left ABSENT: both describe a transfer that
-//! ran — how many entries it moved, and where it wrote its report — and this
-//! emulator transfers no metadata, so there is no count and no report to name
-//! (see [`crate::state::METADATA_TRANSFER_JOB_ERROR_CODE`], the error such a
-//! job carries once its outcome falls due).
+//! `progress` and `reportUrl` are what the job's RUN measured — how many
+//! entries it moved and where it wrote its report — reported once the job has
+//! settled in the outcome that run established
+//! ([`crate::state::MetadataTransferJob::progress`]), and absent while the job
+//! is still in flight or where the run counted nothing and wrote no report.
 //!
 //! The refusals this handler owns: a job this account does not hold — the
 //! `ResourceNotFoundException` this operation models. Authorization is not
@@ -221,16 +221,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             sources: job.sources.clone(),
             destination: job.destination.clone(),
             metadata_transfer_job_role: job.metadata_transfer_job_role.clone(),
-            // Absent: nothing produced a report, because nothing transferred.
-            report_url: None,
+            // Where the run wrote its report, once that outcome has fallen due.
+            report_url: job.report_url(),
             creation_date_time: crate::state::timestamp(job.creation_date_time),
             update_date_time: crate::state::timestamp(job.update_date_time),
             // Carries the stored state (settled above) and, once the job has
             // failed, why.
             status: job.status(),
-            // Absent for the same reason `reportUrl` is: a progress count
-            // counts what a transfer moved, and no transfer ran.
-            progress: None,
+            // The counts the run measured, on the same rule `reportUrl` is
+            // reported on: both are part of the outcome the clock made due.
+            progress: job.progress(),
         })
     }
 }

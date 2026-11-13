@@ -7,8 +7,8 @@
 //! settles it in `CANCELLED` once
 //! [`crate::state::METADATA_TRANSFER_JOB_CANCEL_SPAN`] has elapsed, the same
 //! way the create's outcome falls due. A job that has already finished
-//! (`COMPLETED`, `CANCELLED`, or the `ERROR` an accepted job settles in because
-//! this emulator transfers no metadata) has nothing left to cancel, so the call
+//! (`COMPLETED`, `CANCELLED`, or the `ERROR` a job whose run could not be
+//! performed settles in) has nothing left to cancel, so the call
 //! is refused with the modelled `ConflictException` (HTTP 409); a job this
 //! account does not hold is the modelled `ResourceNotFoundException` (HTTP 404).
 //!
@@ -250,11 +250,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             arn: job.arn.clone(),
             update_date_time: crate::state::timestamp(job.update_date_time),
             status: job.status(),
-            // Absent, for the reason `GetMetadataTransferJob` leaves it absent:
-            // a progress count counts what a transfer moved, and this emulator
-            // transfers no metadata — least of all a cancellation, which moves
-            // nothing by definition.
-            progress: None,
+            // A cancelled job reports no progress: the counts belong to the
+            // outcome a RUN established, and a caller asking the transfer to
+            // stop is not that outcome
+            // ([`crate::state::MetadataTransferJob::progress`]).
+            progress: job.progress(),
         })
     }
 }

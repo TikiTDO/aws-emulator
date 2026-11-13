@@ -143,6 +143,9 @@ mod metadata_transfer_job_listing;
 #[path = "all/metadata_transfer_job_read.rs"]
 mod metadata_transfer_job_read;
 
+#[path = "all/metadata_transfer_run.rs"]
+mod metadata_transfer_run;
+
 #[path = "all/minted_page_position.rs"]
 mod minted_page_position;
 

@@ -30,8 +30,16 @@ regex = "1.12"
 # `iam_trust_policy`: the ONE reading of an IAM trust policy, shared with every other
 # service that resolves a caller-supplied role before it writes; `rfc3339`: the ONE
 # reading of an RFC 3339 timestamp's UTC offset, for the `Time` strings the time-series
-# data plane carries.
+# data plane carries; `s3_object_read`/`s3_client`: the ONE read and the ONE write of an
+# Amazon S3 object, which is how a metadata transfer job reads the document its source
+# names and writes the one its destination asks for.
 service-common = { path = "../common" }
+# The AWS SDK for Amazon S3, driven over the in-process callback
+# (`OperationContext::callback`): a metadata transfer job's Amazon S3 end is an object of
+# the emulator's own object store, so `src/state/metadata_transfer` fetches and writes it
+# there rather than deciding the transfer's outcome without it. Only the generated client
+# is needed — the emulator supplies the transport.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 # The IAM store every caller-supplied role is resolved against (a workspace's `role`, a
 # sync job's `syncRole`), to check the role's trust policy grants
 # iottwinmaker.amazonaws.com sts:AssumeRole before the resource is stored.
@@ -43,6 +51,15 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+# `tokio::time::sleep`, for the poll loop the transfer-run suite waits a job's
+# clock-owed outcome out with.
+tokio = { workspace = true, features = ["time"] }
+# Amazon S3, mounted beside this service in the transfer-run harness: that a metadata
+# transfer job really reads the document its source names and really writes the one its
+# destination asks for can only be driven end to end with the owner of objects on the
+# same engine.
+# DEV-ONLY for the tests; `src/` reaches the object store through the SDK client alone.
+service-com-amazonaws-s3-amazons3 = { workspace = true }
 
 [lints]
 workspace = true
