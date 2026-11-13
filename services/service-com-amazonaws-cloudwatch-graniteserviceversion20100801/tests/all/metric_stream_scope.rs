@@ -584,7 +584,12 @@ async fn a_value_outside_a_modelled_enum_is_refused_with_this_services_validatio
     // RecentlyActive,StateValue")`). The member path the refusal names is the walk's own
     // lowerCamel spelling of the member. `ListMetricsInput$RecentlyActive` is the one such
     // member refused as a parameter VALUE instead, below.
-    let cases: Vec<(&str, &str, Value, &str, &str)> = vec![
+    //
+    // The last column is whether the clause states the value the request sent, which is a
+    // property of the enumerated TYPE rather than of the operation or the member — the suite
+    // that owns that rule, and the whole sentence each row states, is
+    // `crate::enum_refusal_value_half`.
+    let cases: Vec<(&str, &str, Value, &str, &str, bool)> = vec![
         (
             "a metric stream's output format",
             "PutMetricStream",
@@ -595,6 +600,7 @@ async fn a_value_outside_a_modelled_enum_is_refused_with_this_services_validatio
             ),
             "outputFormat",
             "not-a-real-format",
+            true,
         ),
         (
             "the order a metric read scans in",
@@ -614,6 +620,7 @@ async fn a_value_outside_a_modelled_enum_is_refused_with_this_services_validatio
             }),
             "scanBy",
             "ValueDescending",
+            false,
         ),
         (
             "the order an alarm history scans in",
@@ -621,6 +628,7 @@ async fn a_value_outside_a_modelled_enum_is_refused_with_this_services_validatio
             json!({"ScanBy": "Alphabetical"}),
             "scanBy",
             "Alphabetical",
+            false,
         ),
         (
             "the kind of alarm history asked for",
@@ -628,6 +636,7 @@ async fn a_value_outside_a_modelled_enum_is_refused_with_this_services_validatio
             json!({"HistoryItemType": "Nonsense"}),
             "historyItemType",
             "Nonsense",
+            true,
         ),
         (
             "the state an alarm is forced into",
@@ -639,10 +648,11 @@ async fn a_value_outside_a_modelled_enum_is_refused_with_this_services_validatio
             }),
             "stateValue",
             "PENDING",
+            true,
         ),
     ];
 
-    for (case, operation, request, path, value) in cases {
+    for (case, operation, request, path, value, states_the_value) in cases {
         let (status, body) = call(&router, operation, &request).await;
         assert_eq!(
             (status, error_code(&body).as_str()),
@@ -657,13 +667,23 @@ async fn a_value_outside_a_modelled_enum_is_refused_with_this_services_validatio
                 "case {case:?}: expected the refusal to state {expected:?}, got {message:?}"
             );
         }
-        // The refusal quotes the value that was submitted: a client can only tell WHICH of the
+        // A type whose refusal states the submitted value lets a client tell WHICH of the
         // values it sent was rejected — a mis-cased declared value from one the type never
-        // offered — from the message.
+        // offered; a type stated without one names the member alone, whatever was sent.
+        let expected_half = if states_the_value {
+            format!("Value '{value}' at '{path}'")
+        } else {
+            format!("Value at '{path}'")
+        };
         assert!(
-            message.contains(&format!("Value '{value}' at '{path}'")),
-            "case {case:?}: expected the refusal to quote the submitted value {value:?} at \
-             {path:?}, got {message:?}"
+            message.contains(&expected_half),
+            "case {case:?}: expected the refusal to state {expected_half:?}, got {message:?}"
+        );
+        assert_eq!(
+            message.contains(value),
+            states_the_value,
+            "case {case:?}: expected the submitted value {value:?} to be stated: \
+             {states_the_value}, got {message:?}"
         );
     }
 

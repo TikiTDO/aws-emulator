@@ -485,13 +485,12 @@ fn unanchored_pattern_refusal(refusal: &Refusal) -> Option<Refused> {
 /// Only the code and two RENDERINGS are this service's; the envelope, the clauses and the
 /// member paths are the shared ones, so this and the walk behind it cannot drift:
 ///
-/// * the clause quotes the SUBMITTED value, which is what tells a client which of the values
-///   it sent was rejected — a near miss of a declared value (a mis-cased one, say) cannot be
-///   told from an unsupported one without it;
 /// * the value set is stated in the order the SET ITSELF is walked
 ///   ([`service_common::validation_message::in_hashed_enum_order`]), which is the order this
 ///   service is recorded listing an enumerated type's values in — neither the model's
-///   declaration order nor a sorted one.
+///   declaration order nor a sorted one;
+/// * the clause quotes the SUBMITTED value for every enumerated type but the ones this service
+///   is recorded naming the member alone for ([`VALUE_WITHHELD_ENUM_TYPES`]).
 fn scalar_enum_refusal(violations: &[aws_smithy_schema_server::Violation]) -> Option<Refused> {
     if !violations.iter().any(is_scalar_enum_violation) {
         return None;
@@ -502,11 +501,51 @@ fn scalar_enum_refusal(violations: &[aws_smithy_schema_server::Violation]) -> Op
             .map(service_common::validation_message::in_hashed_enum_order)
             .collect(),
     );
-    // The whole envelope is the shared renderer's; only the CODE is this service's.
-    let message = service_common::validation_message::aws_validation_refusal(&stated)?.message;
+    // The whole envelope is the shared renderer's; only the CODE and which clauses carry a
+    // value half are this service's.
+    let message =
+        service_common::validation_message::aws_validation_refusal_withholding_violations(
+            &stated,
+            withholds_the_submitted_value,
+        )?
+        .message;
     Some(Refused {
         code: VALIDATION.shape_name.to_string(),
         message,
+    })
+}
+
+/// The enumerated TYPES whose refusal states NO submitted value, each row holding the values
+/// its type declares.
+///
+/// WHICH HALVES a clause carries — the member path alone (`Value at '<path>'`) or the member
+/// path and the value the request sent (`Value '<value>' at '<path>'`) — is a property of the
+/// enumerated TYPE, exactly as the ORDER that type's values are listed in is
+/// ([`service_common::validation_message::in_hashed_enum_order`]): it is read off what this
+/// service is recorded answering for the type and derives from nothing the model carries, so
+/// one type is stated alike wherever it is carried — whichever operation was called, whichever
+/// member the value arrived on and at whatever depth. One type so far: the SCAN DIRECTION a
+/// read is ordered by, whose refusal names the member alone. A type with no row keeps the value
+/// half the framework's clause carries, which is what tells a client which of the values it
+/// sent was rejected — a near miss of a declared value (a mis-cased one, say) cannot be told
+/// from an unsupported one without it.
+const VALUE_WITHHELD_ENUM_TYPES: &[&[&str]] = &[crate::ops::types::shared_types::SCAN_BY_VALUES];
+
+/// Whether the clause for `violation` states no submitted value: a value outside one of the
+/// enumerated types stated without one ([`VALUE_WITHHELD_ENUM_TYPES`]), and nothing else.
+///
+/// The type is recognised by the values the violation carries, matched as a SET, so a row holds
+/// however the schema presented those values and wherever the value sat in the request — the
+/// member path is not consulted at all.
+fn withholds_the_submitted_value(violation: &aws_smithy_schema_server::Violation) -> bool {
+    let aws_smithy_schema_server::ViolationKind::EnumValue(ref carried) = violation.kind else {
+        return false;
+    };
+    let admissible: std::collections::BTreeSet<&str> =
+        carried.iter().map(String::as_str).collect();
+    VALUE_WITHHELD_ENUM_TYPES.iter().any(|withheld| {
+        withheld.len() == admissible.len()
+            && withheld.iter().all(|value| admissible.contains(value))
     })
 }
 

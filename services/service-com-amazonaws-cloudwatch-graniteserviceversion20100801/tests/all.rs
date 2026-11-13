@@ -105,6 +105,8 @@ mod disable_alarm_actions;
 mod ec2_alarm_actions;
 #[path = "all/ec2_instance_action_execution.rs"]
 mod ec2_instance_action_execution;
+#[path = "all/enum_refusal_value_half.rs"]
+mod enum_refusal_value_half;
 #[path = "all/evaluation_budget_progress.rs"]
 mod evaluation_budget_progress;
 #[path = "all/forced_state_actions.rs"]
