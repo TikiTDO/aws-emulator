@@ -26,6 +26,7 @@ pub struct GetRoleTemplateVersionOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#RoleTemplateVersion")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RoleTemplateVersion {
     pub template_arn: Option<String>,
     pub template_name: Option<String>,
@@ -48,12 +49,15 @@ pub struct RoleTemplateVersion {
     pub role_tags_template: Option<Vec<TagTemplate>>,
     pub max_session_duration: Option<i32>,
     pub version_enabled: bool,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_timestamp: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub update_timestamp: Option<::aws_smithy_types::DateTime>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#InlinePolicy")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InlinePolicy {
     pub policy_name: String,
     pub policy_document: String,
@@ -61,6 +65,7 @@ pub struct InlinePolicy {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#ParameterDefinition")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParameterDefinition {
     pub name: String,
     pub r#type: String,
@@ -73,6 +78,7 @@ pub struct ParameterDefinition {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#TagTemplate")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TagTemplate {
     pub key: String,
     pub value: String,

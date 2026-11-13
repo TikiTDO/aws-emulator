@@ -30,6 +30,7 @@ pub struct DescribeFastLaunchImagesOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#DescribeFastLaunchImagesSuccessItem")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DescribeFastLaunchImagesSuccessItem {
     pub image_id: Option<String>,
     pub resource_type: Option<String>,
@@ -39,6 +40,7 @@ pub struct DescribeFastLaunchImagesSuccessItem {
     pub owner_id: Option<String>,
     pub state: Option<String>,
     pub state_transition_reason: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub state_transition_time: Option<::aws_smithy_types::DateTime>,
 }
 

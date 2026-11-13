@@ -765,6 +765,7 @@ pub const INVALID_VPC_BPA_EXCLUSION_ID_NOT_FOUND: &str =
 /// for. Which resource an exclusion covers is what makes a second exclusion for the same
 /// VPC or subnet a conflict, and what a delete has to know to release it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum ExclusionTarget {
     /// "A VPC ID" (`CreateVpcBlockPublicAccessExclusionRequest$VpcId`).
     Vpc(String),
@@ -806,6 +807,8 @@ pub type ExclusionTransition = ClockTransition<&'static str>;
 /// answer with that one shape, so the one stored view is what all of them report and they
 /// cannot describe one exclusion differently.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct VpcBlockPublicAccessExclusionRecord {
     /// The exclusion as the model shapes it, carrying the state reached so far.
     pub view: VpcBlockPublicAccessExclusion,
@@ -1103,6 +1106,7 @@ pub const MAX_EIPS_PER_PUBLIC_NAT_GATEWAY: usize = 2;
 /// address itself for one that associates none (see
 /// [`ComAmazonawsEc2Amazonec2State::nat_gateway_address_transitions`]).
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NatGatewayAddressTransition {
     /// The `NatGatewayId` of the gateway whose address this move belongs to.
     pub nat_gateway_id: String,
@@ -1110,6 +1114,7 @@ pub struct NatGatewayAddressTransition {
     pub to: &'static str,
     /// The instant the move falls due, on the same monotonic clock and the same
     /// [`TRANSITION_DELAY`] as a `pending` VPC's.
+    #[serde(with = "::service_common::persist::instant")]
     pub due_at: Instant,
 }
 
@@ -1356,6 +1361,8 @@ pub const CAPACITY_RESERVATION_FLEET_ACTIVATION_DELAY: Duration = Duration::from
 /// ([`CapacityReservationFleetRecord::view`]), not a second copy of it, taken as the submit
 /// answers the Fleet.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct CapacityReservationFleetRecord {
     /// The Fleet as the model shapes it, carrying the state reached so far and the Capacity
     /// Reservations it reserves its capacity through.
@@ -2023,6 +2030,7 @@ pub fn customer_gateway_limit_exceeded<E>() -> Scaffolded<E> {
 /// [`VPN_STATE_DELETING`] and [`VPN_STATE_DELETED`] are the words a gateway's state is
 /// spelled with.
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CustomerGatewayRecord {
     /// The gateway as the model shapes it — what every reporting operation answers with.
     pub view: CustomerGateway,
@@ -2361,6 +2369,7 @@ pub fn canonical_vpn_static_route_cidr(value: &str) -> Result<String, CidrProble
 /// INSTANT of a route's `pending` -> `available` move, which `VpnStaticRoute` carries no
 /// member for, is held beside it, keyed by the same destination CIDR block.
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpnConnectionRecord {
     /// The connection as the model shapes it, carrying the routes reported so far.
     pub view: VpnConnection,

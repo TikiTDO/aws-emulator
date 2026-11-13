@@ -31,12 +31,15 @@ pub struct ListServiceSpecificCredentialsOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#ServiceSpecificCredentialMetadata")]
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ServiceSpecificCredentialMetadata {
     pub user_name: String,
     pub status: String,
     pub service_user_name: Option<String>,
     pub service_credential_alias: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub create_date: ::aws_smithy_types::DateTime,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub expiration_date: Option<::aws_smithy_types::DateTime>,
     pub service_specific_credential_id: String,
     pub service_name: String,

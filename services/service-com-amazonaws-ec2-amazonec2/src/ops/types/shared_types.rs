@@ -13,6 +13,7 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-ec2-amazonec2.json");
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TagSpecification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TagSpecification {
     pub resource_type: Option<String>,
     pub tags: Option<Vec<Tag>>,
@@ -20,6 +21,7 @@ pub struct TagSpecification {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Tag")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Tag {
     pub key: Option<String>,
     pub value: Option<String>,
@@ -27,11 +29,14 @@ pub struct Tag {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AddressTransfer")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AddressTransfer {
     pub public_ip: Option<String>,
     pub allocation_id: Option<String>,
     pub transfer_account_id: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub transfer_offer_expiration_timestamp: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub transfer_offer_accepted_timestamp: Option<::aws_smithy_types::DateTime>,
     pub address_transfer_status: Option<String>,
 }
@@ -45,6 +50,7 @@ pub struct TargetConfigurationRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayClientVpnAttachment")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayClientVpnAttachment {
     pub transit_gateway_attachment_id: Option<String>,
     pub transit_gateway_id: Option<String>,
@@ -74,6 +80,7 @@ pub struct SubnetAssociation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayPeeringAttachment")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayPeeringAttachment {
     pub transit_gateway_attachment_id: Option<String>,
     pub accepter_transit_gateway_attachment_id: Option<String>,
@@ -82,12 +89,14 @@ pub struct TransitGatewayPeeringAttachment {
     pub options: Option<TransitGatewayPeeringAttachmentOptions>,
     pub status: Option<PeeringAttachmentStatus>,
     pub state: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub creation_time: Option<::aws_smithy_types::DateTime>,
     pub tags: Option<Vec<Tag>>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PeeringTgwInfo")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PeeringTgwInfo {
     pub transit_gateway_id: Option<String>,
     pub core_network_id: Option<String>,
@@ -97,12 +106,14 @@ pub struct PeeringTgwInfo {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayPeeringAttachmentOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayPeeringAttachmentOptions {
     pub dynamic_routing: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PeeringAttachmentStatus")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PeeringAttachmentStatus {
     pub code: Option<String>,
     pub message: Option<String>,
@@ -110,6 +121,7 @@ pub struct PeeringAttachmentStatus {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayVpcAttachment")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayVpcAttachment {
     pub transit_gateway_attachment_id: Option<String>,
     pub transit_gateway_id: Option<String>,
@@ -117,6 +129,7 @@ pub struct TransitGatewayVpcAttachment {
     pub vpc_owner_id: Option<String>,
     pub state: Option<String>,
     pub subnet_ids: Option<Vec<String>>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub creation_time: Option<::aws_smithy_types::DateTime>,
     pub options: Option<TransitGatewayVpcAttachmentOptions>,
     pub tags: Option<Vec<Tag>>,
@@ -124,6 +137,7 @@ pub struct TransitGatewayVpcAttachment {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayVpcAttachmentOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayVpcAttachmentOptions {
     pub dns_support: Option<String>,
     pub security_group_referencing_support: Option<String>,
@@ -147,8 +161,10 @@ pub struct UnsuccessfulItemError {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpcPeeringConnection")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcPeeringConnection {
     pub accepter_vpc_info: Option<VpcPeeringConnectionVpcInfo>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub expiration_time: Option<::aws_smithy_types::DateTime>,
     pub requester_vpc_info: Option<VpcPeeringConnectionVpcInfo>,
     pub status: Option<VpcPeeringConnectionStateReason>,
@@ -158,6 +174,7 @@ pub struct VpcPeeringConnection {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpcPeeringConnectionVpcInfo")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcPeeringConnectionVpcInfo {
     pub cidr_block: Option<String>,
     pub ipv6_cidr_block_set: Option<Vec<Ipv6CidrBlock>>,
@@ -170,18 +187,21 @@ pub struct VpcPeeringConnectionVpcInfo {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Ipv6CidrBlock")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ipv6CidrBlock {
     pub ipv6_cidr_block: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CidrBlock")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CidrBlock {
     pub cidr_block: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpcPeeringConnectionOptionsDescription")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcPeeringConnectionOptionsDescription {
     pub allow_dns_resolution_from_remote_vpc: Option<bool>,
     pub allow_egress_from_local_classic_link_to_remote_vpc: Option<bool>,
@@ -190,6 +210,7 @@ pub struct VpcPeeringConnectionOptionsDescription {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpcPeeringConnectionStateReason")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcPeeringConnectionStateReason {
     pub code: Option<String>,
     pub message: Option<String>,
@@ -197,6 +218,7 @@ pub struct VpcPeeringConnectionStateReason {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ByoipCidr")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ByoipCidr {
     pub cidr: Option<String>,
     pub description: Option<String>,
@@ -211,6 +233,7 @@ pub struct ByoipCidr {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AsnAssociation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AsnAssociation {
     pub asn: Option<String>,
     pub cidr: Option<String>,
@@ -233,12 +256,14 @@ pub struct IpamPoolAllocation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Ipv4PrefixSpecification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ipv4PrefixSpecification {
     pub ipv4_prefix: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NatGatewayAddress")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NatGatewayAddress {
     pub allocation_id: Option<String>,
     pub network_interface_id: Option<String>,
@@ -278,6 +303,7 @@ pub struct UnsuccessfulAssociationResponseObject {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AssociationStatus")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AssociationStatus {
     pub code: Option<String>,
     pub message: Option<String>,
@@ -285,6 +311,7 @@ pub struct AssociationStatus {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IamInstanceProfileSpecification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IamInstanceProfileSpecification {
     pub arn: Option<String>,
     pub name: Option<String>,
@@ -292,16 +319,19 @@ pub struct IamInstanceProfileSpecification {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IamInstanceProfileAssociation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IamInstanceProfileAssociation {
     pub association_id: Option<String>,
     pub instance_id: Option<String>,
     pub iam_instance_profile: Option<IamInstanceProfile>,
     pub state: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub timestamp: Option<::aws_smithy_types::DateTime>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IamInstanceProfile")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IamInstanceProfile {
     pub arn: Option<String>,
     pub id: Option<String>,
@@ -309,6 +339,7 @@ pub struct IamInstanceProfile {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InstanceEventWindow")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceEventWindow {
     pub instance_event_window_id: Option<String>,
     pub time_ranges: Option<Vec<InstanceEventWindowTimeRange>>,
@@ -321,6 +352,7 @@ pub struct InstanceEventWindow {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InstanceEventWindowTimeRange")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceEventWindowTimeRange {
     pub start_week_day: Option<String>,
     pub start_hour: Option<i32>,
@@ -330,6 +362,7 @@ pub struct InstanceEventWindowTimeRange {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InstanceEventWindowAssociationTarget")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceEventWindowAssociationTarget {
     pub instance_ids: Option<Vec<String>>,
     pub tags: Option<Vec<Tag>>,
@@ -338,6 +371,7 @@ pub struct InstanceEventWindowAssociationTarget {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamResourceDiscoveryAssociation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamResourceDiscoveryAssociation {
     pub owner_id: Option<String>,
     pub ipam_resource_discovery_association_id: Option<String>,
@@ -362,6 +396,7 @@ pub struct RouteServerAssociation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#RouteTableAssociationState")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RouteTableAssociationState {
     pub state: Option<String>,
     pub status_message: Option<String>,
@@ -369,6 +404,7 @@ pub struct RouteTableAssociationState {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SubnetIpv6CidrBlockAssociation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SubnetIpv6CidrBlockAssociation {
     pub association_id: Option<String>,
     pub ipv6_cidr_block: Option<String>,
@@ -379,6 +415,7 @@ pub struct SubnetIpv6CidrBlockAssociation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SubnetCidrBlockState")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SubnetCidrBlockState {
     pub state: Option<String>,
     pub status_message: Option<String>,
@@ -386,6 +423,7 @@ pub struct SubnetCidrBlockState {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayPolicyTableAssociation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayPolicyTableAssociation {
     pub transit_gateway_policy_table_id: Option<String>,
     pub transit_gateway_attachment_id: Option<String>,
@@ -418,6 +456,7 @@ pub struct TrunkInterfaceAssociation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpcIpv6CidrBlockAssociation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcIpv6CidrBlockAssociation {
     pub association_id: Option<String>,
     pub ipv6_cidr_block: Option<String>,
@@ -430,6 +469,7 @@ pub struct VpcIpv6CidrBlockAssociation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpcCidrBlockState")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcCidrBlockState {
     pub state: Option<String>,
     pub status_message: Option<String>,
@@ -437,6 +477,7 @@ pub struct VpcCidrBlockState {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpcCidrBlockAssociation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcCidrBlockAssociation {
     pub association_id: Option<String>,
     pub cidr_block: Option<String>,
@@ -458,6 +499,7 @@ pub struct EnaSrdUdpSpecification {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessTrustProvider")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessTrustProvider {
     pub verified_access_trust_provider_id: Option<String>,
     pub description: Option<String>,
@@ -476,6 +518,7 @@ pub struct VerifiedAccessTrustProvider {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#OidcOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct OidcOptions {
     pub issuer: Option<String>,
     pub authorization_endpoint: Option<String>,
@@ -488,6 +531,7 @@ pub struct OidcOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#DeviceOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DeviceOptions {
     pub tenant_id: Option<String>,
     pub public_signing_key_url: Option<String>,
@@ -495,6 +539,7 @@ pub struct DeviceOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessSseSpecificationResponse")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessSseSpecificationResponse {
     pub customer_managed_key_enabled: Option<bool>,
     pub kms_key_arn: Option<String>,
@@ -502,6 +547,7 @@ pub struct VerifiedAccessSseSpecificationResponse {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NativeApplicationOidcOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NativeApplicationOidcOptions {
     pub public_signing_key_endpoint: Option<String>,
     pub issuer: Option<String>,
@@ -514,6 +560,7 @@ pub struct NativeApplicationOidcOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessInstance")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessInstance {
     pub verified_access_instance_id: Option<String>,
     pub description: Option<String>,
@@ -527,6 +574,7 @@ pub struct VerifiedAccessInstance {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessTrustProviderCondensed")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessTrustProviderCondensed {
     pub verified_access_trust_provider_id: Option<String>,
     pub description: Option<String>,
@@ -537,6 +585,7 @@ pub struct VerifiedAccessTrustProviderCondensed {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessInstanceCustomSubDomain")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessInstanceCustomSubDomain {
     pub sub_domain: Option<String>,
     pub nameservers: Option<Vec<String>>,
@@ -544,6 +593,7 @@ pub struct VerifiedAccessInstanceCustomSubDomain {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VolumeAttachment")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AttachVolumeOutput {
     pub delete_on_termination: Option<bool>,
     pub associated_resource: Option<String>,
@@ -553,11 +603,13 @@ pub struct AttachVolumeOutput {
     pub instance_id: Option<String>,
     pub device: Option<String>,
     pub state: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub attach_time: Option<::aws_smithy_types::DateTime>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpcAttachment")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcAttachment {
     pub vpc_id: Option<String>,
     pub state: Option<String>,
@@ -572,6 +624,7 @@ pub struct ClientVpnAuthorizationRuleStatus {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpPermission")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpPermission {
     pub ip_protocol: Option<String>,
     pub from_port: Option<i32>,
@@ -584,6 +637,7 @@ pub struct IpPermission {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#UserIdGroupPair")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct UserIdGroupPair {
     pub description: Option<String>,
     pub user_id: Option<String>,
@@ -596,6 +650,7 @@ pub struct UserIdGroupPair {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpRange")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpRange {
     pub description: Option<String>,
     pub cidr_ip: Option<String>,
@@ -603,6 +658,7 @@ pub struct IpRange {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Ipv6Range")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ipv6Range {
     pub description: Option<String>,
     pub cidr_ipv6: Option<String>,
@@ -610,6 +666,7 @@ pub struct Ipv6Range {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PrefixListId")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PrefixListId {
     pub description: Option<String>,
     pub prefix_list_id: Option<String>,
@@ -617,6 +674,7 @@ pub struct PrefixListId {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SecurityGroupRule")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SecurityGroupRule {
     pub security_group_rule_id: Option<String>,
     pub group_id: Option<String>,
@@ -636,6 +694,7 @@ pub struct SecurityGroupRule {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ReferencedSecurityGroup")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ReferencedSecurityGroup {
     pub group_id: Option<String>,
     pub peering_status: Option<String>,
@@ -646,6 +705,7 @@ pub struct ReferencedSecurityGroup {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamRoutingPolicyRegistrationDelta")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamRoutingPolicyRegistrationDelta {
     pub delta_id: Option<String>,
     pub delta_json: Option<String>,
@@ -655,12 +715,14 @@ pub struct IpamRoutingPolicyRegistrationDelta {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Storage")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Storage {
     pub s3: Option<S3Storage>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#S3Storage")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct S3Storage {
     pub aws_access_key_id: Option<String>,
     pub bucket: Option<String>,
@@ -671,11 +733,14 @@ pub struct S3Storage {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#BundleTask")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct BundleTask {
     pub instance_id: Option<String>,
     pub bundle_id: Option<String>,
     pub state: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub start_time: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub update_time: Option<::aws_smithy_types::DateTime>,
     pub storage: Option<Storage>,
     pub progress: Option<String>,
@@ -684,6 +749,7 @@ pub struct BundleTask {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#BundleTaskError")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct BundleTaskError {
     pub code: Option<String>,
     pub message: Option<String>,
@@ -691,8 +757,10 @@ pub struct BundleTaskError {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ReservedInstancesListing")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ReservedInstancesListing {
     pub client_token: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_date: Option<::aws_smithy_types::DateTime>,
     pub instance_counts: Option<Vec<InstanceCount>>,
     pub price_schedules: Option<Vec<PriceSchedule>>,
@@ -701,11 +769,13 @@ pub struct ReservedInstancesListing {
     pub status: Option<String>,
     pub status_message: Option<String>,
     pub tags: Option<Vec<Tag>>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub update_date: Option<::aws_smithy_types::DateTime>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InstanceCount")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceCount {
     pub instance_count: Option<i32>,
     pub state: Option<String>,
@@ -713,6 +783,7 @@ pub struct InstanceCount {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PriceSchedule")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PriceSchedule {
     pub active: Option<bool>,
     pub currency_code: Option<String>,
@@ -722,6 +793,7 @@ pub struct PriceSchedule {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Volume")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CreateVolumeOutput {
     pub availability_zone_id: Option<String>,
     pub outpost_arn: Option<String>,
@@ -742,6 +814,7 @@ pub struct CreateVolumeOutput {
     pub snapshot_id: Option<String>,
     pub availability_zone: Option<String>,
     pub state: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_time: Option<::aws_smithy_types::DateTime>,
     pub attachments: Option<Vec<AttachVolumeOutput>>,
     pub encrypted: Option<bool>,
@@ -750,6 +823,7 @@ pub struct CreateVolumeOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#OperatorResponse")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct OperatorResponse {
     pub managed: Option<bool>,
     pub principal: Option<String>,
@@ -779,6 +853,7 @@ pub struct HealthCheckPathDestinationRequestObject {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ApplicationStatusCheckResponseObject")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ApplicationStatusCheckResponseObject {
     pub application_status_check_id: Option<String>,
     pub aggregation: Option<String>,
@@ -795,16 +870,21 @@ pub struct ApplicationStatusCheckResponseObject {
     pub success_threshold: Option<i32>,
     pub status_code_matcher: Option<String>,
     pub initialization_grace_period_seconds: Option<i32>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub last_updated_at: Option<::aws_smithy_types::DateTime>,
     pub target_tag_associations: Option<Vec<CustomTagKeyValueResponsePair>>,
     pub tags: Option<Vec<Tag>>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub creation_time: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub modify_time: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub deletion_time: Option<::aws_smithy_types::DateTime>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#HealthCheckPathResponseObject")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct HealthCheckPathResponseObject {
     pub source: Option<HealthCheckPathSourceResponseObject>,
     pub destinations: Option<Vec<HealthCheckPathDestinationResponseObject>>,
@@ -812,6 +892,7 @@ pub struct HealthCheckPathResponseObject {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#HealthCheckPathSourceResponseObject")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct HealthCheckPathSourceResponseObject {
     pub subnet_id: Option<String>,
     pub security_group_id: Option<String>,
@@ -819,6 +900,7 @@ pub struct HealthCheckPathSourceResponseObject {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#HealthCheckPathDestinationResponseObject")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct HealthCheckPathDestinationResponseObject {
     pub subnet_id: Option<String>,
     pub security_group_id: Option<String>,
@@ -826,6 +908,7 @@ pub struct HealthCheckPathDestinationResponseObject {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CustomTagKeyValueResponsePair")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CustomTagKeyValueResponsePair {
     pub key: Option<String>,
     pub value: Option<String>,
@@ -833,6 +916,7 @@ pub struct CustomTagKeyValueResponsePair {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CapacityReservation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityReservation {
     pub capacity_reservation_id: Option<String>,
     pub owner_id: Option<String>,
@@ -847,10 +931,13 @@ pub struct CapacityReservation {
     pub ebs_optimized: Option<bool>,
     pub ephemeral_storage: Option<bool>,
     pub state: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub start_date: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub end_date: Option<::aws_smithy_types::DateTime>,
     pub end_date_type: Option<String>,
     pub instance_match_criteria: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_date: Option<::aws_smithy_types::DateTime>,
     pub tags: Option<Vec<Tag>>,
     pub outpost_arn: Option<String>,
@@ -867,6 +954,7 @@ pub struct CapacityReservation {
     pub interruption_info: Option<InterruptionInfo>,
     pub adjustment_status: Option<String>,
     pub adjustment_details: Option<CapacityReservationAdjustmentDetails>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub original_start_date: Option<::aws_smithy_types::DateTime>,
     pub zero_size_preference: Option<String>,
     pub launch_status: Option<String>,
@@ -874,6 +962,7 @@ pub struct CapacityReservation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CapacityAllocation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityAllocation {
     pub allocation_type: Option<String>,
     pub count: Option<i32>,
@@ -882,6 +971,7 @@ pub struct CapacityAllocation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CapacityAllocationMetadataEntry")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityAllocationMetadataEntry {
     pub key: Option<String>,
     pub value: Option<String>,
@@ -889,14 +979,17 @@ pub struct CapacityAllocationMetadataEntry {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CapacityReservationCommitmentInfo")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityReservationCommitmentInfo {
     pub committed_instance_count: Option<i32>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub commitment_end_date: Option<::aws_smithy_types::DateTime>,
     pub commitment_duration: Option<i64>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InterruptibleCapacityAllocation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InterruptibleCapacityAllocation {
     pub instance_count: Option<i32>,
     pub target_instance_count: Option<i32>,
@@ -908,6 +1001,7 @@ pub struct InterruptibleCapacityAllocation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InterruptionInfo")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InterruptionInfo {
     pub source_capacity_reservation_id: Option<String>,
     pub interruption_type: Option<String>,
@@ -915,9 +1009,13 @@ pub struct InterruptionInfo {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CapacityReservationAdjustmentDetails")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityReservationAdjustmentDetails {
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub start_date: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub end_date: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub commitment_end_date: Option<::aws_smithy_types::DateTime>,
     pub end_date_type: Option<String>,
     pub commitment_duration: Option<i64>,
@@ -925,10 +1023,13 @@ pub struct CapacityReservationAdjustmentDetails {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CapacityReservationCancellationQuote")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityReservationCancellationQuote {
     pub capacity_reservation_cancellation_quote_id: Option<String>,
     pub capacity_reservation_id: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_time: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub expiration_time: Option<::aws_smithy_types::DateTime>,
     pub quote_state: Option<String>,
     pub current_configuration: Option<CapacityReservationConfiguration>,
@@ -938,6 +1039,7 @@ pub struct CapacityReservationCancellationQuote {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CapacityReservationConfiguration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityReservationConfiguration {
     pub instance_count: Option<i32>,
     pub reservation_state: Option<String>,
@@ -945,11 +1047,13 @@ pub struct CapacityReservationConfiguration {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CancellationTerms")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CancellationTerms {
     pub cancellation_type: Option<String>,
     pub reservation_state: Option<String>,
     pub committed_instance_count: Option<i32>,
     pub charge_commitment_duration_hours: Option<i64>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub charge_end_date: Option<::aws_smithy_types::DateTime>,
 }
 
@@ -991,6 +1095,7 @@ pub struct ModificationReservationUpdate {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#FleetCapacityReservation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FleetCapacityReservation {
     pub capacity_reservation_id: Option<String>,
     pub availability_zone_id: Option<String>,
@@ -1000,6 +1105,7 @@ pub struct FleetCapacityReservation {
     pub total_instance_count: Option<i32>,
     pub fulfilled_capacity: Option<f64>,
     pub ebs_optimized: Option<bool>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_date: Option<::aws_smithy_types::DateTime>,
     pub weight: Option<f64>,
     pub priority: Option<i32>,
@@ -1007,6 +1113,7 @@ pub struct FleetCapacityReservation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CarrierGateway")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CarrierGateway {
     pub carrier_gateway_id: Option<String>,
     pub vpc_id: Option<String>,
@@ -1069,6 +1176,7 @@ pub struct ClientVpnTrustProviderRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ClientVpnEndpointStatus")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClientVpnEndpointStatus {
     pub code: Option<String>,
     pub message: Option<String>,
@@ -1076,6 +1184,7 @@ pub struct ClientVpnEndpointStatus {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ClientVpnRouteStatus")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClientVpnRouteStatus {
     pub code: Option<String>,
     pub message: Option<String>,
@@ -1091,6 +1200,7 @@ pub struct CoipCidr {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CoipPool")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CoipPool {
     pub pool_id: Option<String>,
     pub pool_cidrs: Option<Vec<String>>,
@@ -1101,6 +1211,7 @@ pub struct CoipPool {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CustomerGateway")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CustomerGateway {
     pub certificate_arn: Option<String>,
     pub device_name: Option<String>,
@@ -1115,6 +1226,7 @@ pub struct CustomerGateway {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Subnet")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Subnet {
     pub availability_zone_id: Option<String>,
     pub enable_lni_at_device_index: Option<i32>,
@@ -1143,6 +1255,7 @@ pub struct Subnet {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PrivateDnsNameOptionsOnLaunch")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PrivateDnsNameOptionsOnLaunch {
     pub hostname_type: Option<String>,
     pub enable_resource_name_dns_a_record: Option<bool>,
@@ -1151,12 +1264,14 @@ pub struct PrivateDnsNameOptionsOnLaunch {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#BlockPublicAccessStates")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct BlockPublicAccessStates {
     pub internet_gateway_block_mode: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Vpc")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Vpc {
     pub owner_id: Option<String>,
     pub instance_tenancy: Option<String>,
@@ -1174,6 +1289,7 @@ pub struct Vpc {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpcEncryptionControl")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcEncryptionControl {
     pub vpc_id: Option<String>,
     pub vpc_encryption_control_id: Option<String>,
@@ -1186,6 +1302,7 @@ pub struct VpcEncryptionControl {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpcEncryptionControlExclusions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcEncryptionControlExclusions {
     pub internet_gateway: Option<VpcEncryptionControlExclusion>,
     pub egress_only_internet_gateway: Option<VpcEncryptionControlExclusion>,
@@ -1199,6 +1316,7 @@ pub struct VpcEncryptionControlExclusions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpcEncryptionControlExclusion")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcEncryptionControlExclusion {
     pub state: Option<String>,
     pub state_message: Option<String>,
@@ -1206,10 +1324,12 @@ pub struct VpcEncryptionControlExclusion {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#MacModificationTask")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MacModificationTask {
     pub instance_id: Option<String>,
     pub mac_modification_task_id: Option<String>,
     pub mac_system_integrity_protection_config: Option<MacSystemIntegrityProtectionConfiguration>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub start_time: Option<::aws_smithy_types::DateTime>,
     pub tags: Option<Vec<Tag>>,
     pub task_state: Option<String>,
@@ -1218,6 +1338,7 @@ pub struct MacModificationTask {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#MacSystemIntegrityProtectionConfiguration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MacSystemIntegrityProtectionConfiguration {
     pub apple_internal: Option<String>,
     pub base_system: Option<String>,
@@ -1231,6 +1352,7 @@ pub struct MacSystemIntegrityProtectionConfiguration {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#DhcpOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DhcpOptions {
     pub owner_id: Option<String>,
     pub tags: Option<Vec<Tag>>,
@@ -1240,6 +1362,7 @@ pub struct DhcpOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#DhcpConfiguration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DhcpConfiguration {
     pub key: Option<String>,
     pub values: Option<Vec<AttributeValue>>,
@@ -1247,6 +1370,7 @@ pub struct DhcpConfiguration {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AttributeValue")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AttributeValue {
     pub value: Option<String>,
 }
@@ -1261,6 +1385,7 @@ pub struct EgressOnlyInternetGateway {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InternetGatewayAttachment")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InternetGatewayAttachment {
     pub state: Option<String>,
     pub vpc_id: Option<String>,
@@ -1355,6 +1480,7 @@ pub struct FleetInstanceMetadataOptionsRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InstanceRequirementsRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceRequirementsRequest {
     pub v_cpu_count: VCpuCountRangeRequest,
     pub memory_mi_b: MemoryMiBRequest,
@@ -1386,6 +1512,7 @@ pub struct InstanceRequirementsRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VCpuCountRangeRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VCpuCountRangeRequest {
     pub min: i32,
     pub max: Option<i32>,
@@ -1393,6 +1520,7 @@ pub struct VCpuCountRangeRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#MemoryMiBRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MemoryMiBRequest {
     pub min: i32,
     pub max: Option<i32>,
@@ -1400,6 +1528,7 @@ pub struct MemoryMiBRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#MemoryGiBPerVCpuRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MemoryGiBPerVCpuRequest {
     pub min: Option<f64>,
     pub max: Option<f64>,
@@ -1407,6 +1536,7 @@ pub struct MemoryGiBPerVCpuRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkInterfaceCountRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkInterfaceCountRequest {
     pub min: Option<i32>,
     pub max: Option<i32>,
@@ -1414,6 +1544,7 @@ pub struct NetworkInterfaceCountRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TotalLocalStorageGBRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TotalLocalStorageGBRequest {
     pub min: Option<f64>,
     pub max: Option<f64>,
@@ -1421,6 +1552,7 @@ pub struct TotalLocalStorageGBRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#BaselineEbsBandwidthMbpsRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct BaselineEbsBandwidthMbpsRequest {
     pub min: Option<i32>,
     pub max: Option<i32>,
@@ -1428,6 +1560,7 @@ pub struct BaselineEbsBandwidthMbpsRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AcceleratorCountRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AcceleratorCountRequest {
     pub min: Option<i32>,
     pub max: Option<i32>,
@@ -1435,6 +1568,7 @@ pub struct AcceleratorCountRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AcceleratorTotalMemoryMiBRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AcceleratorTotalMemoryMiBRequest {
     pub min: Option<i32>,
     pub max: Option<i32>,
@@ -1442,6 +1576,7 @@ pub struct AcceleratorTotalMemoryMiBRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkBandwidthGbpsRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkBandwidthGbpsRequest {
     pub min: Option<f64>,
     pub max: Option<f64>,
@@ -1449,18 +1584,21 @@ pub struct NetworkBandwidthGbpsRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#BaselinePerformanceFactorsRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct BaselinePerformanceFactorsRequest {
     pub cpu: Option<CpuPerformanceFactorRequest>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CpuPerformanceFactorRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CpuPerformanceFactorRequest {
     pub references: Option<Vec<PerformanceFactorReferenceRequest>>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PerformanceFactorReferenceRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PerformanceFactorReferenceRequest {
     pub instance_family: Option<String>,
 }
@@ -1477,6 +1615,7 @@ pub struct TargetCapacitySpecificationRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateAndOverridesResponse")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateAndOverridesResponse {
     pub launch_template_specification: Option<FleetLaunchTemplateSpecification>,
     pub overrides: Option<FleetLaunchTemplateOverrides>,
@@ -1484,6 +1623,7 @@ pub struct LaunchTemplateAndOverridesResponse {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#FleetLaunchTemplateSpecification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FleetLaunchTemplateSpecification {
     pub launch_template_id: Option<String>,
     pub launch_template_name: Option<String>,
@@ -1492,6 +1632,7 @@ pub struct FleetLaunchTemplateSpecification {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#FleetLaunchTemplateOverrides")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FleetLaunchTemplateOverrides {
     pub instance_type: Option<String>,
     pub max_price: Option<String>,
@@ -1508,12 +1649,14 @@ pub struct FleetLaunchTemplateOverrides {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PlacementResponse")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PlacementResponse {
     pub group_name: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InstanceRequirements")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceRequirements {
     pub v_cpu_count: Option<VCpuCountRange>,
     pub memory_mi_b: Option<MemoryMiB>,
@@ -1545,6 +1688,7 @@ pub struct InstanceRequirements {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VCpuCountRange")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VCpuCountRange {
     pub min: Option<i32>,
     pub max: Option<i32>,
@@ -1552,6 +1696,7 @@ pub struct VCpuCountRange {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#MemoryMiB")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MemoryMiB {
     pub min: Option<i32>,
     pub max: Option<i32>,
@@ -1559,6 +1704,7 @@ pub struct MemoryMiB {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#MemoryGiBPerVCpu")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MemoryGiBPerVCpu {
     pub min: Option<f64>,
     pub max: Option<f64>,
@@ -1566,6 +1712,7 @@ pub struct MemoryGiBPerVCpu {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkInterfaceCount")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkInterfaceCount {
     pub min: Option<i32>,
     pub max: Option<i32>,
@@ -1573,6 +1720,7 @@ pub struct NetworkInterfaceCount {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TotalLocalStorageGB")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TotalLocalStorageGB {
     pub min: Option<f64>,
     pub max: Option<f64>,
@@ -1580,6 +1728,7 @@ pub struct TotalLocalStorageGB {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#BaselineEbsBandwidthMbps")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct BaselineEbsBandwidthMbps {
     pub min: Option<i32>,
     pub max: Option<i32>,
@@ -1587,6 +1736,7 @@ pub struct BaselineEbsBandwidthMbps {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AcceleratorCount")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AcceleratorCount {
     pub min: Option<i32>,
     pub max: Option<i32>,
@@ -1594,6 +1744,7 @@ pub struct AcceleratorCount {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AcceleratorTotalMemoryMiB")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AcceleratorTotalMemoryMiB {
     pub min: Option<i32>,
     pub max: Option<i32>,
@@ -1601,6 +1752,7 @@ pub struct AcceleratorTotalMemoryMiB {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkBandwidthGbps")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkBandwidthGbps {
     pub min: Option<f64>,
     pub max: Option<f64>,
@@ -1608,24 +1760,28 @@ pub struct NetworkBandwidthGbps {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#BaselinePerformanceFactors")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct BaselinePerformanceFactors {
     pub cpu: Option<CpuPerformanceFactor>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CpuPerformanceFactor")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CpuPerformanceFactor {
     pub references: Option<Vec<PerformanceFactorReference>>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PerformanceFactorReference")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PerformanceFactorReference {
     pub instance_family: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#BlockDeviceMappingResponse")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct BlockDeviceMappingResponse {
     pub device_name: Option<String>,
     pub virtual_name: Option<String>,
@@ -1635,6 +1791,7 @@ pub struct BlockDeviceMappingResponse {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#EbsBlockDeviceResponse")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct EbsBlockDeviceResponse {
     pub encrypted: Option<bool>,
     pub delete_on_termination: Option<bool>,
@@ -1648,6 +1805,7 @@ pub struct EbsBlockDeviceResponse {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#BlockDeviceMapping")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct BlockDeviceMapping {
     pub ebs: Option<EbsBlockDevice>,
     pub no_device: Option<String>,
@@ -1657,6 +1815,7 @@ pub struct BlockDeviceMapping {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#EbsBlockDevice")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct EbsBlockDevice {
     pub delete_on_termination: Option<bool>,
     pub iops: Option<i32>,
@@ -1675,6 +1834,7 @@ pub struct EbsBlockDevice {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Ec2InstanceConnectEndpoint")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ec2InstanceConnectEndpoint {
     pub owner_id: Option<String>,
     pub instance_connect_endpoint_id: Option<String>,
@@ -1686,6 +1846,7 @@ pub struct Ec2InstanceConnectEndpoint {
     pub network_interface_ids: Option<Vec<String>>,
     pub vpc_id: Option<String>,
     pub availability_zone: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub created_at: Option<::aws_smithy_types::DateTime>,
     pub subnet_id: Option<String>,
     pub preserve_client_ip: Option<bool>,
@@ -1698,6 +1859,7 @@ pub struct Ec2InstanceConnectEndpoint {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InstanceConnectEndpointPublicDnsNames")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceConnectEndpointPublicDnsNames {
     pub ipv4: Option<InstanceConnectEndpointDnsNames>,
     pub dualstack: Option<InstanceConnectEndpointDnsNames>,
@@ -1705,6 +1867,7 @@ pub struct InstanceConnectEndpointPublicDnsNames {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InstanceConnectEndpointDnsNames")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceConnectEndpointDnsNames {
     pub dns_name: Option<String>,
     pub fips_dns_name: Option<String>,
@@ -1721,6 +1884,7 @@ pub struct InstanceEventWindowTimeRangeRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ExportTask")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ExportTask {
     pub description: Option<String>,
     pub export_task_id: Option<String>,
@@ -1733,6 +1897,7 @@ pub struct ExportTask {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ExportToS3Task")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ExportToS3Task {
     pub container_format: Option<String>,
     pub disk_image_format: Option<String>,
@@ -1742,6 +1907,7 @@ pub struct ExportToS3Task {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InstanceExportDetails")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceExportDetails {
     pub instance_id: Option<String>,
     pub target_environment: Option<String>,
@@ -1749,6 +1915,7 @@ pub struct InstanceExportDetails {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InternetGateway")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InternetGateway {
     pub attachments: Option<Vec<InternetGatewayAttachment>>,
     pub internet_gateway_id: Option<String>,
@@ -1764,6 +1931,7 @@ pub struct AddIpamOperatingRegion {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Ipam")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ipam {
     pub owner_id: Option<String>,
     pub ipam_id: Option<String>,
@@ -1787,6 +1955,7 @@ pub struct Ipam {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamOperatingRegion")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamOperatingRegion {
     pub region_name: Option<String>,
 }
@@ -1809,6 +1978,7 @@ pub struct IpamExternalResourceVerificationToken {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamInternetRegistryAssociation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamInternetRegistryAssociation {
     pub owner_id: Option<String>,
     pub ipam_internet_registry_association_id: Option<String>,
@@ -1826,6 +1996,7 @@ pub struct IpamInternetRegistryAssociation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamPolicy")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamPolicy {
     pub owner_id: Option<String>,
     pub ipam_policy_id: Option<String>,
@@ -1846,6 +2017,7 @@ pub struct RequestIpamResourceTag {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamPool")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamPool {
     pub owner_id: Option<String>,
     pub ipam_pool_id: Option<String>,
@@ -1875,6 +2047,7 @@ pub struct IpamPool {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamResourceTag")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamResourceTag {
     pub key: Option<String>,
     pub value: Option<String>,
@@ -1882,6 +2055,7 @@ pub struct IpamResourceTag {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamPoolSourceResource")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamPoolSourceResource {
     pub resource_id: Option<String>,
     pub resource_type: Option<String>,
@@ -1913,6 +2087,7 @@ pub struct IpamPrefixListResolverRuleConditionRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamPrefixListResolver")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamPrefixListResolver {
     pub owner_id: Option<String>,
     pub ipam_prefix_list_resolver_id: Option<String>,
@@ -1929,6 +2104,7 @@ pub struct IpamPrefixListResolver {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamPrefixListResolverTarget")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamPrefixListResolverTarget {
     pub ipam_prefix_list_resolver_target_id: Option<String>,
     pub ipam_prefix_list_resolver_target_arn: Option<String>,
@@ -1946,6 +2122,7 @@ pub struct IpamPrefixListResolverTarget {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamResourceDiscovery")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamResourceDiscovery {
     pub owner_id: Option<String>,
     pub ipam_resource_discovery_id: Option<String>,
@@ -1961,6 +2138,7 @@ pub struct IpamResourceDiscovery {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamOrganizationalUnitExclusion")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamOrganizationalUnitExclusion {
     pub organizations_entity_path: Option<String>,
 }
@@ -1974,6 +2152,7 @@ pub struct ExternalAuthorityConfiguration {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamScope")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamScope {
     pub owner_id: Option<String>,
     pub ipam_scope_id: Option<String>,
@@ -1991,6 +2170,7 @@ pub struct IpamScope {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamScopeExternalAuthorityConfiguration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamScopeExternalAuthorityConfiguration {
     pub r#type: Option<String>,
     pub external_resource_identifier: Option<String>,
@@ -1998,6 +2178,7 @@ pub struct IpamScopeExternalAuthorityConfiguration {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#RequestLaunchTemplateData")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RequestLaunchTemplateData {
     pub kernel_id: Option<String>,
     pub ebs_optimized: Option<bool>,
@@ -2037,6 +2218,7 @@ pub struct RequestLaunchTemplateData {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateIamInstanceProfileSpecificationRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateIamInstanceProfileSpecificationRequest {
     pub arn: Option<String>,
     pub name: Option<String>,
@@ -2044,6 +2226,7 @@ pub struct LaunchTemplateIamInstanceProfileSpecificationRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateBlockDeviceMappingRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateBlockDeviceMappingRequest {
     pub device_name: Option<String>,
     pub virtual_name: Option<String>,
@@ -2053,6 +2236,7 @@ pub struct LaunchTemplateBlockDeviceMappingRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateEbsBlockDeviceRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateEbsBlockDeviceRequest {
     pub encrypted: Option<bool>,
     pub delete_on_termination: Option<bool>,
@@ -2068,6 +2252,7 @@ pub struct LaunchTemplateEbsBlockDeviceRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateInstanceNetworkInterfaceSpecificationRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateInstanceNetworkInterfaceSpecificationRequest {
     pub associate_carrier_ip_address: Option<bool>,
     pub associate_public_ip_address: Option<bool>,
@@ -2096,12 +2281,14 @@ pub struct LaunchTemplateInstanceNetworkInterfaceSpecificationRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InstanceIpv6AddressRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceIpv6AddressRequest {
     pub ipv6_address: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PrivateIpAddressSpecification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PrivateIpAddressSpecification {
     pub primary: Option<bool>,
     pub private_ip_address: Option<String>,
@@ -2109,18 +2296,21 @@ pub struct PrivateIpAddressSpecification {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Ipv4PrefixSpecificationRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ipv4PrefixSpecificationRequest {
     pub ipv4_prefix: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Ipv6PrefixSpecificationRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ipv6PrefixSpecificationRequest {
     pub ipv6_prefix: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#EnaSrdSpecificationRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct EnaSrdSpecificationRequest {
     pub ena_srd_enabled: Option<bool>,
     pub ena_srd_udp_specification: Option<EnaSrdUdpSpecificationRequest>,
@@ -2128,12 +2318,14 @@ pub struct EnaSrdSpecificationRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#EnaSrdUdpSpecificationRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct EnaSrdUdpSpecificationRequest {
     pub ena_srd_udp_enabled: Option<bool>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ConnectionTrackingSpecificationRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ConnectionTrackingSpecificationRequest {
     pub tcp_established_timeout: Option<i32>,
     pub udp_stream_timeout: Option<i32>,
@@ -2142,12 +2334,14 @@ pub struct ConnectionTrackingSpecificationRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplatesMonitoringRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplatesMonitoringRequest {
     pub enabled: Option<bool>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplatePlacementRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplatePlacementRequest {
     pub availability_zone: Option<String>,
     pub availability_zone_id: Option<String>,
@@ -2163,6 +2357,7 @@ pub struct LaunchTemplatePlacementRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateTagSpecificationRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateTagSpecificationRequest {
     pub resource_type: Option<String>,
     pub tags: Option<Vec<Tag>>,
@@ -2170,12 +2365,14 @@ pub struct LaunchTemplateTagSpecificationRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ElasticGpuSpecification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ElasticGpuSpecification {
     pub r#type: String,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateElasticInferenceAccelerator")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateElasticInferenceAccelerator {
     pub r#type: String,
     pub count: Option<i32>,
@@ -2183,6 +2380,7 @@ pub struct LaunchTemplateElasticInferenceAccelerator {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateInstanceMarketOptionsRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateInstanceMarketOptionsRequest {
     pub market_type: Option<String>,
     pub spot_options: Option<LaunchTemplateSpotMarketOptionsRequest>,
@@ -2190,22 +2388,26 @@ pub struct LaunchTemplateInstanceMarketOptionsRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateSpotMarketOptionsRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateSpotMarketOptionsRequest {
     pub max_price: Option<String>,
     pub spot_instance_type: Option<String>,
     pub block_duration_minutes: Option<i32>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub valid_until: Option<::aws_smithy_types::DateTime>,
     pub instance_interruption_behavior: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CreditSpecificationRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CreditSpecificationRequest {
     pub cpu_credits: String,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateCpuOptionsRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateCpuOptionsRequest {
     pub core_count: Option<i32>,
     pub threads_per_core: Option<i32>,
@@ -2215,6 +2417,7 @@ pub struct LaunchTemplateCpuOptionsRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateCapacityReservationSpecificationRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateCapacityReservationSpecificationRequest {
     pub capacity_reservation_preference: Option<String>,
     pub capacity_reservation_target: Option<CapacityReservationTarget>,
@@ -2222,6 +2425,7 @@ pub struct LaunchTemplateCapacityReservationSpecificationRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CapacityReservationTarget")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityReservationTarget {
     pub capacity_reservation_id: Option<String>,
     pub capacity_reservation_resource_group_arn: Option<String>,
@@ -2229,18 +2433,21 @@ pub struct CapacityReservationTarget {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateLicenseConfigurationRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateLicenseConfigurationRequest {
     pub license_configuration_arn: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateHibernationOptionsRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateHibernationOptionsRequest {
     pub configured: Option<bool>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateInstanceMetadataOptionsRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateInstanceMetadataOptionsRequest {
     pub http_tokens: Option<String>,
     pub http_put_response_hop_limit: Option<i32>,
@@ -2251,12 +2458,14 @@ pub struct LaunchTemplateInstanceMetadataOptionsRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateEnclaveOptionsRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateEnclaveOptionsRequest {
     pub enabled: Option<bool>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplatePrivateDnsNameOptionsRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplatePrivateDnsNameOptionsRequest {
     pub hostname_type: Option<String>,
     pub enable_resource_name_dns_a_record: Option<bool>,
@@ -2265,24 +2474,28 @@ pub struct LaunchTemplatePrivateDnsNameOptionsRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateInstanceMaintenanceOptionsRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateInstanceMaintenanceOptionsRequest {
     pub auto_recovery: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#OperatorRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct OperatorRequest {
     pub principal: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateNetworkPerformanceOptionsRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateNetworkPerformanceOptionsRequest {
     pub bandwidth_weighting: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateInstanceSecondaryInterfaceSpecificationRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateInstanceSecondaryInterfaceSpecificationRequest {
     pub delete_on_termination: Option<bool>,
     pub device_index: Option<i32>,
@@ -2295,15 +2508,18 @@ pub struct LaunchTemplateInstanceSecondaryInterfaceSpecificationRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SecondaryInterfacePrivateIpAddressSpecificationRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SecondaryInterfacePrivateIpAddressSpecificationRequest {
     pub private_ip_address: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplate")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplate {
     pub launch_template_id: Option<String>,
     pub launch_template_name: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_time: Option<::aws_smithy_types::DateTime>,
     pub created_by: Option<String>,
     pub default_version_number: Option<i64>,
@@ -2439,6 +2655,7 @@ pub struct LaunchTemplateInstanceNetworkInterfaceSpecification {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InstanceIpv6Address")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceIpv6Address {
     pub ipv6_address: Option<String>,
     pub is_primary_ipv6: Option<bool>,
@@ -2633,6 +2850,7 @@ pub struct SecondaryInterfacePrivateIpAddressSpecification {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LocalGatewayRoute")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LocalGatewayRoute {
     pub destination_cidr_block: Option<String>,
     pub local_gateway_virtual_interface_group_id: Option<String>,
@@ -2649,6 +2867,7 @@ pub struct LocalGatewayRoute {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LocalGatewayRouteTable")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LocalGatewayRouteTable {
     pub local_gateway_route_table_id: Option<String>,
     pub local_gateway_route_table_arn: Option<String>,
@@ -2663,6 +2882,7 @@ pub struct LocalGatewayRouteTable {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#StateReason")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StateReason {
     pub code: Option<String>,
     pub message: Option<String>,
@@ -2670,6 +2890,7 @@ pub struct StateReason {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LocalGatewayRouteTableVirtualInterfaceGroupAssociation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LocalGatewayRouteTableVirtualInterfaceGroupAssociation {
     pub local_gateway_route_table_virtual_interface_group_association_id: Option<String>,
     pub local_gateway_virtual_interface_group_id: Option<String>,
@@ -2683,6 +2904,7 @@ pub struct LocalGatewayRouteTableVirtualInterfaceGroupAssociation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LocalGatewayRouteTableVpcAssociation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LocalGatewayRouteTableVpcAssociation {
     pub local_gateway_route_table_vpc_association_id: Option<String>,
     pub local_gateway_route_table_id: Option<String>,
@@ -2696,6 +2918,7 @@ pub struct LocalGatewayRouteTableVpcAssociation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LocalGatewayVirtualInterface")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LocalGatewayVirtualInterface {
     pub local_gateway_virtual_interface_id: Option<String>,
     pub local_gateway_id: Option<String>,
@@ -2715,6 +2938,7 @@ pub struct LocalGatewayVirtualInterface {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LocalGatewayVirtualInterfaceGroup")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LocalGatewayVirtualInterfaceGroup {
     pub local_gateway_virtual_interface_group_id: Option<String>,
     pub local_gateway_virtual_interface_ids: Option<Vec<String>>,
@@ -2736,6 +2960,7 @@ pub struct AddPrefixListEntry {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ManagedPrefixList")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ManagedPrefixList {
     pub prefix_list_id: Option<String>,
     pub address_family: Option<String>,
@@ -2753,8 +2978,11 @@ pub struct ManagedPrefixList {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NatGateway")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NatGateway {
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_time: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub delete_time: Option<::aws_smithy_types::DateTime>,
     pub failure_code: Option<String>,
     pub failure_message: Option<String>,
@@ -2775,9 +3003,12 @@ pub struct NatGateway {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ProvisionedBandwidth")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ProvisionedBandwidth {
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub provision_time: Option<::aws_smithy_types::DateTime>,
     pub provisioned: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub request_time: Option<::aws_smithy_types::DateTime>,
     pub requested: Option<String>,
     pub status: Option<String>,
@@ -2785,6 +3016,7 @@ pub struct ProvisionedBandwidth {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NatGatewayAttachedAppliance")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NatGatewayAttachedAppliance {
     pub r#type: Option<String>,
     pub appliance_arn: Option<String>,
@@ -2797,6 +3029,7 @@ pub struct NatGatewayAttachedAppliance {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkAcl")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkAcl {
     pub associations: Option<Vec<NetworkAclAssociation>>,
     pub entries: Option<Vec<NetworkAclEntry>>,
@@ -2809,6 +3042,7 @@ pub struct NetworkAcl {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkAclAssociation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkAclAssociation {
     pub network_acl_association_id: Option<String>,
     pub network_acl_id: Option<String>,
@@ -2817,6 +3051,7 @@ pub struct NetworkAclAssociation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkAclEntry")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkAclEntry {
     pub cidr_block: Option<String>,
     pub egress: Option<bool>,
@@ -2830,6 +3065,7 @@ pub struct NetworkAclEntry {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IcmpTypeCode")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IcmpTypeCode {
     pub code: Option<i32>,
     pub r#type: Option<i32>,
@@ -2837,6 +3073,7 @@ pub struct IcmpTypeCode {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PortRange")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PortRange {
     pub from: Option<i32>,
     pub to: Option<i32>,
@@ -2844,16 +3081,20 @@ pub struct PortRange {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkInsightsAccessScope")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkInsightsAccessScope {
     pub network_insights_access_scope_id: Option<String>,
     pub network_insights_access_scope_arn: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub created_date: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub updated_date: Option<::aws_smithy_types::DateTime>,
     pub tags: Option<Vec<Tag>>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkInsightsAccessScopeContent")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkInsightsAccessScopeContent {
     pub network_insights_access_scope_id: Option<String>,
     pub match_paths: Option<Vec<AccessScopePath>>,
@@ -2862,6 +3103,7 @@ pub struct NetworkInsightsAccessScopeContent {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AccessScopePath")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AccessScopePath {
     pub source: Option<PathStatement>,
     pub destination: Option<PathStatement>,
@@ -2870,6 +3112,7 @@ pub struct AccessScopePath {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PathStatement")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PathStatement {
     pub packet_header_statement: Option<PacketHeaderStatement>,
     pub resource_statement: Option<ResourceStatement>,
@@ -2877,6 +3120,7 @@ pub struct PathStatement {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PacketHeaderStatement")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PacketHeaderStatement {
     pub source_addresses: Option<Vec<String>>,
     pub destination_addresses: Option<Vec<String>>,
@@ -2889,6 +3133,7 @@ pub struct PacketHeaderStatement {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ResourceStatement")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ResourceStatement {
     pub resources: Option<Vec<String>>,
     pub resource_types: Option<Vec<String>>,
@@ -2896,15 +3141,18 @@ pub struct ResourceStatement {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ThroughResourcesStatement")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ThroughResourcesStatement {
     pub resource_statement: Option<ResourceStatement>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkInsightsPath")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkInsightsPath {
     pub network_insights_path_id: Option<String>,
     pub network_insights_path_arn: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub created_date: Option<::aws_smithy_types::DateTime>,
     pub source: Option<String>,
     pub destination: Option<String>,
@@ -2921,6 +3169,7 @@ pub struct NetworkInsightsPath {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PathFilter")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PathFilter {
     pub source_address: Option<String>,
     pub source_port_range: Option<FilterPortRange>,
@@ -2930,6 +3179,7 @@ pub struct PathFilter {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#FilterPortRange")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FilterPortRange {
     pub from_port: Option<i32>,
     pub to_port: Option<i32>,
@@ -2937,6 +3187,7 @@ pub struct FilterPortRange {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkInterface")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkInterface {
     pub association: Option<NetworkInterfaceAssociation>,
     pub attachment: Option<NetworkInterfaceAttachment>,
@@ -2974,6 +3225,7 @@ pub struct NetworkInterface {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkInterfaceAssociation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkInterfaceAssociation {
     pub allocation_id: Option<String>,
     pub association_id: Option<String>,
@@ -2986,7 +3238,9 @@ pub struct NetworkInterfaceAssociation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkInterfaceAttachment")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkInterfaceAttachment {
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub attach_time: Option<::aws_smithy_types::DateTime>,
     pub attachment_id: Option<String>,
     pub delete_on_termination: Option<bool>,
@@ -3001,6 +3255,7 @@ pub struct NetworkInterfaceAttachment {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AttachmentEnaSrdSpecification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AttachmentEnaSrdSpecification {
     pub ena_srd_enabled: Option<bool>,
     pub ena_srd_udp_specification: Option<AttachmentEnaSrdUdpSpecification>,
@@ -3008,12 +3263,14 @@ pub struct AttachmentEnaSrdSpecification {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AttachmentEnaSrdUdpSpecification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AttachmentEnaSrdUdpSpecification {
     pub ena_srd_udp_enabled: Option<bool>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ConnectionTrackingConfiguration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ConnectionTrackingConfiguration {
     pub tcp_established_timeout: Option<i32>,
     pub udp_stream_timeout: Option<i32>,
@@ -3022,6 +3279,7 @@ pub struct ConnectionTrackingConfiguration {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#GroupIdentifier")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct GroupIdentifier {
     pub group_id: Option<String>,
     pub group_name: Option<String>,
@@ -3029,6 +3287,7 @@ pub struct GroupIdentifier {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkInterfaceIpv6Address")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkInterfaceIpv6Address {
     pub ipv6_address: Option<String>,
     pub public_ipv6_dns_name: Option<String>,
@@ -3037,6 +3296,7 @@ pub struct NetworkInterfaceIpv6Address {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PublicIpDnsNameOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PublicIpDnsNameOptions {
     pub dns_hostname_type: Option<String>,
     pub public_ipv4_dns_name: Option<String>,
@@ -3046,6 +3306,7 @@ pub struct PublicIpDnsNameOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkInterfacePrivateIpAddress")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkInterfacePrivateIpAddress {
     pub association: Option<NetworkInterfaceAssociation>,
     pub primary: Option<bool>,
@@ -3055,12 +3316,14 @@ pub struct NetworkInterfacePrivateIpAddress {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Ipv6PrefixSpecification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ipv6PrefixSpecification {
     pub ipv6_prefix: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkInterfacePermission")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkInterfacePermission {
     pub network_interface_permission_id: Option<String>,
     pub network_interface_id: Option<String>,
@@ -3072,6 +3335,7 @@ pub struct NetworkInterfacePermission {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkInterfacePermissionState")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkInterfacePermissionState {
     pub state: Option<String>,
     pub status_message: Option<String>,
@@ -3079,6 +3343,7 @@ pub struct NetworkInterfacePermissionState {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PlacementGroup")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PlacementGroup {
     pub group_name: Option<String>,
     pub state: Option<String>,
@@ -3095,6 +3360,7 @@ pub struct PlacementGroup {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ReplaceRootVolumeTask")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ReplaceRootVolumeTask {
     pub replace_root_volume_task_id: Option<String>,
     pub instance_id: Option<String>,
@@ -3109,6 +3375,7 @@ pub struct ReplaceRootVolumeTask {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#RouteServer")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RouteServer {
     pub route_server_id: Option<String>,
     pub amazon_side_asn: Option<i64>,
@@ -3122,6 +3389,7 @@ pub struct RouteServer {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#RouteServerEndpoint")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RouteServerEndpoint {
     pub route_server_id: Option<String>,
     pub route_server_endpoint_id: Option<String>,
@@ -3136,6 +3404,7 @@ pub struct RouteServerEndpoint {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#RouteServerPeer")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RouteServerPeer {
     pub route_server_peer_id: Option<String>,
     pub route_server_endpoint_id: Option<String>,
@@ -3155,6 +3424,7 @@ pub struct RouteServerPeer {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#RouteServerBgpOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RouteServerBgpOptions {
     pub peer_asn: Option<i64>,
     pub peer_liveness_detection: Option<String>,
@@ -3162,18 +3432,21 @@ pub struct RouteServerBgpOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#RouteServerBgpStatus")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RouteServerBgpStatus {
     pub status: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#RouteServerBfdStatus")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RouteServerBfdStatus {
     pub status: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#RouteTable")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RouteTable {
     pub associations: Option<Vec<RouteTableAssociation>>,
     pub propagating_vgws: Option<Vec<PropagatingVgw>>,
@@ -3186,6 +3459,7 @@ pub struct RouteTable {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#RouteTableAssociation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RouteTableAssociation {
     pub main: Option<bool>,
     pub route_table_association_id: Option<String>,
@@ -3198,12 +3472,14 @@ pub struct RouteTableAssociation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PropagatingVgw")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PropagatingVgw {
     pub gateway_id: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Route")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Route {
     pub destination_cidr_block: Option<String>,
     pub destination_ipv6_cidr_block: Option<String>,
@@ -3227,6 +3503,7 @@ pub struct Route {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SecondaryNetwork")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SecondaryNetwork {
     pub secondary_network_id: Option<String>,
     pub secondary_network_arn: Option<String>,
@@ -3240,6 +3517,7 @@ pub struct SecondaryNetwork {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SecondaryNetworkIpv4CidrBlockAssociation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SecondaryNetworkIpv4CidrBlockAssociation {
     pub association_id: Option<String>,
     pub cidr_block: Option<String>,
@@ -3249,6 +3527,7 @@ pub struct SecondaryNetworkIpv4CidrBlockAssociation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SecondarySubnet")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SecondarySubnet {
     pub secondary_subnet_id: Option<String>,
     pub secondary_subnet_arn: Option<String>,
@@ -3265,6 +3544,7 @@ pub struct SecondarySubnet {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SecondarySubnetIpv4CidrBlockAssociation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SecondarySubnetIpv4CidrBlockAssociation {
     pub association_id: Option<String>,
     pub cidr_block: Option<String>,
@@ -3274,22 +3554,26 @@ pub struct SecondarySubnetIpv4CidrBlockAssociation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Snapshot")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CreateSnapshotOutput {
     pub owner_alias: Option<String>,
     pub outpost_arn: Option<String>,
     pub tags: Option<Vec<Tag>>,
     pub storage_tier: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub restore_expiry_time: Option<::aws_smithy_types::DateTime>,
     pub sse_type: Option<String>,
     pub availability_zone: Option<String>,
     pub transfer_type: Option<String>,
     pub completion_duration_minutes: Option<i32>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub completion_time: Option<::aws_smithy_types::DateTime>,
     pub full_snapshot_size_in_bytes: Option<i64>,
     pub snapshot_id: Option<String>,
     pub volume_id: Option<String>,
     pub state: Option<String>,
     pub state_message: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub start_time: Option<::aws_smithy_types::DateTime>,
     pub progress: Option<String>,
     pub owner_id: Option<String>,
@@ -3302,6 +3586,7 @@ pub struct CreateSnapshotOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SpotDatafeedSubscription")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SpotDatafeedSubscription {
     pub bucket: Option<String>,
     pub fault: Option<SpotInstanceStateFault>,
@@ -3312,6 +3597,7 @@ pub struct SpotDatafeedSubscription {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SpotInstanceStateFault")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SpotInstanceStateFault {
     pub code: Option<String>,
     pub message: Option<String>,
@@ -3319,6 +3605,7 @@ pub struct SpotInstanceStateFault {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SubnetCidrReservation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SubnetCidrReservation {
     pub subnet_cidr_reservation_id: Option<String>,
     pub subnet_id: Option<String>,
@@ -3331,6 +3618,7 @@ pub struct SubnetCidrReservation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TrafficMirrorFilter")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TrafficMirrorFilter {
     pub traffic_mirror_filter_id: Option<String>,
     pub ingress_filter_rules: Option<Vec<TrafficMirrorFilterRule>>,
@@ -3342,6 +3630,7 @@ pub struct TrafficMirrorFilter {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TrafficMirrorFilterRule")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TrafficMirrorFilterRule {
     pub traffic_mirror_filter_rule_id: Option<String>,
     pub traffic_mirror_filter_id: Option<String>,
@@ -3359,6 +3648,7 @@ pub struct TrafficMirrorFilterRule {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TrafficMirrorPortRange")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TrafficMirrorPortRange {
     pub from_port: Option<i32>,
     pub to_port: Option<i32>,
@@ -3373,6 +3663,7 @@ pub struct TrafficMirrorPortRangeRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TrafficMirrorSession")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TrafficMirrorSession {
     pub traffic_mirror_session_id: Option<String>,
     pub traffic_mirror_target_id: Option<String>,
@@ -3388,6 +3679,7 @@ pub struct TrafficMirrorSession {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TrafficMirrorTarget")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TrafficMirrorTarget {
     pub traffic_mirror_target_id: Option<String>,
     pub network_interface_id: Option<String>,
@@ -3401,12 +3693,14 @@ pub struct TrafficMirrorTarget {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGateway")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGateway {
     pub transit_gateway_id: Option<String>,
     pub transit_gateway_arn: Option<String>,
     pub state: Option<String>,
     pub owner_id: Option<String>,
     pub description: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub creation_time: Option<::aws_smithy_types::DateTime>,
     pub options: Option<TransitGatewayOptions>,
     pub tags: Option<Vec<Tag>>,
@@ -3414,6 +3708,7 @@ pub struct TransitGateway {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayOptions {
     pub amazon_side_asn: Option<i64>,
     pub transit_gateway_cidr_blocks: Option<Vec<String>>,
@@ -3431,6 +3726,7 @@ pub struct TransitGatewayOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#EncryptionSupport")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct EncryptionSupport {
     pub encryption_state: Option<String>,
     pub state_message: Option<String>,
@@ -3438,11 +3734,13 @@ pub struct EncryptionSupport {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayConnect")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayConnect {
     pub transit_gateway_attachment_id: Option<String>,
     pub transport_transit_gateway_attachment_id: Option<String>,
     pub transit_gateway_id: Option<String>,
     pub state: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub creation_time: Option<::aws_smithy_types::DateTime>,
     pub options: Option<TransitGatewayConnectOptions>,
     pub tags: Option<Vec<Tag>>,
@@ -3450,16 +3748,19 @@ pub struct TransitGatewayConnect {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayConnectOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayConnectOptions {
     pub protocol: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayConnectPeer")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayConnectPeer {
     pub transit_gateway_attachment_id: Option<String>,
     pub transit_gateway_connect_peer_id: Option<String>,
     pub state: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub creation_time: Option<::aws_smithy_types::DateTime>,
     pub connect_peer_configuration: Option<TransitGatewayConnectPeerConfiguration>,
     pub tags: Option<Vec<Tag>>,
@@ -3467,6 +3768,7 @@ pub struct TransitGatewayConnectPeer {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayConnectPeerConfiguration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayConnectPeerConfiguration {
     pub transit_gateway_address: Option<String>,
     pub peer_address: Option<String>,
@@ -3477,6 +3779,7 @@ pub struct TransitGatewayConnectPeerConfiguration {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayAttachmentBgpConfiguration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayAttachmentBgpConfiguration {
     pub transit_gateway_asn: Option<i64>,
     pub peer_asn: Option<i64>,
@@ -3487,28 +3790,34 @@ pub struct TransitGatewayAttachmentBgpConfiguration {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayMeteringPolicy")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayMeteringPolicy {
     pub transit_gateway_metering_policy_id: Option<String>,
     pub transit_gateway_id: Option<String>,
     pub middlebox_attachment_ids: Option<Vec<String>>,
     pub state: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub update_effective_at: Option<::aws_smithy_types::DateTime>,
     pub tags: Option<Vec<Tag>>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayMeteringPolicyEntry")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayMeteringPolicyEntry {
     pub policy_rule_number: Option<String>,
     pub metered_account: Option<String>,
     pub state: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub updated_at: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub update_effective_at: Option<::aws_smithy_types::DateTime>,
     pub metering_policy_rule: Option<TransitGatewayMeteringPolicyRule>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayMeteringPolicyRule")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayMeteringPolicyRule {
     pub source_transit_gateway_attachment_id: Option<String>,
     pub source_transit_gateway_attachment_type: Option<String>,
@@ -3544,10 +3853,12 @@ pub struct TransitGatewayMulticastDomainOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayPolicyTable")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayPolicyTable {
     pub transit_gateway_policy_table_id: Option<String>,
     pub transit_gateway_id: Option<String>,
     pub state: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub creation_time: Option<::aws_smithy_types::DateTime>,
     pub tags: Option<Vec<Tag>>,
 }
@@ -3599,6 +3910,7 @@ pub struct TransitGatewayPolicyRuleMetaData {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayPrefixListReference")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayPrefixListReference {
     pub transit_gateway_route_table_id: Option<String>,
     pub prefix_list_id: Option<String>,
@@ -3610,6 +3922,7 @@ pub struct TransitGatewayPrefixListReference {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayPrefixListAttachment")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayPrefixListAttachment {
     pub transit_gateway_attachment_id: Option<String>,
     pub resource_type: Option<String>,
@@ -3637,18 +3950,21 @@ pub struct TransitGatewayRouteAttachment {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayRouteTable")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayRouteTable {
     pub transit_gateway_route_table_id: Option<String>,
     pub transit_gateway_id: Option<String>,
     pub state: Option<String>,
     pub default_association_route_table: Option<bool>,
     pub default_propagation_route_table: Option<bool>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub creation_time: Option<::aws_smithy_types::DateTime>,
     pub tags: Option<Vec<Tag>>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayRouteTableAnnouncement")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayRouteTableAnnouncement {
     pub transit_gateway_route_table_announcement_id: Option<String>,
     pub transit_gateway_id: Option<String>,
@@ -3659,6 +3975,7 @@ pub struct TransitGatewayRouteTableAnnouncement {
     pub announcement_direction: Option<String>,
     pub transit_gateway_route_table_id: Option<String>,
     pub state: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub creation_time: Option<::aws_smithy_types::DateTime>,
     pub tags: Option<Vec<Tag>>,
 }
@@ -3672,6 +3989,7 @@ pub struct VerifiedAccessSseSpecificationRequest {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessEndpoint")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessEndpoint {
     pub verified_access_instance_id: Option<String>,
     pub verified_access_group_id: Option<String>,
@@ -3698,6 +4016,7 @@ pub struct VerifiedAccessEndpoint {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessEndpointLoadBalancerOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessEndpointLoadBalancerOptions {
     pub protocol: Option<String>,
     pub port: Option<i32>,
@@ -3708,6 +4027,7 @@ pub struct VerifiedAccessEndpointLoadBalancerOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessEndpointPortRange")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessEndpointPortRange {
     pub from_port: Option<i32>,
     pub to_port: Option<i32>,
@@ -3715,6 +4035,7 @@ pub struct VerifiedAccessEndpointPortRange {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessEndpointEniOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessEndpointEniOptions {
     pub network_interface_id: Option<String>,
     pub protocol: Option<String>,
@@ -3724,6 +4045,7 @@ pub struct VerifiedAccessEndpointEniOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessEndpointStatus")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessEndpointStatus {
     pub code: Option<String>,
     pub message: Option<String>,
@@ -3731,6 +4053,7 @@ pub struct VerifiedAccessEndpointStatus {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessEndpointRdsOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessEndpointRdsOptions {
     pub protocol: Option<String>,
     pub port: Option<i32>,
@@ -3743,6 +4066,7 @@ pub struct VerifiedAccessEndpointRdsOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessEndpointCidrOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessEndpointCidrOptions {
     pub cidr: Option<String>,
     pub port_ranges: Option<Vec<VerifiedAccessEndpointPortRange>>,
@@ -3752,6 +4076,7 @@ pub struct VerifiedAccessEndpointCidrOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessGroup")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessGroup {
     pub verified_access_group_id: Option<String>,
     pub verified_access_instance_id: Option<String>,
@@ -3767,14 +4092,18 @@ pub struct VerifiedAccessGroup {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpcBlockPublicAccessExclusion")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcBlockPublicAccessExclusion {
     pub exclusion_id: Option<String>,
     pub internet_gateway_exclusion_mode: Option<String>,
     pub resource_arn: Option<String>,
     pub state: Option<String>,
     pub reason: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub creation_timestamp: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub last_update_timestamp: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub deletion_timestamp: Option<::aws_smithy_types::DateTime>,
     pub tags: Option<Vec<Tag>>,
 }
@@ -3798,6 +4127,7 @@ pub struct SubnetConfiguration {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpcEndpoint")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcEndpoint {
     pub vpc_endpoint_id: Option<String>,
     pub vpc_endpoint_type: Option<String>,
@@ -3814,6 +4144,7 @@ pub struct VpcEndpoint {
     pub requester_managed: Option<bool>,
     pub network_interface_ids: Option<Vec<String>>,
     pub dns_entries: Option<Vec<DnsEntry>>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub creation_timestamp: Option<::aws_smithy_types::DateTime>,
     pub tags: Option<Vec<Tag>>,
     pub owner_id: Option<String>,
@@ -3829,6 +4160,7 @@ pub struct VpcEndpoint {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SecurityGroupIdentifier")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SecurityGroupIdentifier {
     pub group_id: Option<String>,
     pub group_name: Option<String>,
@@ -3836,6 +4168,7 @@ pub struct SecurityGroupIdentifier {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#DnsOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DnsOptions {
     pub dns_record_ip_type: Option<String>,
     pub private_dns_only_for_inbound_resolver_endpoint: Option<bool>,
@@ -3845,6 +4178,7 @@ pub struct DnsOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#DnsEntry")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DnsEntry {
     pub dns_name: Option<String>,
     pub hosted_zone_id: Option<String>,
@@ -3852,6 +4186,7 @@ pub struct DnsEntry {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LastError")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LastError {
     pub message: Option<String>,
     pub code: Option<String>,
@@ -3859,6 +4194,7 @@ pub struct LastError {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SubnetIpPrefixes")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SubnetIpPrefixes {
     pub subnet_id: Option<String>,
     pub ip_prefixes: Option<Vec<String>>,
@@ -3866,6 +4202,7 @@ pub struct SubnetIpPrefixes {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PayerResponsibilityEntry")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PayerResponsibilityEntry {
     pub scope: Option<String>,
     pub payer_responsibility_type: Option<String>,
@@ -3873,6 +4210,7 @@ pub struct PayerResponsibilityEntry {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ConnectionNotification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ConnectionNotification {
     pub connection_notification_id: Option<String>,
     pub service_id: Option<String>,
@@ -3886,6 +4224,7 @@ pub struct ConnectionNotification {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ServiceConfiguration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ServiceConfiguration {
     pub service_type: Option<Vec<ServiceTypeDetail>>,
     pub service_id: Option<String>,
@@ -3909,12 +4248,14 @@ pub struct ServiceConfiguration {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ServiceTypeDetail")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ServiceTypeDetail {
     pub service_type: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PrivateDnsNameConfiguration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PrivateDnsNameConfiguration {
     pub state: Option<String>,
     pub r#type: Option<String>,
@@ -3924,6 +4265,7 @@ pub struct PrivateDnsNameConfiguration {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SupportedRegionDetail")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SupportedRegionDetail {
     pub region: Option<String>,
     pub service_state: Option<String>,
@@ -3931,6 +4273,7 @@ pub struct SupportedRegionDetail {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpnConcentrator")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpnConcentrator {
     pub vpn_concentrator_id: Option<String>,
     pub state: Option<String>,
@@ -4001,6 +4344,7 @@ pub struct CloudWatchLogOptionsSpecification {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpnConnection")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpnConnection {
     pub category: Option<String>,
     pub transit_gateway_id: Option<String>,
@@ -4023,6 +4367,7 @@ pub struct VpnConnection {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpnConnectionOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpnConnectionOptions {
     pub enable_acceleration: Option<bool>,
     pub static_routes_only: Option<bool>,
@@ -4039,6 +4384,7 @@ pub struct VpnConnectionOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TunnelOption")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TunnelOption {
     pub outside_ip_address: Option<String>,
     pub tunnel_inside_cidr: Option<String>,
@@ -4065,54 +4411,63 @@ pub struct TunnelOption {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Phase1EncryptionAlgorithmsListValue")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Phase1EncryptionAlgorithmsListValue {
     pub value: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Phase2EncryptionAlgorithmsListValue")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Phase2EncryptionAlgorithmsListValue {
     pub value: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Phase1IntegrityAlgorithmsListValue")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Phase1IntegrityAlgorithmsListValue {
     pub value: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Phase2IntegrityAlgorithmsListValue")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Phase2IntegrityAlgorithmsListValue {
     pub value: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Phase1DHGroupNumbersListValue")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Phase1DHGroupNumbersListValue {
     pub value: Option<i32>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Phase2DHGroupNumbersListValue")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Phase2DHGroupNumbersListValue {
     pub value: Option<i32>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IKEVersionsListValue")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IKEVersionsListValue {
     pub value: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpnTunnelLogOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpnTunnelLogOptions {
     pub cloud_watch_log_options: Option<CloudWatchLogOptions>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CloudWatchLogOptions")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CloudWatchLogOptions {
     pub log_enabled: Option<bool>,
     pub log_group_arn: Option<String>,
@@ -4124,6 +4479,7 @@ pub struct CloudWatchLogOptions {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpnStaticRoute")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpnStaticRoute {
     pub destination_cidr_block: Option<String>,
     pub source: Option<String>,
@@ -4132,8 +4488,10 @@ pub struct VpnStaticRoute {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VgwTelemetry")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VgwTelemetry {
     pub accepted_route_count: Option<i32>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub last_status_change: Option<::aws_smithy_types::DateTime>,
     pub outside_ip_address: Option<String>,
     pub status: Option<String>,
@@ -4143,6 +4501,7 @@ pub struct VgwTelemetry {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VpnGateway")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpnGateway {
     pub amazon_side_asn: Option<i64>,
     pub tags: Option<Vec<Tag>>,
@@ -4155,6 +4514,7 @@ pub struct VpnGateway {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Byoasn")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Byoasn {
     pub asn: Option<String>,
     pub ipam_id: Option<String>,
@@ -4164,6 +4524,7 @@ pub struct Byoasn {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamPoolCidr")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamPoolCidr {
     pub cidr: Option<String>,
     pub state: Option<String>,
@@ -4174,6 +4535,7 @@ pub struct IpamPoolCidr {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#IpamPoolCidrFailureReason")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IpamPoolCidrFailureReason {
     pub code: Option<String>,
     pub message: Option<String>,
@@ -4262,14 +4624,18 @@ pub struct CapacityBlockExtension {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#CapacityBlock")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CapacityBlock {
     pub capacity_block_id: Option<String>,
     pub ultraserver_type: Option<String>,
     pub availability_zone: Option<String>,
     pub availability_zone_id: Option<String>,
     pub capacity_reservation_ids: Option<Vec<String>>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub start_date: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub end_date: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_date: Option<::aws_smithy_types::DateTime>,
     pub state: Option<String>,
     pub tags: Option<Vec<Tag>>,
@@ -4284,6 +4650,7 @@ pub struct ClientVpnConnectionStatus {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ConversionTask")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ConversionTask {
     pub conversion_task_id: Option<String>,
     pub expiration_time: Option<String>,
@@ -4296,6 +4663,7 @@ pub struct ConversionTask {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ImportInstanceTaskDetails")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImportInstanceTaskDetails {
     pub description: Option<String>,
     pub instance_id: Option<String>,
@@ -4305,6 +4673,7 @@ pub struct ImportInstanceTaskDetails {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ImportInstanceVolumeDetailItem")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImportInstanceVolumeDetailItem {
     pub availability_zone: Option<String>,
     pub availability_zone_id: Option<String>,
@@ -4318,6 +4687,7 @@ pub struct ImportInstanceVolumeDetailItem {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#DiskImageDescription")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DiskImageDescription {
     pub checksum: Option<String>,
     pub format: Option<String>,
@@ -4327,6 +4697,7 @@ pub struct DiskImageDescription {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#DiskImageVolumeDescription")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DiskImageVolumeDescription {
     pub id: Option<String>,
     pub size: Option<i64>,
@@ -4334,6 +4705,7 @@ pub struct DiskImageVolumeDescription {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ImportVolumeTaskDetails")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImportVolumeTaskDetails {
     pub availability_zone: Option<String>,
     pub availability_zone_id: Option<String>,
@@ -4345,6 +4717,7 @@ pub struct ImportVolumeTaskDetails {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ExportTaskS3Location")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ExportTaskS3Location {
     pub s3_bucket: Option<String>,
     pub s3_prefix: Option<String>,
@@ -4352,12 +4725,14 @@ pub struct ExportTaskS3Location {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#FastLaunchSnapshotConfigurationResponse")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FastLaunchSnapshotConfigurationResponse {
     pub target_resource_count: Option<i32>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#FastLaunchLaunchTemplateSpecificationResponse")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FastLaunchLaunchTemplateSpecificationResponse {
     pub launch_template_id: Option<String>,
     pub launch_template_name: Option<String>,
@@ -4393,6 +4768,7 @@ pub struct FpgaImageAttribute {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LoadPermission")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LoadPermission {
     pub user_id: Option<String>,
     pub group: Option<String>,
@@ -4400,6 +4776,7 @@ pub struct LoadPermission {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ProductCode")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ProductCode {
     pub product_code_id: Option<String>,
     pub product_code_type: Option<String>,
@@ -4416,16 +4793,20 @@ pub struct LaunchPermission {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ImageWatermark")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImageWatermark {
     pub watermark_key: Option<String>,
     pub source_image_region: Option<String>,
     pub source_image_id: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub source_image_creation_time: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub watermark_creation_time: Option<::aws_smithy_types::DateTime>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SnapshotDetail")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SnapshotDetail {
     pub description: Option<String>,
     pub device_name: Option<String>,
@@ -4441,6 +4822,7 @@ pub struct SnapshotDetail {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#UserBucketDetails")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct UserBucketDetails {
     pub s3_bucket: Option<String>,
     pub s3_key: Option<String>,
@@ -4448,12 +4830,14 @@ pub struct UserBucketDetails {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ImportImageLicenseConfigurationResponse")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ImportImageLicenseConfigurationResponse {
     pub license_configuration_arn: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SnapshotTaskDetail")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SnapshotTaskDetail {
     pub description: Option<String>,
     pub disk_image_size: Option<f64>,
@@ -4814,6 +5198,7 @@ pub struct InstanceStatusEvent {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkInsightsAccessScopeAnalysis")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkInsightsAccessScopeAnalysis {
     pub network_insights_access_scope_analysis_id: Option<String>,
     pub network_insights_access_scope_analysis_arn: Option<String>,
@@ -4821,7 +5206,9 @@ pub struct NetworkInsightsAccessScopeAnalysis {
     pub status: Option<String>,
     pub status_message: Option<String>,
     pub warning_message: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub start_date: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub end_date: Option<::aws_smithy_types::DateTime>,
     pub findings_found: Option<String>,
     pub analyzed_eni_count: Option<i32>,
@@ -4830,6 +5217,7 @@ pub struct NetworkInsightsAccessScopeAnalysis {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#NetworkInsightsAnalysis")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NetworkInsightsAnalysis {
     pub network_insights_analysis_id: Option<String>,
     pub network_insights_analysis_arn: Option<String>,
@@ -4837,6 +5225,7 @@ pub struct NetworkInsightsAnalysis {
     pub additional_accounts: Option<Vec<String>>,
     pub filter_in_arns: Option<Vec<String>>,
     pub filter_out_arns: Option<Vec<String>>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub start_date: Option<::aws_smithy_types::DateTime>,
     pub status: Option<String>,
     pub status_message: Option<String>,
@@ -4852,6 +5241,7 @@ pub struct NetworkInsightsAnalysis {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#PathComponent")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PathComponent {
     pub sequence_number: Option<i32>,
     pub acl_rule: Option<AnalysisAclRule>,
@@ -4878,6 +5268,7 @@ pub struct PathComponent {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AnalysisAclRule")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AnalysisAclRule {
     pub cidr: Option<String>,
     pub egress: Option<bool>,
@@ -4889,6 +5280,7 @@ pub struct AnalysisAclRule {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AnalysisComponent")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AnalysisComponent {
     pub id: Option<String>,
     pub arn: Option<String>,
@@ -4897,6 +5289,7 @@ pub struct AnalysisComponent {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AnalysisPacketHeader")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AnalysisPacketHeader {
     pub destination_addresses: Option<Vec<String>>,
     pub destination_port_ranges: Option<Vec<PortRange>>,
@@ -4907,6 +5300,7 @@ pub struct AnalysisPacketHeader {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AnalysisRouteTableRoute")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AnalysisRouteTableRoute {
     pub destination_cidr: Option<String>,
     pub destination_prefix_list_id: Option<String>,
@@ -4926,6 +5320,7 @@ pub struct AnalysisRouteTableRoute {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AnalysisSecurityGroupRule")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AnalysisSecurityGroupRule {
     pub cidr: Option<String>,
     pub direction: Option<String>,
@@ -4937,6 +5332,7 @@ pub struct AnalysisSecurityGroupRule {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AdditionalDetail")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AdditionalDetail {
     pub additional_detail_type: Option<String>,
     pub component: Option<AnalysisComponent>,
@@ -4950,6 +5346,7 @@ pub struct AdditionalDetail {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#RuleOption")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RuleOption {
     pub keyword: Option<String>,
     pub settings: Option<Vec<String>>,
@@ -4957,6 +5354,7 @@ pub struct RuleOption {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#RuleGroupTypePair")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RuleGroupTypePair {
     pub rule_group_arn: Option<String>,
     pub rule_group_type: Option<String>,
@@ -4964,6 +5362,7 @@ pub struct RuleGroupTypePair {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#RuleGroupRuleOptionsPair")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RuleGroupRuleOptionsPair {
     pub rule_group_arn: Option<String>,
     pub rule_options: Option<Vec<RuleOption>>,
@@ -4971,6 +5370,7 @@ pub struct RuleGroupRuleOptionsPair {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TransitGatewayRouteTableRoute")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransitGatewayRouteTableRoute {
     pub destination_cidr: Option<String>,
     pub state: Option<String>,
@@ -4983,6 +5383,7 @@ pub struct TransitGatewayRouteTableRoute {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AnalysisTransitGatewayPolicyTableEntry")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AnalysisTransitGatewayPolicyTableEntry {
     pub rule_number: Option<i32>,
     pub protocol: Option<String>,
@@ -4995,6 +5396,7 @@ pub struct AnalysisTransitGatewayPolicyTableEntry {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Explanation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Explanation {
     pub acl: Option<AnalysisComponent>,
     pub acl_rule: Option<AnalysisAclRule>,
@@ -5056,6 +5458,7 @@ pub struct Explanation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AnalysisLoadBalancerListener")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AnalysisLoadBalancerListener {
     pub load_balancer_port: Option<i32>,
     pub instance_port: Option<i32>,
@@ -5063,6 +5466,7 @@ pub struct AnalysisLoadBalancerListener {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AnalysisLoadBalancerTarget")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AnalysisLoadBalancerTarget {
     pub address: Option<String>,
     pub availability_zone: Option<String>,
@@ -5073,6 +5477,7 @@ pub struct AnalysisLoadBalancerTarget {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#FirewallStatelessRule")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FirewallStatelessRule {
     pub rule_group_arn: Option<String>,
     pub sources: Option<Vec<String>>,
@@ -5086,6 +5491,7 @@ pub struct FirewallStatelessRule {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#FirewallStatefulRule")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FirewallStatefulRule {
     pub rule_group_arn: Option<String>,
     pub sources: Option<Vec<String>>,
@@ -5099,6 +5505,7 @@ pub struct FirewallStatefulRule {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#AlternatePathHint")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AlternatePathHint {
     pub component_id: Option<String>,
     pub component_arn: Option<String>,
@@ -5115,6 +5522,7 @@ pub struct PublicIpv4PoolRange {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#RecurringCharge")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RecurringCharge {
     pub amount: Option<f64>,
     pub frequency: Option<String>,
@@ -5122,6 +5530,7 @@ pub struct RecurringCharge {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ReservedInstancesConfiguration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ReservedInstancesConfiguration {
     pub availability_zone: Option<String>,
     pub instance_count: Option<i32>,
@@ -5133,6 +5542,7 @@ pub struct ReservedInstancesConfiguration {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ScheduledInstanceRecurrence")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ScheduledInstanceRecurrence {
     pub frequency: Option<String>,
     pub interval: Option<i32>,
@@ -5170,6 +5580,7 @@ pub struct CreateVolumePermission {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SpotFleetRequestConfigData")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SpotFleetRequestConfigData {
     pub allocation_strategy: Option<String>,
     pub on_demand_allocation_strategy: Option<String>,
@@ -5188,7 +5599,9 @@ pub struct SpotFleetRequestConfigData {
     pub spot_max_total_price: Option<String>,
     pub terminate_instances_with_expiration: Option<bool>,
     pub r#type: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub valid_from: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub valid_until: Option<::aws_smithy_types::DateTime>,
     pub replace_unhealthy_instances: Option<bool>,
     pub instance_interruption_behavior: Option<String>,
@@ -5201,12 +5614,14 @@ pub struct SpotFleetRequestConfigData {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SpotMaintenanceStrategies")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SpotMaintenanceStrategies {
     pub capacity_rebalance: Option<SpotCapacityRebalance>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SpotCapacityRebalance")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SpotCapacityRebalance {
     pub replacement_strategy: Option<String>,
     pub termination_delay: Option<i32>,
@@ -5214,6 +5629,7 @@ pub struct SpotCapacityRebalance {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SpotFleetLaunchSpecification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SpotFleetLaunchSpecification {
     pub addressing_type: Option<String>,
     pub block_device_mappings: Option<Vec<BlockDeviceMapping>>,
@@ -5238,12 +5654,14 @@ pub struct SpotFleetLaunchSpecification {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SpotFleetMonitoring")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SpotFleetMonitoring {
     pub enabled: Option<bool>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#InstanceNetworkInterfaceSpecification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceNetworkInterfaceSpecification {
     pub associate_public_ip_address: Option<bool>,
     pub delete_on_termination: Option<bool>,
@@ -5272,6 +5690,7 @@ pub struct InstanceNetworkInterfaceSpecification {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SpotPlacement")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SpotPlacement {
     pub availability_zone: Option<String>,
     pub group_name: Option<String>,
@@ -5281,6 +5700,7 @@ pub struct SpotPlacement {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SpotFleetTagSpecification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SpotFleetTagSpecification {
     pub resource_type: Option<String>,
     pub tags: Option<Vec<Tag>>,
@@ -5288,6 +5708,7 @@ pub struct SpotFleetTagSpecification {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateConfig")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateConfig {
     pub launch_template_specification: Option<FleetLaunchTemplateSpecification>,
     pub overrides: Option<Vec<LaunchTemplateOverrides>>,
@@ -5295,6 +5716,7 @@ pub struct LaunchTemplateConfig {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchTemplateOverrides")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchTemplateOverrides {
     pub instance_type: Option<String>,
     pub spot_price: Option<String>,
@@ -5308,6 +5730,7 @@ pub struct LaunchTemplateOverrides {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LoadBalancersConfig")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LoadBalancersConfig {
     pub classic_load_balancers_config: Option<ClassicLoadBalancersConfig>,
     pub target_groups_config: Option<TargetGroupsConfig>,
@@ -5315,34 +5738,40 @@ pub struct LoadBalancersConfig {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ClassicLoadBalancersConfig")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClassicLoadBalancersConfig {
     pub classic_load_balancers: Option<Vec<ClassicLoadBalancer>>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#ClassicLoadBalancer")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ClassicLoadBalancer {
     pub name: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TargetGroupsConfig")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TargetGroupsConfig {
     pub target_groups: Option<Vec<TargetGroup>>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#TargetGroup")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TargetGroup {
     pub arn: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SpotInstanceRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SpotInstanceRequest {
     pub actual_block_hourly_price: Option<String>,
     pub availability_zone_group: Option<String>,
     pub block_duration_minutes: Option<i32>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_time: Option<::aws_smithy_types::DateTime>,
     pub fault: Option<SpotInstanceStateFault>,
     pub instance_id: Option<String>,
@@ -5357,13 +5786,16 @@ pub struct SpotInstanceRequest {
     pub status: Option<SpotInstanceStatus>,
     pub tags: Option<Vec<Tag>>,
     pub r#type: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub valid_from: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub valid_until: Option<::aws_smithy_types::DateTime>,
     pub instance_interruption_behavior: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#LaunchSpecification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LaunchSpecification {
     pub user_data: Option<String>,
     pub addressing_type: Option<String>,
@@ -5384,15 +5816,18 @@ pub struct LaunchSpecification {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#RunInstancesMonitoringEnabled")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RunInstancesMonitoringEnabled {
     pub enabled: bool,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#SpotInstanceStatus")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SpotInstanceStatus {
     pub code: Option<String>,
     pub message: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub update_time: Option<::aws_smithy_types::DateTime>,
 }
 
@@ -5405,6 +5840,7 @@ pub struct VerifiedAccessInstanceLoggingConfiguration {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessLogs")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessLogs {
     pub s3: Option<VerifiedAccessLogS3Destination>,
     pub cloud_watch_logs: Option<VerifiedAccessLogCloudWatchLogsDestination>,
@@ -5415,6 +5851,7 @@ pub struct VerifiedAccessLogs {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessLogS3Destination")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessLogS3Destination {
     pub enabled: Option<bool>,
     pub delivery_status: Option<VerifiedAccessLogDeliveryStatus>,
@@ -5425,6 +5862,7 @@ pub struct VerifiedAccessLogS3Destination {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessLogDeliveryStatus")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessLogDeliveryStatus {
     pub code: Option<String>,
     pub message: Option<String>,
@@ -5432,6 +5870,7 @@ pub struct VerifiedAccessLogDeliveryStatus {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessLogCloudWatchLogsDestination")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessLogCloudWatchLogsDestination {
     pub enabled: Option<bool>,
     pub delivery_status: Option<VerifiedAccessLogDeliveryStatus>,
@@ -5440,6 +5879,7 @@ pub struct VerifiedAccessLogCloudWatchLogsDestination {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VerifiedAccessLogKinesisDataFirehoseDestination")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VerifiedAccessLogKinesisDataFirehoseDestination {
     pub enabled: Option<bool>,
     pub delivery_status: Option<VerifiedAccessLogDeliveryStatus>,
@@ -5448,6 +5888,7 @@ pub struct VerifiedAccessLogKinesisDataFirehoseDestination {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#VolumeModification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VolumeModification {
     pub volume_id: Option<String>,
     pub modification_state: Option<String>,
@@ -5463,7 +5904,9 @@ pub struct VolumeModification {
     pub original_throughput: Option<i32>,
     pub original_multi_attach_enabled: Option<bool>,
     pub progress: Option<i64>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub start_time: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub end_time: Option<::aws_smithy_types::DateTime>,
     pub operator: Option<OperatorResponse>,
 }

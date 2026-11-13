@@ -364,6 +364,7 @@ pub const RUN_INSTANCES_TAGGABLE_RESOURCES: &[&str] = &[
 /// "0 (pending), 16 (running), 32 (shutting-down), 48 (terminated), 64
 /// (stopping), and 80 (stopped)".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum InstanceStateName {
     #[default]
     Pending,
@@ -417,8 +418,10 @@ impl InstanceStateName {
 /// A state change the CLOCK owes an instance: the state it moves to, and the
 /// instant from which that move is due.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PendingTransition {
     pub to: InstanceStateName,
+    #[serde(with = "::service_common::persist::instant")]
     pub due_at: Instant,
 }
 
@@ -480,6 +483,8 @@ pub const DEFAULT_DISABLE_API_STOP: bool = false;
 
 /// One stored EC2 instance.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct InstanceRecord {
     pub instance_id: String,
     pub reservation_id: String,
@@ -575,6 +580,7 @@ pub struct InstanceRecord {
 
 /// One stored reservation: the unit of state one `RunInstances` call creates.
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ReservationRecord {
     pub reservation_id: String,
     pub owner_id: String,
@@ -1214,6 +1220,7 @@ pub const BLOCK_PUBLIC_ACCESS_OFF: &str = "off";
 
 /// Per-service state for com-amazonaws-ec2-amazonec2. A handler reaches it through [`service_state`].
 #[derive(Debug)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ComAmazonawsEc2Amazonec2State {
     /// Every Traffic Mirror filter the account holds, by `TrafficMirrorFilterId`, as the
     /// modelled [`crate::ops::types::TrafficMirrorFilter`] shape itself — so a member a
@@ -1337,6 +1344,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// [`PendingTransition`]. The due instant is recorded rather than slept for, and
     /// [`Self::materialize_due_transitions`] applies it once the clock has passed it; a VPC
     /// AWS returns ready (the account's default VPC) never has an entry here.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub vpc_available_at: BTreeMap<String, Instant>,
     /// The per-VPC attributes `DescribeVpcAttribute` reports and `ModifyVpcAttribute`
     /// sets, by `VpcId`.
@@ -1465,6 +1473,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// here keeps the stored group the modelled shape every reader answers with. A group a
     /// writer stored ready carries no entry. [`Self::materialize_due_transitions`] is the one
     /// place an entry is applied and dropped.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub local_gateway_virtual_interface_group_available_at: BTreeMap<String, Instant>,
     /// Every local gateway virtual interface the account holds, by
     /// `LocalGatewayVirtualInterfaceId`, as the modelled
@@ -1489,6 +1498,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// state falls due, and holding the instant here keeps the stored interface the modelled
     /// shape every reader answers with. An interface a writer stored ready carries no entry.
     /// [`Self::materialize_due_transitions`] is the one place an entry is applied and dropped.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub local_gateway_virtual_interface_available_at: BTreeMap<String, Instant>,
     /// Every local gateway the account holds, by `LocalGatewayId`, as the modelled
     /// [`crate::ops::types::LocalGateway`] shape itself — so a member a writer sets
@@ -1566,6 +1576,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// ([`client_vpn_duplicate_route`]) rather than a second route.
     /// [`ComAmazonawsEc2Amazonec2State::insert_client_vpn_route`] is the one way a route is
     /// stored.
+    #[serde(with = "::service_common::persist::entries")]
     pub client_vpn_routes: BTreeMap<ClientVpnRouteKey, ClientVpnRouteRecord>,
     /// A `CreateClientVpnRoute` `ClientToken` and the route that request added, so a repeat
     /// of the same request answers with that route instead of refusing it as a duplicate —
@@ -1735,6 +1746,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// a default VPC's default subnets are ready too; the entries are the VLAN subnets
     /// Amazon EVS provisions into this account as part of an environment it is still
     /// building.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub subnet_available_at: BTreeMap<String, Instant>,
     /// When each subnet's IPv6 CIDR block association moves `associating` ->
     /// `associated`, for the subnets that have an association still on its way.
@@ -1746,6 +1758,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// anybody calls again. Keyed by `SubnetId` — "you can only associate a single IPv6
     /// CIDR block with your subnet" (`AssociateSubnetCidrBlock`), so one subnet has at
     /// most one such move owed, and [`Self::remove_subnet`] drops it with the subnet.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub subnet_ipv6_associated_at: BTreeMap<String, Instant>,
     /// When each subnet IPv6 CIDR block association that is on its way OUT reaches the
     /// terminal [`CIDR_BLOCK_STATE_DISASSOCIATED`], for the associations that have such a
@@ -1759,6 +1772,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// what [`Self::associate_subnet_ipv6_cidr_block`] mints out of the store's own counter,
     /// so one entry names one association whichever subnet holds it;
     /// [`Self::remove_subnet`] drops the entries of the associations that go with the subnet.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub subnet_ipv6_disassociated_at: BTreeMap<String, Instant>,
     /// Every subnet CIDR reservation the account holds, by `SubnetCidrReservationId`, as
     /// the modelled [`SubnetCidrReservation`] shape itself — so a member a writer sets
@@ -1780,6 +1794,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// reason and on the same clock: `CreateCarrierGateway` answers a gateway in the
     /// non-terminal `pending` state, so the clock owes it `available`
     /// [`TRANSITION_DELAY`] later whether or not anybody calls again.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub carrier_gateway_available_at: BTreeMap<String, Instant>,
     /// A `CreateCarrierGateway` `ClientToken` and the carrier gateway id it minted, so a
     /// repeat of the same request answers with that gateway instead of creating a second
@@ -1931,6 +1946,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// A removal rather than a further stored status, for the reason
     /// [`Self::begin_verified_access_endpoint_deletion`] gives: a deleted endpoint is one
     /// `DescribeVerifiedAccessEndpoints` stops carrying.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub verified_access_endpoint_delete_at: BTreeMap<String, Instant>,
     /// A `DeleteVerifiedAccessEndpoint` `ClientToken` and the endpoint that call answered,
     /// newest LAST, so a retry of the same delete answers what the first one answered instead of
@@ -2052,6 +2068,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// [`TRANSITION_DELAY`]: a permission is recorded `pending` and the clock owes it
     /// `granted` whether or not anybody calls again.
     /// [`Self::materialize_due_transitions`] applies it.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub network_interface_permission_granted_at: BTreeMap<String, Instant>,
     /// Every association between one of the account's instances and an IAM instance profile,
     /// by `IamInstanceProfileAssociationId`, as the modelled
@@ -2074,6 +2091,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// the same [`TRANSITION_DELAY`]: an `associating` association becomes `associated`, and
     /// a `disassociating` one is removed, whether or not anybody calls again.
     /// [`Self::materialize_due_transitions`] applies it.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub iam_instance_profile_association_due_at: BTreeMap<String, Instant>,
     /// Every security group rule the account holds, by `SecurityGroupRuleId`.
     ///
@@ -2119,6 +2137,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// that version instead of creating a second one — and a token reused against ANOTHER
     /// template never answers with this one's version. Cleared with the template a delete
     /// removes, so the token cannot name a version that is gone.
+    #[serde(with = "::service_common::persist::entries")]
     pub launch_template_version_client_tokens: HashMap<(String, String), i64>,
     /// Monotonic source of generated resource-id suffixes, so an id is unique within a
     /// run and deterministic across runs.
@@ -2234,6 +2253,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// the same request answers with that reservation instead of reserving capacity twice —
     /// and the same token signed for ANOTHER Region is a different request rather than a
     /// replay of this one, an idempotency key being scoped to one Region.
+    #[serde(with = "::service_common::persist::entries")]
     pub capacity_reservation_client_tokens: HashMap<(String, String), String>,
     /// A `MoveCapacityReservationInstances` `ClientToken` and the move it made
     /// ([`CapacityReservationInstanceMove`]), keyed by the Region the move was signed for
@@ -2262,6 +2282,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// (`CreateCapacityReservationCancellationQuoteRequest$ClientToken`). Region-scoped like
     /// the reservation create's own token map above, an idempotency key belonging to one
     /// Region.
+    #[serde(with = "::service_common::persist::entries")]
     pub capacity_reservation_cancellation_quote_client_tokens: HashMap<(String, String), String>,
     /// What each instance's application health status is derived from, by `InstanceId` —
     /// see [`InstanceApplicationStatusRecord`] and the module docs. An instance with no
@@ -2352,6 +2373,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// attach your VPCs and VPN connections to the transit gateway"), so the clock owes it
     /// `available` [`TRANSITION_DELAY`] later whether or not anybody calls again. The
     /// gateway's default route table moves with it.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub transit_gateway_available_at: BTreeMap<String, Instant>,
     /// When a `deleting` transit gateway's own REMOVAL falls due, by `TransitGatewayId` — the
     /// counterpart of [`Self::transit_gateway_available_at`] for the other end of a gateway's
@@ -2361,6 +2383,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// A removal rather than a further state, because a deleted gateway is one
     /// `DescribeTransitGateways` stops carrying — see
     /// [`Self::begin_transit_gateway_deletion`].
+    #[serde(with = "::service_common::persist::instant_map")]
     pub transit_gateway_delete_at: BTreeMap<String, Instant>,
     /// Every transit gateway route table the account holds, by
     /// `TransitGatewayRouteTableId` — starting with the default one each
@@ -2376,6 +2399,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// state. The DEFAULT table a `CreateTransitGateway` makes is not here — it comes up
     /// with its gateway, off [`Self::transit_gateway_available_at`], which is the one
     /// instant both move on.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub transit_gateway_route_table_available_at: BTreeMap<String, Instant>,
     /// The DEFAULT transit gateway route table of each gateway that has one, by
     /// `TransitGatewayId`.
@@ -2396,6 +2420,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// [`TransitGatewayPropagationRecord`] and the module docs. One entry per pair, because
     /// a pair either propagates or does not; ordered by route table and then by attachment,
     /// which is the order `GetTransitGatewayRouteTablePropagations` reports and pages over.
+    #[serde(with = "::service_common::persist::entries")]
     pub transit_gateway_propagations: BTreeMap<(String, String), TransitGatewayPropagationRecord>,
     /// Which attachment is associated with which transit gateway route table, by
     /// (`TransitGatewayRouteTableId`, `TransitGatewayAttachmentId`) — see
@@ -2455,6 +2480,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// not anybody calls again. The one entry covers the IPAM's default scopes, its default
     /// resource discovery and that discovery's association too, since all four were created
     /// by the same call and are owed their completed state at the same instant.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub ipam_create_complete_at: BTreeMap<String, Instant>,
     /// When each IPAM's `modify-in-progress` -> `modify-complete` transition falls due, for
     /// the IPAMs a `ModifyIpam` has changed.
@@ -2465,6 +2491,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// [`TRANSITION_DELAY`] later whether or not anybody calls again. Written by
     /// [`Self::modify_ipam`] and applied by [`Self::materialize_due_transitions`]; an IPAM
     /// nobody has modified has no entry.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub ipam_modify_complete_at: BTreeMap<String, Instant>,
     /// Every IPAM resource discovery the account holds, by `IpamResourceDiscoveryId`, as the
     /// modelled [`IpamResourceDiscovery`] shape itself. Starts with the default resource
@@ -2483,6 +2510,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// `associate-complete` [`TRANSITION_DELAY`] later whether or not anybody calls again.
     /// The DEFAULT association of an IPAM is not listed here: it is completed by the one
     /// entry [`Self::ipam_create_complete_at`] holds for the IPAM it came up with.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub ipam_resource_discovery_association_complete_at: BTreeMap<String, Instant>,
     /// An `AssociateIpamResourceDiscovery` `ClientToken` and the association it minted, so a
     /// repeat of the same request answers with that association instead of making a second
@@ -2506,12 +2534,14 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// [`Self::route_servers`].
     pub route_server_endpoints: BTreeMap<String, RouteServerEndpoint>,
     /// When each route server endpoint's `pending` -> `available` transition falls due.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub route_server_endpoint_available_at: BTreeMap<String, Instant>,
     /// When each DELETING route server endpoint's `deleting` -> `deleted` transition falls
     /// due. One entry per endpoint a `DeleteRouteServerEndpoint` has started taking down,
     /// written by [`Self::begin_route_server_endpoint_deletion`] and applied by
     /// [`Self::materialize_due_transitions`]; an endpoint nobody asked to delete has no
     /// entry.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub route_server_endpoint_deleted_at: BTreeMap<String, Instant>,
     /// A `CreateRouteServerEndpoint` `ClientToken` and the `RouteServerEndpointId` that
     /// request minted.
@@ -2520,11 +2550,13 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// [`RouteServerPeer`] shape itself, keyed and ordered like [`Self::route_servers`].
     pub route_server_peers: BTreeMap<String, RouteServerPeer>,
     /// When each route server peer's `pending` -> `available` transition falls due.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub route_server_peer_available_at: BTreeMap<String, Instant>,
     /// When each DELETING route server peer's `deleting` -> `deleted` transition falls due.
     /// One entry per peer a `DeleteRouteServerPeer` has started taking down, written by
     /// [`Self::begin_route_server_peer_deletion`] and applied by
     /// [`Self::materialize_due_transitions`]; a peer nobody asked to delete has no entry.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub route_server_peer_deleted_at: BTreeMap<String, Instant>,
     /// Every association between one of the account's route servers and one of its VPCs, by
     /// the (`RouteServerId`, `VpcId`) pair the association IS — see
@@ -2534,6 +2566,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     ///
     /// Starts EMPTY: a route server has no association until `AssociateRouteServer` makes
     /// one.
+    #[serde(with = "::service_common::persist::entries")]
     pub route_server_associations: BTreeMap<(String, String), RouteServerAssociationRecord>,
     /// Which route tables each of the account's route servers may install its learned routes
     /// into, by the (`RouteServerId`, `RouteTableId`) pair the propagation IS — see
@@ -2544,6 +2577,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     ///
     /// Starts EMPTY: a route server propagates into no route table until
     /// `EnableRouteServerPropagation` says so.
+    #[serde(with = "::service_common::persist::entries")]
     pub route_server_propagations: BTreeMap<(String, String), RouteServerPropagationRecord>,
     /// The account's Allowed AMIs setting in each Region a caller has configured it in, by
     /// Region name — see the module docs. A Region with no entry has the setting an account
@@ -2585,6 +2619,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// clock owes it `available` [`TRANSITION_DELAY`] later, and
     /// [`Self::materialize_due_image_usage_reports`] applies it. A report that has already
     /// moved has no entry.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub image_usage_report_available_at: BTreeMap<String, Instant>,
     /// A `ClientToken` an AMI usage report was created under and the `ReportId` it minted, so
     /// a repeat of the same request answers with that report instead of creating a second
@@ -2614,6 +2649,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// ([`Self::begin_secondary_subnet_deletion`], applied by
     /// [`Self::materialize_due_secondary_subnet_deletions`]); a subnet nobody has asked to
     /// delete has no entry here, and an applied move leaves none behind.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub secondary_subnet_delete_complete_at: BTreeMap<String, Instant>,
     /// Every secondary interface the account holds, by `SecondaryInterfaceId`, as the
     /// modelled [`SecondaryInterface`] shape itself — see the module docs. Ordered by id,
@@ -2773,6 +2809,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// itself lives in `ByoipCidr$AsnAssociations` and that shape carries no member for a
     /// move the clock has not applied yet; the same arrangement as
     /// [`Self::vpc_endpoint_connection_moves`].
+    #[serde(with = "::service_common::persist::entries")]
     pub asn_association_moves: BTreeMap<(String, String), PendingStateMove>,
     /// Every IPAM policy the account holds, by `IpamPolicyId` — see [`IpamPolicyRecord`].
     /// Ordered by id, the stable order every reader of them reports in.
@@ -2803,6 +2840,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// Only a scope `CreateIpamScope` created is listed: the two DEFAULT scopes of an IPAM
     /// are completed by the ONE entry [`Self::ipam_create_complete_at`] holds for that
     /// IPAM, which covers everything that create made at once.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub ipam_scope_create_complete_at: BTreeMap<String, Instant>,
     /// A `CreateIpamScope` `ClientToken` and the `IpamScopeId` that call minted, so a replay
     /// of the same request answers with that scope instead of creating a second one: "a
@@ -2814,11 +2852,13 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// beside the pool under the same id the way [`Self::vpc_available_at`] holds a
     /// `pending` VPC's `available` move, on the same monotonic clock and the same
     /// [`TRANSITION_DELAY`]. [`Self::materialize_due_transitions`] applies it.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub ipam_pool_create_complete_at: BTreeMap<String, Instant>,
     /// When a `delete-in-progress` IPAM pool's move to `delete-complete` falls due, by
     /// `IpamPoolId` — the counterpart of [`Self::ipam_pool_create_complete_at`] for the other
     /// end of a pool's life, on the same monotonic clock and the same [`TRANSITION_DELAY`],
     /// and applied by the same [`Self::materialize_due_transitions`].
+    #[serde(with = "::service_common::persist::instant_map")]
     pub ipam_pool_delete_complete_at: BTreeMap<String, Instant>,
     /// A `CreateIpamPool` `ClientToken` and the `IpamPoolId` that call minted, so a replay
     /// of the same request answers with that pool instead of creating a second one: "a
@@ -2841,6 +2881,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     ///
     /// A removal rather than a further state, because a deleted IPAM is one `DescribeIpams`
     /// answers [`INVALID_IPAM_ID_NOT_FOUND`] for — see [`Self::begin_ipam_deletion`].
+    #[serde(with = "::service_common::persist::instant_map")]
     pub ipam_delete_at: BTreeMap<String, Instant>,
     /// Every IPAM prefix list resolver the account holds, by `IpamPrefixListResolverId`, as
     /// the modelled [`IpamPrefixListResolver`] shape itself — the container a prefix list
@@ -2865,6 +2906,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// `IpamPrefixListResolverId` — the resolver counterpart of
     /// [`Self::ipam_scope_create_complete_at`], on the same monotonic clock and the same
     /// [`TRANSITION_DELAY`], applied by [`Self::materialize_due_transitions`].
+    #[serde(with = "::service_common::persist::instant_map")]
     pub ipam_prefix_list_resolver_create_complete_at: BTreeMap<String, Instant>,
     /// A `CreateIpamPrefixListResolver` `ClientToken` and the `IpamPrefixListResolverId` that
     /// call minted, so a replay of the same request answers with that resolver instead of
@@ -2883,6 +2925,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// under the same id the way [`Self::ipam_scope_create_complete_at`] holds a scope's, on
     /// the same monotonic clock and the same [`TRANSITION_DELAY`].
     /// [`Self::materialize_due_transitions`] applies it.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub ipam_prefix_list_resolver_target_create_complete_at: BTreeMap<String, Instant>,
     /// A `CreateIpamPrefixListResolverTarget` `ClientToken` and the
     /// `IpamPrefixListResolverTargetId` that call minted, so a replay of the same request
@@ -2950,6 +2993,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// is dropped as soon as the move has been applied
     /// ([`Self::delete_due_cancelled_import_tasks`]), so this holds exactly the
     /// cancellations still owed.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub import_task_deleted_at: BTreeMap<String, Instant>,
     /// Every conversion task the account has started, by `ConversionTaskId`: the import of
     /// an instance or of a volume, stored as the modelled [`ConversionTask`] shape
@@ -2966,6 +3010,7 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// `cancelling`. An entry is dropped as soon as the move has been applied
     /// ([`Self::cancel_due_conversion_tasks`]), so this holds exactly the cancellations
     /// still owed.
+    #[serde(with = "::service_common::persist::instant_map")]
     pub conversion_task_cancelled_at: BTreeMap<String, Instant>,
     /// Every NAT gateway the account holds, by `NatGatewayId`, as the modelled
     /// [`NatGateway`] shape itself — so a member a writer sets round-trips through
@@ -3301,6 +3346,22 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// REFUSED disable carried is not here, so a replay of one is refused the same way the
     /// first call was.
     pub capacity_manager_disable_client_tokens: BTreeSet<String>,
+}
+
+impl ::service_common::persist::Persisted for ComAmazonawsEc2Amazonec2State {
+    const SERVICE: &'static str = "ec2";
+    const VERSION: u32 = 1;
+
+    fn snapshot(&self) -> serde_json::Value {
+        // Every field is plain data; a failure here is a bug, and an empty snapshot would
+        // silently lose every VPC and instance, so it is refused loudly instead.
+        serde_json::to_value(self).expect("EC2 state serializes")
+    }
+
+    fn restore(_version: u32, snapshot: serde_json::Value) -> Result<Self, String> {
+        // Records keep catalog words as `&'static str`, which borrow from the kept snapshot.
+        ::service_common::persist::restore_static(snapshot)
+    }
 }
 
 /// A fresh account's EC2 state: the ambient network AWS gives it — the default VPC, that

@@ -104,10 +104,13 @@ pub type FastSnapshotRestoreTransition = ClockTransition<&'static str>;
 /// Held as ONE value rather than as separate members, so a record can never carry a
 /// disabling time without the move that follows it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct FastSnapshotRestoreDisable {
     /// The monotonic instant the disable was asked for, which is where the enable's own
     /// lifecycle stops: a pair disabled while still `enabling` never reaches `optimizing`,
     /// so a phase whose due instant falls after this one was never entered.
+    #[serde(with = "::service_common::persist::instant")]
     pub began_at: Instant,
     /// The wall-clock instant the pair entered `disabling`, reported as its `DisablingTime`.
     pub disabling_time: SystemTime,
@@ -122,6 +125,8 @@ pub struct FastSnapshotRestoreDisable {
 /// them are facts of the record's age, which [`Self::view_at`] derives — see the module
 /// docs.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct FastSnapshotRestoreRecord {
     /// "The ID of the snapshot" (`DescribeFastSnapshotRestoreSuccessItem$SnapshotId`).
     pub snapshot_id: String,

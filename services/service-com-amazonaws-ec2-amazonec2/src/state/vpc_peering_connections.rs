@@ -249,6 +249,7 @@ pub struct VpcPeeringConnectionSpec {
 /// One stored VPC peering connection: the modelled [`VpcPeeringConnection`] shape beside
 /// the move the clock owes it, which that shape carries no member for.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VpcPeeringConnectionRecord {
     /// The connection as it is reported, except for the per-side address space
     /// [`ComAmazonawsEc2Amazonec2State::vpc_peering_connection_view`] reads off the VPC

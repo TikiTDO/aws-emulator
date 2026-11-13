@@ -81,6 +81,7 @@ pub const ENCODING_PEM: &str = "PEM";
 /// [`user_key`](SshPublicKeyRecord::user_key) names, so the name lives in exactly one place
 /// and a user renamed by an update does not leave a stale copy here.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SshPublicKeyRecord {
     /// [`name_key`] of the IAM user that holds the key.
     pub user_key: String,
@@ -105,6 +106,7 @@ pub struct SshPublicKeyRecord {
     pub status: String,
     /// "The date and time … when the SSH public key was uploaded"
     /// (`SSHPublicKey$UploadDate`), reported unchanged by every later read.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub upload_date: ::aws_smithy_types::DateTime,
 }
 

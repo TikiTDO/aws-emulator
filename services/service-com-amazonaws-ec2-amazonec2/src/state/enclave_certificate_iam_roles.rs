@@ -197,6 +197,7 @@ pub fn enclave_certificate_s3_object_key(role_arn: &str, certificate_arn: &str) 
 /// decided once, when the certificate is first associated with a role, and every later
 /// association of that certificate reports the same two values.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct EnclaveCertificateRecord {
     /// The bucket the certificate bundle was uploaded to
     /// ([`enclave_certificate_s3_bucket_name`] for the Region of the first association).

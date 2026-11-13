@@ -28,6 +28,7 @@ pub struct DescribeAddressesOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ec2#Address")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Address {
     pub allocation_id: Option<String>,
     pub association_id: Option<String>,

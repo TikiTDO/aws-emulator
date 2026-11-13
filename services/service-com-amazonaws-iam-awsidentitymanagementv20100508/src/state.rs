@@ -872,6 +872,7 @@ pub fn mint_service_specific_credential(
 /// case-folded name ([`name_key`]) while a read must report the policy as the
 /// account holds it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InlinePolicy {
     /// The policy name in the case the last put chose.
     pub policy_name: String,
@@ -885,6 +886,7 @@ pub struct InlinePolicy {
 /// policy's versions — the `Policy` shape carries no document, so the document a
 /// create or an update supplied lives in the version it created.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ManagedPolicy {
     /// The policy as `CreatePolicy` returned it and `GetPolicy` reports it.
     pub policy: Policy,
@@ -974,6 +976,7 @@ impl ManagedPolicy {
 /// snapshot taken when it was bound (see
 /// [`instance_profile_report`](ComAmazonawsIamAwsidentitymanagementv20100508State::instance_profile_report)).
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceProfileRecord {
     /// The profile as `CreateInstanceProfile` returned it and `GetInstanceProfile`
     /// reports it. Its `roles` member is not the binding and is never read: the report
@@ -997,6 +1000,7 @@ pub struct InstanceProfileRecord {
 /// the user the record's [`user_key`](AccessKeyRecord::user_key) names, so the
 /// name lives in exactly one place.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AccessKeyRecord {
     /// [`name_key`] of the IAM user that owns the key.
     pub user_key: String,
@@ -1004,6 +1008,7 @@ pub struct AccessKeyRecord {
     /// minted, until an update moves it.
     pub status: String,
     /// The instant the key was minted, reported unchanged by every later read.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub create_date: ::aws_smithy_types::DateTime,
 }
 
@@ -1023,6 +1028,7 @@ pub struct AccessKeyRecord {
 /// here — the principal the refusal names, the role whose policies it is judged on, and the
 /// session policies that cap them — written by the operation that mints the session.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RoleSessionRecord {
     /// The session's own principal, as `sts:AssumeRole` reports it:
     /// `arn:<partition>:sts::<account>:assumed-role/<role name>/<session name>`. What a
@@ -1034,6 +1040,7 @@ pub struct RoleSessionRecord {
     /// The instant the credential stops being usable, as the minting operation promised
     /// it. A record past it speaks for nobody: the credential is withdrawn at that
     /// instant, and the record is kept only until this store next prunes it.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub expires: ::aws_smithy_types::DateTime,
     /// The session policies the mint passed, which SCOPE what a request signed with this
     /// credential may do; see [`SessionPolicies`]. Empty for a mint that passed none,
@@ -1059,6 +1066,7 @@ pub struct RoleSessionRecord {
 /// is what its DEFAULT version says at the instant of the request, which is read then
 /// ([`session_scoping_documents`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SessionPolicies {
     /// The inline session policy document the mint passed, if any.
     pub inline: Option<String>,
@@ -1152,6 +1160,7 @@ pub fn session_scoping_documents(
 /// [`user_key`](SigningCertificateRecord::user_key) names, so the name lives in
 /// exactly one place and a user renamed by an update does not leave a stale copy here.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SigningCertificateRecord {
     /// [`name_key`] of the IAM user that holds the certificate.
     pub user_key: String,
@@ -1172,6 +1181,7 @@ pub struct SigningCertificateRecord {
     pub status: String,
     /// "The date when the signing certificate was uploaded"
     /// (`SigningCertificate$UploadDate`), reported unchanged by every later read.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub upload_date: ::aws_smithy_types::DateTime,
 }
 
@@ -1210,6 +1220,7 @@ impl SigningCertificateRecord {
 /// shape="OpenIDConnectProviderListEntry")`) — so the record holds the members
 /// `GetOpenIDConnectProvider` reports, and that read is what defines them.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct OpenIdConnectProviderRecord {
     /// "The URL that the IAM OIDC provider resource object is associated with"
     /// (`GetOpenIDConnectProvider$Url`), WITHOUT its scheme: the host-and-path form
@@ -1230,6 +1241,7 @@ pub struct OpenIdConnectProviderRecord {
     /// "The date and time when the IAM OIDC provider resource object was created in
     /// the Amazon Web Services account" (`GetOpenIDConnectProvider$CreateDate`):
     /// minted once and reported unchanged by every later read.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub create_date: ::aws_smithy_types::DateTime,
     /// The provider's tags, sorted by tag key, because "the returned list of tags is
     /// sorted by tag key" (`GetOpenIDConnectProvider$Tags`). `None` when the provider
@@ -1259,6 +1271,7 @@ pub struct OpenIdConnectProviderRecord {
 /// assertion or checks a key against one presented later, so nothing reads the key
 /// material at all.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SamlProviderRecord {
     /// "The unique identifier assigned to the SAML provider"
     /// (`GetSAMLProvider$SAMLProviderUUID`): minted once by
@@ -1272,11 +1285,13 @@ pub struct SamlProviderRecord {
     /// "The date and time when the SAML provider was created"
     /// (`GetSAMLProvider$CreateDate`): minted once and reported unchanged by every
     /// later read.
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub create_date: ::aws_smithy_types::DateTime,
     /// "The expiration date and time for the SAML provider"
     /// (`GetSAMLProvider$ValidUntil`) — the `validUntil` of the metadata document
     /// ([`parse_saml_metadata`]), so it is a property of the document the request
     /// carried. `None` when the document states no expiration.
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub valid_until: Option<::aws_smithy_types::DateTime>,
     /// "The encryption setting for the SAML provider"
     /// (`GetSAMLProvider$AssertionEncryptionMode`), one value of
@@ -1324,6 +1339,7 @@ const PASSWORD_DIGEST_BYTES: usize = 32;
 /// process and no caller can read either value. Nobody should read it as a scheme for
 /// storing credentials.
 #[derive(Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PasswordVerifier {
     /// The salt this password was hashed with, minted once with the verifier.
     salt: [u8; PASSWORD_SALT_BYTES],
@@ -1402,10 +1418,12 @@ impl PasswordVerifier {
 /// copy it — it is read from the user the record's key names, so the name lives in
 /// one place.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LoginProfileRecord {
     /// The instant the password was created, reported unchanged by every later
     /// read: "the CreateDate reflects the initial password creation date"
     /// (`GetLoginProfile`).
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub create_date: ::aws_smithy_types::DateTime,
     /// Whether "the user is required to set a new password on next sign-in"
     /// (`CreateLoginProfile$PasswordResetRequired`), as the last write left it.
@@ -1434,6 +1452,7 @@ pub struct LoginProfileRecord {
 /// them, so the members about expiry, reuse and self-service are stored for that reader
 /// rather than dropped on the floor.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AccountPasswordPolicy {
     /// "The minimum number of characters allowed in an IAM user password"; the default
     /// `6` when the write named none.
