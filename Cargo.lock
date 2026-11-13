@@ -10690,7 +10690,9 @@ dependencies = [
  "aws-emulator-smithy-schema-server",
  "aws-emulator-smithy-server-runtime",
  "aws-sdk-ec2",
+ "aws-sdk-eventbridge",
  "aws-sdk-firehose",
+ "aws-sdk-lambda",
  "aws-sdk-sns",
  "aws-smithy-runtime-api",
  "aws-smithy-schema 0.2.1",
@@ -10708,8 +10710,11 @@ dependencies = [
  "prost 0.14.6",
  "quick-xml",
  "serde_json",
+ "service-com-amazonaws-cloudwatchlogs-logs-20140328",
  "service-com-amazonaws-ec2-amazonec2",
+ "service-com-amazonaws-eventbridge-awsevents",
  "service-com-amazonaws-firehose-firehose-20150804",
+ "service-com-amazonaws-lambda-awsgirapiservice",
  "service-com-amazonaws-s3-amazons3",
  "service-com-amazonaws-sns-amazonsimplenotificationservice",
  "service-com-amazonaws-sqs-amazonsqs",
@@ -10717,6 +10722,7 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tracing",
+ "zip",
 ]
 
 [[package]]

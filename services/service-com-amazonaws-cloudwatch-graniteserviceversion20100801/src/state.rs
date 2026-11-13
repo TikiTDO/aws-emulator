@@ -3526,7 +3526,7 @@ impl ComAmazonawsCloudwatchGraniteserviceversion20100801State {
         let notification = alarm_actions::AlarmNotification::of_composite_transition(
             &stored.alarm,
             &child_states,
-            previous.state_value.as_deref(),
+            &previous,
             now_secs,
         );
         let item = AlarmHistoryItem {
@@ -3748,6 +3748,11 @@ pub struct AlarmStateSnapshot {
     pub state_reason: Option<String>,
     /// The alarm's `StateReasonData`.
     pub state_reason_data: Option<String>,
+    /// WHEN the alarm last reported this state, as its `StateUpdatedTimestamp` stood — which is
+    /// the instant a state-change event names for the state a transition moved the alarm OUT of
+    /// ([`alarm_actions::state_change_events`]). Not part of the history document: a transition
+    /// record names the two states, and the item carries the instant of the transition itself.
+    pub state_updated_secs: Option<f64>,
 }
 
 impl AlarmStateSnapshot {
@@ -3757,6 +3762,7 @@ impl AlarmStateSnapshot {
             state_value: alarm.state_value.clone(),
             state_reason: alarm.state_reason.clone(),
             state_reason_data: alarm.state_reason_data.clone(),
+            state_updated_secs: alarm.state_updated_timestamp.as_ref().map(from_timestamp),
         }
     }
 
@@ -3766,6 +3772,7 @@ impl AlarmStateSnapshot {
             state_value: alarm.state_value.clone(),
             state_reason: alarm.state_reason.clone(),
             state_reason_data: alarm.state_reason_data.clone(),
+            state_updated_secs: alarm.state_updated_timestamp.as_ref().map(from_timestamp),
         }
     }
 }

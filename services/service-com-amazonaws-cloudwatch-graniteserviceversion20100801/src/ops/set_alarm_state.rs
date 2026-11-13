@@ -241,7 +241,7 @@ fn force_state(
             .then(|| {
                 crate::state::alarm_actions::AlarmNotification::of_transition(
                     &stored.alarm,
-                    previous.state_value.as_deref(),
+                    &previous,
                     now,
                 )
             })
@@ -285,7 +285,7 @@ fn force_state(
                     crate::state::alarm_actions::AlarmNotification::of_composite_transition(
                         &stored.alarm,
                         &children,
-                        previous.state_value.as_deref(),
+                        &previous,
                         now,
                     )
                 })

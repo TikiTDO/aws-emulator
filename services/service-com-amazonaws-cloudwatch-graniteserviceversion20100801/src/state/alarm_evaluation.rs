@@ -1032,7 +1032,7 @@ impl State {
         let updated = AlarmStateSnapshot::of_metric_alarm(&stored.alarm);
         let notification = AlarmNotification::of_transition(
             &stored.alarm,
-            previous.state_value.as_deref(),
+            &previous,
             now_secs,
         );
 
@@ -1779,8 +1779,8 @@ impl State {
         })
     }
 
-    /// Queue one action notification a transition owes, within
-    /// [`MAX_PENDING_NOTIFICATIONS`] — unless an ACTIVE alarm mute rule MUTES it.
+    /// Queue one transition's record, within [`MAX_PENDING_NOTIFICATIONS`] — with its ACTIONS
+    /// dropped when an ACTIVE alarm mute rule MUTES them.
     ///
     /// "When a mute rule is active, the targeted alarms continue to evaluate metrics and
     /// transition between states, but their configured actions (such as Amazon SNS notifications
@@ -1790,7 +1790,9 @@ impl State {
     /// actions configured for the state it moved to are executed. A muted transition executes
     /// NONE of them and leaves the account of that in the alarm's own history
     /// ([`super::muted_actions_history_item`]) instead of a record of an execution that never
-    /// happened.
+    /// happened. What a mute does NOT decide is the event the state change publishes
+    /// ([`super::alarm_actions::state_change_events`]): that is owed by the transition rather
+    /// than configured on the alarm, so the record is queued either way.
     ///
     /// The question is asked at the instant of the TRANSITION rather than at delivery, because
     /// that is the instant whose mute windows decide whether these actions fire at all.
@@ -1799,21 +1801,26 @@ impl State {
         notification: AlarmNotification,
         now_secs: f64,
     ) {
+        let mut notification = notification;
         if let Some(rule_name) = self.muting_alarm_mute_rule(
             &notification.alarm_name,
             notification.alarm_arn.as_deref(),
             now_secs,
         ) {
-            let item = super::muted_actions_history_item(
-                &notification.alarm_name,
-                &notification.alarm_type,
-                &rule_name,
-                &notification.new_state_value,
-                &notification.actions,
-                now_secs,
-            );
-            self.record_history(&notification.alarm_name, now_secs, item);
-            return;
+            // A transition that fires no action at all has nothing for a mute to withhold, so
+            // it leaves no record of a muting either.
+            if !notification.actions.is_empty() {
+                let item = super::muted_actions_history_item(
+                    &notification.alarm_name,
+                    &notification.alarm_type,
+                    &rule_name,
+                    &notification.new_state_value,
+                    &notification.actions,
+                    now_secs,
+                );
+                self.record_history(&notification.alarm_name, now_secs, item);
+                notification.actions.clear();
+            }
         }
         while self.pending_notifications.len() >= MAX_PENDING_NOTIFICATIONS {
             let Some(dropped) = self.pending_notifications.pop_front() else {

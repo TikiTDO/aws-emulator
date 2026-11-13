@@ -38,13 +38,20 @@
 //! was already due, and what is due NEXT is exactly what the client is no longer here to ask
 //! for.
 //!
-//! Two action kinds are executed from here, because each is an operation of another service
-//! this emulator serves: an SNS topic ARN, which receives the notification, and an EC2
-//! INSTANCE action ([`ec2_instance_actions`]), which is the EC2 operation it names performed
-//! on the instance the alarm watches. Every other action kind an alarm may carry (a Lambda
-//! function, an Auto Scaling policy, an SSM OpsItem) needs its own invocation path, which is
-//! not implemented in this emulator: such an action is logged and NOTHING is invented for it
-//! — no history item claiming it ran.
+//! Three action kinds are executed from here, because each is an operation of another service
+//! this emulator serves: an SNS topic ARN, which receives the notification, an EC2 INSTANCE
+//! action ([`ec2_instance_actions`]), which is the EC2 operation it names performed on the
+//! instance the alarm watches, and a LAMBDA FUNCTION ([`lambda_actions`]), which is invoked
+//! with the transition. Every other action kind an alarm may carry (an Auto Scaling policy, an
+//! SSM OpsItem) needs its own invocation path, which is not implemented in this emulator: such
+//! an action is logged and NOTHING is invented for it — no history item claiming it ran.
+//!
+//! A transition also publishes an EVENT that is no action of the alarm's at all: CloudWatch
+//! puts every change of an alarm's state onto the account's default event bus
+//! ([`state_change_events`]), where the rules of that bus decide who receives it. That
+//! publication is owed by the TRANSITION rather than by the action list, so it is made for
+//! every transition this settles — including one of an alarm that carries no action, one whose
+//! actions are disabled or suppressed, and one a mute rule mutes.
 
 use ::serde_json::{Map, Value};
 
@@ -55,6 +62,14 @@ use crate::ops::types::{
 /// The EC2 instance actions an alarm action list may carry, and the EC2 operation executing
 /// one performs.
 pub mod ec2_instance_actions;
+
+/// The Lambda function actions an alarm action list may carry, and the invocation executing
+/// one makes.
+pub mod lambda_actions;
+
+/// The event every alarm state transition publishes onto the account's default event bus, and
+/// the document a Lambda alarm action is handed.
+pub mod state_change_events;
 /// The ARN namespace of Amazon SNS, whose topics are the action kind this module delivers to.
 const SNS_ARN_NAMESPACE: &str = "sns";
 
@@ -125,16 +140,25 @@ pub struct AlarmNotification {
     pub subject: Option<String>,
     /// The notification document, as published.
     pub message: String,
+    /// The transition itself, as the event every state change publishes onto the account's
+    /// default event bus reports it ([`state_change_events`]) and as a Lambda alarm action's
+    /// function is handed it. It is owed by the transition rather than by [`Self::actions`], so
+    /// a record carrying no action at all still carries this.
+    pub state_change: state_change_events::AlarmStateChange,
 }
 
 impl AlarmNotification {
-    /// The notification a METRIC alarm's transition to its current state owes, or `None` when
-    /// the transition fires nothing: the alarm's actions are disabled, or it carries no action
-    /// for the state it moved to.
+    /// The record a METRIC alarm's transition to its current state owes, or `None` for an alarm
+    /// carrying no name or no state — which is no transition at all.
+    ///
+    /// Every transition owes one, whether or not it fires an action: the event the state change
+    /// publishes is owed by the transition itself, and [`Self::actions`] is empty for a
+    /// transition whose alarm has its actions disabled or carries no action for the state it
+    /// moved to.
     #[must_use]
     pub fn of_transition(
         alarm: &MetricAlarm,
-        old_state_value: Option<&str>,
+        previous: &super::AlarmStateSnapshot,
         at_secs: f64,
     ) -> Option<Self> {
         Transition {
@@ -152,15 +176,18 @@ impl AlarmNotification {
                 .map(super::from_timestamp),
             new_state_value: alarm.state_value.as_deref()?,
             new_state_reason: alarm.state_reason.as_deref(),
-            old_state_value,
+            old_state_value: previous.state_value.as_deref(),
             at_secs,
             instance_id: ec2_instance_actions::watched_instance_id(alarm),
             detail: vec![("Trigger", metric_trigger_document(alarm))],
+            state_change: state_change_events::AlarmStateChange::of_metric_transition(
+                alarm, previous, at_secs,
+            )?,
         }
         .build()
     }
 
-    /// The notification a COMPOSITE alarm's transition to its current state owes. Same rule,
+    /// The record a COMPOSITE alarm's transition to its current state owes. Same rule,
     /// same envelope: the alarm's own three action lists, selected by the state it moved to.
     /// A composite alarm reports the rule it evaluated, and the CHILDREN whose states that rule
     /// read, where a metric alarm reports the metric it evaluated.
@@ -168,21 +195,21 @@ impl AlarmNotification {
     pub fn of_composite_transition(
         alarm: &CompositeAlarm,
         children: &[super::ChildAlarmState],
-        old_state_value: Option<&str>,
+        previous: &super::AlarmStateSnapshot,
         at_secs: f64,
     ) -> Option<Self> {
-        // "When the value is ALARM, it means that the actions are suppressed because the
-        // suppressor alarm is in ALARM" (`CompositeAlarm$ActionsSuppressedBy`) — a suppressed
-        // transition fires nothing.
-        if alarm.actions_suppressed_by.is_some() {
-            return None;
-        }
         Transition {
             name: alarm.alarm_name.as_deref()?,
             kind: super::ALARM_TYPE_COMPOSITE,
             arn: alarm.alarm_arn.as_deref(),
             description: alarm.alarm_description.as_deref(),
-            actions_enabled: alarm.actions_enabled.unwrap_or(true),
+            // "When the value is ALARM, it means that the actions are suppressed because the
+            // suppressor alarm is in ALARM" (`CompositeAlarm$ActionsSuppressedBy`) — a
+            // suppressed transition fires none of the alarm's actions. It still publishes its
+            // state change: what is suppressed is the alarm's actions, and a consumer of the
+            // event bus is not one of them.
+            actions_enabled: alarm.actions_enabled.unwrap_or(true)
+                && alarm.actions_suppressed_by.is_none(),
             ok_actions: alarm.ok_actions.as_deref(),
             alarm_actions: alarm.alarm_actions.as_deref(),
             insufficient_data_actions: alarm.insufficient_data_actions.as_deref(),
@@ -192,7 +219,7 @@ impl AlarmNotification {
                 .map(super::from_timestamp),
             new_state_value: alarm.state_value.as_deref()?,
             new_state_reason: alarm.state_reason.as_deref(),
-            old_state_value,
+            old_state_value: previous.state_value.as_deref(),
             at_secs,
             // A composite alarm watches other alarms rather than a metric, so it is
             // dimensioned by nothing and monitors no instance of its own.
@@ -207,6 +234,9 @@ impl AlarmNotification {
                 ),
                 ("TriggeringChildren", triggering_children(children)),
             ],
+            state_change: state_change_events::AlarmStateChange::of_composite_transition(
+                alarm, previous, at_secs,
+            )?,
         }
         .build()
     }
@@ -237,25 +267,27 @@ struct Transition<'a> {
     /// alarm's `AlarmRule` and the children its rule read. A member whose value is null is
     /// left out of the document.
     detail: Vec<(&'static str, Value)>,
+    /// The same transition as the event it publishes, carried through to the record.
+    state_change: state_change_events::AlarmStateChange,
 }
 
 impl Transition<'_> {
-    /// The notification this transition owes, or `None` when it fires nothing.
+    /// The record this transition owes, or `None` when there is no transition to report.
     fn build(self) -> Option<AlarmNotification> {
-        if !self.actions_enabled {
-            return None;
-        }
+        // "Indicates whether actions should be executed during any changes to the alarm state"
+        // (`MetricAlarm$ActionsEnabled`): an alarm whose actions are switched off fires none of
+        // them, and one that carries no action for the state it moved to has none to fire. The
+        // transition itself still happened, and the event it publishes is owed whichever is
+        // the case, so it is the ACTION LIST that is empty here rather than the record absent.
         let actions: Vec<String> = match self.new_state_value {
             super::ALARM_STATE_ALARM => self.alarm_actions,
             super::ALARM_STATE_OK => self.ok_actions,
             super::ALARM_STATE_INSUFFICIENT_DATA => self.insufficient_data_actions,
             _ => None,
         }
+        .filter(|_| self.actions_enabled)
         .unwrap_or_default()
         .to_vec();
-        if actions.is_empty() {
-            return None;
-        }
 
         // The Region and account the alarm belongs to, read off its own ARN rather than
         // guessed: the alarm was created in one Region and its notification reports that one.
@@ -338,6 +370,7 @@ impl Transition<'_> {
             instance_id: self.instance_id.map(str::to_string),
             subject,
             message: Value::Object(document).to_string(),
+            state_change: self.state_change,
         })
     }
 }
@@ -405,6 +438,15 @@ async fn settle<Eng: Send + Sync + 'static>(
         return;
     }
 
+    // The EVENT every one of these transitions publishes goes out first, because it is owed by
+    // the transition rather than by any action: a consumer of the bus sees a state change this
+    // settle materialised whether or not the alarm carries an action at all.
+    let changes: Vec<state_change_events::AlarmStateChange> = owed
+        .iter()
+        .map(|notification| notification.state_change.clone())
+        .collect();
+    state_change_events::publish(callback, &changes).await;
+
     let mut client: Option<(String, ::aws_sdk_sns::Client)> = None;
     // Every authorization decision this request has already taken. One pass settles the
     // notifications of SEVERAL alarms, and two of them may fire the same topic, so the pair is
@@ -434,12 +476,29 @@ async fn settle<Eng: Send + Sync + 'static>(
                 record_action(&state, &notification, action, failure.as_deref(), now);
                 continue;
             }
+            // A LAMBDA function action is an invocation of that function with the transition,
+            // decided by the function's own resource-based policy ([`lambda_actions`]).
+            if lambda_actions::of_action_arn(action).is_some() {
+                let failure =
+                    lambda_actions::execute(callback, action, &notification.state_change).await;
+                if let Some(failure) = failure.as_deref() {
+                    ::tracing::warn!(
+                        alarm = %notification.alarm_name,
+                        action = %action,
+                        error = %failure,
+                        "an alarm action could not be executed"
+                    );
+                }
+                record_action(&state, &notification, action, failure.as_deref(), now);
+                continue;
+            }
             let Some(region) = ::service_common::arn::region_of(action, SNS_ARN_NAMESPACE) else {
                 ::tracing::warn!(
                     alarm = %notification.alarm_name,
                     action = %action,
-                    "this alarm action is neither an EC2 instance action nor an SNS topic in \
-                     a Region this emulator can reach; no other action kind is executed here"
+                    "this alarm action is neither an EC2 instance action, a Lambda function \
+                     nor an SNS topic in a Region this emulator can reach; no other action \
+                     kind is executed here"
                 );
                 continue;
             };
@@ -787,21 +846,29 @@ fn action_history_item(
     // alarm's transition produced from any other message the target received. An action that
     // FAILED handed nothing over, so it reports no published message at all: nothing received
     // one. Neither does an EC2 instance action, which is an operation performed on an
-    // instance rather than a message handed to a target: nothing was published for it.
+    // instance rather than a message handed to a target: nothing was published for it. A
+    // LAMBDA function was handed the transition itself rather than the notification envelope,
+    // so that is what the record reports for it.
     //
     // `AlarmHistoryItem$HistoryData` is `@length 1..4095` and the document is JSON, so it can
     // never be truncated to fit: the published message is the one part of it whose size the
     // alarm's own configuration drives, so it is the part dropped when the whole document
     // would not fit. Each form is rendered at most once, because the document carries the
     // notification itself and is the largest thing this item holds.
-    let with_message = (failure.is_none()
-        && ec2_instance_actions::of_action_arn(action).is_none())
-        .then(|| {
+    let published = if ec2_instance_actions::of_action_arn(action).is_some() {
+        None
+    } else if lambda_actions::of_action_arn(action).is_some() {
+        Some(notification.state_change.lambda_payload().to_string())
+    } else {
+        Some(notification.message.clone())
+    };
+    let with_message = failure
+        .is_none()
+        .then_some(published)
+        .flatten()
+        .map(|published| {
             let mut full = document.clone();
-            full.insert(
-                "publishedMessage".to_string(),
-                Value::from(notification.message.as_str()),
-            );
+            full.insert("publishedMessage".to_string(), Value::from(published));
             Value::Object(full).to_string()
         })
         .filter(|rendered| rendered.len() <= super::MAX_HISTORY_DATA_LEN);

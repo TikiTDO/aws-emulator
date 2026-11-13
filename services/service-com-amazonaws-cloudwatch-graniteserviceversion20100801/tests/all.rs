@@ -59,6 +59,8 @@ mod alarm_reason_datapoints;
 mod alarm_reason_statistic;
 #[path = "all/alarm_rule_parse_diagnosis.rs"]
 mod alarm_rule_parse_diagnosis;
+#[path = "all/alarm_state_change_events.rs"]
+mod alarm_state_change_events;
 #[path = "all/alarm_update_regrades.rs"]
 mod alarm_update_regrades;
 #[path = "all/alarm_value_set_refusals.rs"]
@@ -139,6 +141,8 @@ mod insight_rule_wire_shapes;
 mod insight_rules;
 #[path = "all/just_published_datapoint_grading.rs"]
 mod just_published_datapoint_grading;
+#[path = "all/lambda_alarm_actions.rs"]
+mod lambda_alarm_actions;
 #[path = "all/list_metric_streams.rs"]
 mod list_metric_streams;
 #[path = "all/list_tags_for_resource_reads.rs"]

@@ -47,6 +47,16 @@ aws-sdk-sns = { version = "1", default-features = false }
 # on the instance the alarm watches (`state::alarm_actions::ec2_instance_actions`). Only the
 # generated client is needed — the emulator supplies the transport.
 aws-sdk-ec2 = { version = "1", default-features = false }
+# The AWS SDK for AWS Lambda, driven over the same in-process callback: an alarm's LAMBDA
+# function action is an invocation of the function its ARN names, decided by that function's own
+# resource-based policy (`state::alarm_actions::lambda_actions`). Only the generated client is
+# needed — the emulator supplies the transport.
+aws-sdk-lambda = { version = "1", default-features = false }
+# The AWS SDK for Amazon EventBridge, driven over the same in-process callback: every alarm
+# state transition publishes a state-change event onto the account's default event bus
+# (`state::alarm_actions::state_change_events`), through the shared client construction in
+# `service-common`. Only the generated client is needed — the emulator supplies the transport.
+aws-sdk-eventbridge = { version = "1", default-features = false }
 # The AWS SDK for Amazon Data Firehose, driven over the same in-process callback: a running
 # metric stream exports its records into the delivery stream its `FirehoseArn` names with
 # `PutRecord` (`state::metric_stream_export`). Pinned to the release the other producers of
@@ -117,6 +127,18 @@ service-com-amazonaws-s3-amazons3 = { workspace = true }
 # The destination reads of that suite go through Amazon S3's own restXml wire, so its listings
 # are read with the same XML reader that service's tests use.
 quick-xml = "0.41"
+# EventBridge is mounted beside CloudWatch on one engine in the state-change-event suite,
+# because every alarm transition publishes an event onto the default bus and the event is
+# asserted where a client sees it: on the queue a matching rule targets.
+service-com-amazonaws-eventbridge-awsevents = { workspace = true }
+# AWS Lambda is mounted beside it in the Lambda-alarm-action suite, because such an action
+# INVOKES a function and what the invocation did is asserted where a client sees it.
+service-com-amazonaws-lambda-awsgirapiservice = { workspace = true }
+# CloudWatch Logs is mounted with them, because a function's run is observed in its own log
+# group — the place a client reads what a handler printed.
+service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
+# The deployment package that suite uploads is a .zip archive it writes in memory.
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true
