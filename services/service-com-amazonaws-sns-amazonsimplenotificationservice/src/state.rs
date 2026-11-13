@@ -31,6 +31,10 @@ pub mod message_filter;
 /// The rules ONE attribute of a topic is held to, shared by the operations that write
 /// one.
 pub mod topic_attributes;
+/// The customer managed KMS key a topic encrypts its messages with, and whether a
+/// message may be sealed under it — the step every operation that writes a message to a
+/// topic takes before it accepts one.
+pub mod topic_encryption;
 /// The documented bounds of the retry policy a delivery policy document carries, held
 /// against every write of one.
 pub mod retry_policy_bounds;

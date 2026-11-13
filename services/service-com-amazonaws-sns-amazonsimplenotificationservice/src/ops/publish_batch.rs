@@ -208,6 +208,31 @@ fn invalid_parameter(message: String) -> PublishBatchError {
     .into()
 }
 
+/// The modelled error a refusal of the topic's own encryption key is answered in, for the
+/// reason the single publish gives ([`crate::ops::publish`]): the data key every message of
+/// the batch is sealed under is asked of KMS, which is why this operation models the `KMS*`
+/// family too. The whole request is refused, since the key the refusal is about is the
+/// topic's and every entry of the batch is published to that one topic.
+///
+/// The sentence is the one KMS answered ([`state::topic_encryption`]) — this service relays
+/// its KMS call rather than wording the refusal itself.
+fn kms_refusal(refusal: state::topic_encryption::KeyRefusal) -> PublishBatchError {
+    use state::topic_encryption::KeyRefusal;
+    match refusal {
+        KeyRefusal::Disabled(message) => {
+            PublishBatchErrorModeled::KMSDisabledException(KMSDisabledException {
+                message: Some(message),
+            })
+        }
+        KeyRefusal::InvalidState(message) => {
+            PublishBatchErrorModeled::KMSInvalidStateException(KMSInvalidStateException {
+                message: Some(message),
+            })
+        }
+    }
+    .into()
+}
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -383,6 +408,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
+        // The data key every message of this batch is sealed under, asked of KMS before any
+        // of them is accepted: one topic carries the key, so one decision covers the batch
+        // ([`state::topic_encryption`]). The key is read out of the store under its lock and
+        // the decision made with that lock released, because it is a read of ANOTHER
+        // service's store.
+        let master_key_id = {
+            let store = store.lock();
+            store.topics.get(&input.topic_arn).and_then(|topic| {
+                state::topic_encryption::configured_master_key(&topic.attributes)
+                    .map(str::to_string)
+            })
+        };
+        if let Some(master_key_id) = master_key_id {
+            if let Err(refusal) = state::topic_encryption::authorize_topic_key(
+                &*self.engine,
+                &region,
+                &master_key_id,
+            ) {
+                return Err(kms_refusal(refusal));
+            }
+        }
         // The store's lock is held for the publish only, and released before the queues
         // subscribed to the topic are delivered to: a delivery is an in-process call into
         // another service, which must not run under this store's lock.

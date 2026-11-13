@@ -179,6 +179,29 @@ fn invalid_parameter(message: String) -> PublishError {
     .into()
 }
 
+/// The modelled error a refusal of the topic's own encryption key is answered in: this
+/// operation models the `KMS*` family precisely because the data key a published message is
+/// sealed under is asked of KMS, so each class KMS refuses the data key in has a shape here.
+///
+/// The sentence is the one KMS answered ([`state::topic_encryption`]) — this service relays
+/// its KMS call rather than wording the refusal itself.
+fn kms_refusal(refusal: state::topic_encryption::KeyRefusal) -> PublishError {
+    use state::topic_encryption::KeyRefusal;
+    match refusal {
+        KeyRefusal::Disabled(message) => {
+            PublishErrorModeled::KMSDisabledException(KMSDisabledException {
+                message: Some(message),
+            })
+        }
+        KeyRefusal::InvalidState(message) => {
+            PublishErrorModeled::KMSInvalidStateException(KMSInvalidStateException {
+                message: Some(message),
+            })
+        }
+    }
+    .into()
+}
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -396,6 +419,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
+        // The data key this message is sealed under, asked of KMS before the message is
+        // accepted: a topic carrying `KmsMasterKeyId` has every message published to it
+        // encrypted under that key, so a key KMS cannot use right now takes no publish
+        // ([`state::topic_encryption`]). The key is read out of the store under its lock
+        // and the decision is made with that lock released, because it is a read of
+        // ANOTHER service's store. A topic this endpoint does not hold names no key, and
+        // the publish below is what reports it as not found.
+        let master_key_id = {
+            let store = store.lock();
+            store.topics.get(&destination).and_then(|topic| {
+                state::topic_encryption::configured_master_key(&topic.attributes)
+                    .map(str::to_string)
+            })
+        };
+        if let Some(master_key_id) = master_key_id {
+            if let Err(refusal) = state::topic_encryption::authorize_topic_key(
+                &*self.engine,
+                &region,
+                &master_key_id,
+            ) {
+                return Err(kms_refusal(refusal));
+            }
+        }
         // The store's lock is held for the publish only, and released before the endpoints
         // subscribed to the topic are delivered to: a delivery is an in-process call into
         // another service, which must not run under this store's lock.
