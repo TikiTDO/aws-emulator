@@ -215,6 +215,39 @@ pub(crate) async fn sqs(router: &MultiServiceRouter, operation: &str, body: &Val
     parsed
 }
 
+/// One Lambda `restJson1` call, as the status it answered and its parsed body.
+///
+/// `pub(crate)` with the callers above and for the same reason: every suite that reads this rule
+/// has to reach Lambda's own control plane — to publish a version, to add or remove a grant, to
+/// ask whether the function is ready — and one caller for that wire serves them all.
+pub(crate) async fn lambda(
+    router: &MultiServiceRouter,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (u16, Value) {
+    let payload = match &body {
+        Some(body) => Bytes::from(body.to_string()),
+        None => Bytes::new(),
+    };
+    let request = http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("host", format!("lambda.{REGION}.amazonaws.com"))
+        .header("content-type", "application/json")
+        .header("authorization", authorization("lambda"))
+        .body(payload)
+        .expect("a well-formed request");
+    let response = router.dispatch(request).await;
+    let status = response.status().as_u16();
+    let parsed: Value = if response.body().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(response.body()).unwrap_or(Value::Null)
+    };
+    (status, parsed)
+}
+
 /// The trust policy an execution role has to carry for Lambda to be handed it.
 pub(crate) fn trust_policy() -> String {
     json!({

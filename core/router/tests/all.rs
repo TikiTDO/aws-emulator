@@ -1599,6 +1599,12 @@ mod logs_subscription_filter_role_trust;
 // can see both ends of it.
 #[path = "all/logs_subscription_filter_to_lambda.rs"]
 mod logs_subscription_filter_to_lambda;
+// Declared in the appended tail, which is where every new suite inserts its lines: which
+// QUALIFIER of a function a `lambda`-protocol SNS subscription invokes, and whose grant admits
+// it, spans SNS, AWS Lambda, Amazon SQS, IAM and CloudFormation at once, so no single service
+// crate's test target can see both the grant and the run it admitted.
+#[path = "all/sns_lambda_qualified_endpoint_delivery.rs"]
+mod sns_lambda_qualified_endpoint_delivery;
 // Declared in the appended tail, beside the suites above: the Resource Groups group a
 // CloudFormation stack declares spans CloudFormation (the deployment and its outputs) and
 // Resource Groups (the group, its query and its tags) at once, so neither crate's own test
