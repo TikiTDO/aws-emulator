@@ -114,6 +114,12 @@ service-com-amazonaws-lambda-awsgirapiservice = { workspace = true }
 # way, so what it authorizes against is the records `iam:PutUserPolicy` really wrote.
 service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# The credential-scoped authorization suite enrols a virtual MFA device the way its holder
+# does, which means computing the one-time pass code that device emits — the HMAC-SHA-1 of its
+# time step (RFC 6238) over the base32 seed the create answered with. `hmac` is already a
+# dependency above; these two are what the test needs beside it.
+sha1 = "0.10"
+data-encoding = "2"
 
 [lints]
 workspace = true

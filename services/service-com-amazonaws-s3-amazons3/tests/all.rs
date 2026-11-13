@@ -143,6 +143,8 @@ mod configuration_subresource_put_status;
 mod copy_source_header_envelopes;
 #[path = "all/copy_source_url_encoding.rs"]
 mod copy_source_url_encoding;
+#[path = "all/credential_scoped_authorization.rs"]
+mod credential_scoped_authorization;
 #[path = "all/directory_bucket_conditional_deletes.rs"]
 mod directory_bucket_conditional_deletes;
 #[path = "all/directory_bucket_listings.rs"]

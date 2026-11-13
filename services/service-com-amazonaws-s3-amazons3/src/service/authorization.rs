@@ -16,7 +16,8 @@
 //! * the CONTEXT the request carries — the condition keys a statement may be written over,
 //!   taken from the request's own members ([`ObjectWriteContext`]) and from the facts this
 //!   gate holds for every request ([`global_conditions`]: who the caller is, which account it
-//!   and the resource belong to) — so a clause over one of them is DECIDED rather than
+//!   and the resource belong to; [`multi_factor_auth_conditions`]: whether the credential that
+//!   signed was MFA-backed) — so a clause over one of them is DECIDED rather than
 //!   unknown, which is what makes a policy that conditions a write on an encryption header,
 //!   or a grant that conditions a read on the resource's owning account, enforceable at all;
 //! * the KEYS this service declares it models ([`PUBLISHED_CONDITION_KEYS`]): absence of one
@@ -108,6 +109,19 @@ const DELIMITER_KEY: &str = "s3:delimiter";
 const PRINCIPAL_ARN_KEY: &str = "aws:PrincipalArn";
 const PRINCIPAL_ACCOUNT_KEY: &str = "aws:PrincipalAccount";
 
+/// The global condition key saying whether the credential that signed the request was
+/// obtained with multi-factor authentication: "whether multi-factor authentication (MFA) was
+/// used to validate the temporary security credentials that made the request" (AWS General
+/// Reference, *Global condition context keys*, `aws:MultiFactorAuthPresent`).
+///
+/// The gate ANSWERS it from the credential the request presented, because the registry that
+/// minted the credential records whether its mint satisfied an MFA challenge
+/// ([`multi_factor_auth_conditions`]). It is PUBLISHED, so the key's ABSENCE is decided too:
+/// "this key is present in the request context only when the principal uses temporary
+/// credentials", so a request signed with a long-term access key carries no value for it, and
+/// an `…IfExists` clause over it — the spelling a "deny unless MFA" statement is written in —
+/// holds on such a request while a clause without the suffix does not.
+const MULTI_FACTOR_AUTH_PRESENT_KEY: &str = "aws:MultiFactorAuthPresent";
 /// The global condition key naming the account that OWNS the resource the request addressed
 /// ("aws:ResourceAccount", same published list).
 ///
@@ -169,10 +183,10 @@ const DATA_ACCESS_POINT_ACCOUNT_KEY: &str = "s3:DataAccessPointAccount";
 /// ("the request carries none") rather than unknown. Every other key keeps the undecided
 /// reading, which refuses nothing.
 ///
-/// The two keys naming the PRINCIPAL are last, because only a decision that resolved the
-/// caller can answer them: [`CALLER_FREE_CONDITION_KEYS`] is this list without them, and
-/// `the_two_published_lists_differ_by_the_principal_keys` in this module's tests holds the two
-/// to that relation.
+/// The keys that name the CALLER and its credential are last, because only a decision that
+/// resolved the signing identity can answer them: [`CALLER_FREE_CONDITION_KEYS`] is this list
+/// without them, and `the_two_published_lists_differ_by_the_caller_keys` in this module's
+/// tests holds the two to that relation.
 pub const PUBLISHED_CONDITION_KEYS: &[&str] = &[
     SECURE_TRANSPORT_KEY,
     ACL_KEY,
@@ -190,15 +204,16 @@ pub const PUBLISHED_CONDITION_KEYS: &[&str] = &[
     RESOURCE_ACCOUNT_KEY,
     PRINCIPAL_ARN_KEY,
     PRINCIPAL_ACCOUNT_KEY,
+    MULTI_FACTOR_AUTH_PRESENT_KEY,
 ];
 
 /// The keys a decision taken WITHOUT the caller resolved publishes ([`policy_denial`], whose
 /// principal is this service's own stand-in rather than the identity that signed): every key
-/// above except the two naming the principal.
+/// above except the ones naming the caller and its credential.
 ///
 /// Publishing a key is saying this service ANSWERS it, and a key published with no value is
 /// decided as ABSENT — which a negated clause over it HOLDS for. So a gate that cannot name
-/// the caller must not publish the principal keys: a clause over them stays undecided there,
+/// the caller must not publish the caller's keys: a clause over them stays undecided there,
 /// and only [`super::request_authorization::denial`], which resolved the signing identity,
 /// decides one.
 pub const CALLER_FREE_CONDITION_KEYS: &[&str] = &[
@@ -218,10 +233,16 @@ pub const CALLER_FREE_CONDITION_KEYS: &[&str] = &[
     RESOURCE_ACCOUNT_KEY,
 ];
 
-/// The keys of [`PUBLISHED_CONDITION_KEYS`] that name the principal, which are the difference
-/// between the two lists above — see `the_two_published_lists_differ_by_the_principal_keys`.
+/// The keys of [`PUBLISHED_CONDITION_KEYS`] that only a decision which resolved the signing
+/// identity can answer — who the caller is, which account it belongs to, and whether its
+/// credential was MFA-backed — which are the difference between the two lists above; see
+/// `the_two_published_lists_differ_by_the_caller_keys`.
 #[cfg(test)]
-const PRINCIPAL_CONDITION_KEYS: &[&str] = &[PRINCIPAL_ARN_KEY, PRINCIPAL_ACCOUNT_KEY];
+const CALLER_CONDITION_KEYS: &[&str] = &[
+    PRINCIPAL_ARN_KEY,
+    PRINCIPAL_ACCOUNT_KEY,
+    MULTI_FACTOR_AUTH_PRESENT_KEY,
+];
 
 /// The global condition key a gate answers from the account this emulator serves, for EVERY
 /// request: which account owns the resource addressed ([`RESOURCE_ACCOUNT_KEY`]).
@@ -266,6 +287,28 @@ pub fn global_conditions(identity_arn: &str) -> Vec<(String, String)> {
         context.push((PRINCIPAL_ACCOUNT_KEY.to_string(), account));
     }
     context
+}
+
+/// What the request's MFA key ([`MULTI_FACTOR_AUTH_PRESENT_KEY`]) answers for the credential
+/// that signed it: one pair when the credential carries a value for the key, and NOTHING when
+/// it carries none — a long-term access key, where the key is simply not in the request
+/// context.
+///
+/// `present` is what the credential itself says
+/// (`sts_store::Caller::multi_factor_auth_present`), read there rather than decided here, so
+/// this service and every other one handed the same credential answer the key alike. The
+/// value is IAM's boolean literal, which is what a `Bool` clause compares against.
+#[must_use]
+pub fn multi_factor_auth_conditions(present: Option<bool>) -> Vec<(String, String)> {
+    present
+        .map(|present| {
+            (
+                MULTI_FACTOR_AUTH_PRESENT_KEY.to_string(),
+                present.to_string(),
+            )
+        })
+        .into_iter()
+        .collect()
 }
 
 /// The two keys naming the ACCESS POINT `route` a request came through
@@ -489,11 +532,11 @@ pub fn expected_bucket_owner_refusal<E>(
 mod tests {
     use super::*;
 
-    /// The two published lists differ by exactly the principal keys: the full list is what a
+    /// The two published lists differ by exactly the caller's keys: the full list is what a
     /// decision that resolved the signing identity publishes, and the caller-free one is that
     /// list without the keys only such a decision can answer.
     #[test]
-    fn the_two_published_lists_differ_by_the_principal_keys() {
+    fn the_two_published_lists_differ_by_the_caller_keys() {
         for key in CALLER_FREE_CONDITION_KEYS {
             assert!(
                 PUBLISHED_CONDITION_KEYS.contains(key),
@@ -501,10 +544,10 @@ mod tests {
                  gate too, got none"
             );
         }
-        for key in PRINCIPAL_CONDITION_KEYS {
+        for key in CALLER_CONDITION_KEYS {
             assert!(
                 PUBLISHED_CONDITION_KEYS.contains(key) && !CALLER_FREE_CONDITION_KEYS.contains(key),
-                "case {key:?}: expected a principal key to be published only where the caller \
+                "case {key:?}: expected a caller key to be published only where the caller \
                  is resolved, got caller_free={}",
                 CALLER_FREE_CONDITION_KEYS.contains(key)
             );
@@ -512,10 +555,10 @@ mod tests {
         let difference = PUBLISHED_CONDITION_KEYS.len() - CALLER_FREE_CONDITION_KEYS.len();
         assert_eq!(
             difference,
-            PRINCIPAL_CONDITION_KEYS.len(),
-            "case \"the two lists\": expected them to differ by the {} principal key(s), got \
+            CALLER_CONDITION_KEYS.len(),
+            "case \"the two lists\": expected them to differ by the {} caller key(s), got \
              {difference}",
-            PRINCIPAL_CONDITION_KEYS.len()
+            CALLER_CONDITION_KEYS.len()
         );
     }
 

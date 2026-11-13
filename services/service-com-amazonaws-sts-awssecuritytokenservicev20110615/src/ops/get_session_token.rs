@@ -281,6 +281,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &caller.identity,
             input.serial_number.as_deref(),
             input.token_code.as_deref(),
+            now,
         ) {
             return Err(crate::scaffolded::Scaffolded::access_denied(
                 failed.message(),
@@ -290,16 +291,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let duration_seconds = input
             .duration_seconds
             .unwrap_or(VENDED_SESSION_DEFAULT_DURATION_SECONDS);
+        // Past the challenge above, a request that PRESENTED one satisfied it: the session
+        // is MFA-authenticated, which is what the credential answers the global MFA
+        // condition key with on every later request it signs
+        // (`crate::state::Caller::multi_factor_auth_present`).
+        let mfa_authenticated = input.serial_number.is_some() && input.token_code.is_some();
         let minted = crate::state::mint_session(
             &*self.engine,
             store,
             &mut registry,
             now,
-            NewSession::new(
-                caller.identity,
-                SessionKind::SessionToken,
-                duration_seconds,
-            ),
+            NewSession {
+                mfa_authenticated,
+                ..NewSession::new(
+                    caller.identity,
+                    SessionKind::SessionToken,
+                    duration_seconds,
+                )
+            },
         );
         let minted = match minted {
             Ok(minted) => minted,

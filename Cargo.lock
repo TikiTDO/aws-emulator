@@ -13737,6 +13737,7 @@ dependencies = [
  "csv",
  "data-encoding",
  "hex",
+ "hmac 0.12.1",
  "http",
  "md-5 0.10.6",
  "pkcs1",
@@ -13748,9 +13749,11 @@ dependencies = [
  "sec1 0.7.3",
  "serde_json",
  "service-common",
+ "sha1 0.10.7",
  "sha2 0.10.9",
  "ssh-key",
  "tokio",
+ "totp-lite",
  "tracing",
  "x509-cert",
 ]
@@ -18052,6 +18055,7 @@ dependencies = [
  "bytes",
  "chrono",
  "chrono-tz",
+ "data-encoding",
  "futures-util",
  "hex",
  "hmac 0.12.1",
@@ -18069,6 +18073,7 @@ dependencies = [
  "service-com-amazonaws-sqs-amazonsqs",
  "service-com-amazonaws-sts-awssecuritytokenservicev20110615",
  "service-common",
+ "sha1 0.10.7",
  "sha2 0.10.9",
  "tokio",
  "tracing",
@@ -19490,13 +19495,16 @@ dependencies = [
  "aws-smithy-types",
  "base64 0.22.1",
  "bytes",
+ "data-encoding",
  "hex",
+ "hmac 0.12.1",
  "http",
  "regex",
  "serde_json",
  "service-com-amazonaws-cognitoidentityprovider-awscognitoidentityproviderservice",
  "service-com-amazonaws-iam-awsidentitymanagementv20100508",
  "service-common",
+ "sha1 0.10.7",
  "sha2 0.10.9",
  "tokio",
  "tracing",
@@ -21296,6 +21304,18 @@ name = "toml_writer"
 version = "1.2.0+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "009dbb7700f11c55ef83aebbe4c0e9cf1f1ac0844bd8d6f00dc38f302026e13a"
+
+[[package]]
+name = "totp-lite"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8e43134db17199f7f721803383ac5854edd0d3d523cc34dba321d6acfbe76c3"
+dependencies = [
+ "digest 0.10.7",
+ "hmac 0.12.1",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "tower"

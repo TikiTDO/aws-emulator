@@ -53,6 +53,13 @@ emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
 hex = { workspace = true }
+# The MFA suite computes the one-time pass code a provisioned virtual MFA device emits — the
+# HMAC-SHA-1 of its time step over its base32 seed (RFC 6238) — itself, so what a mint's
+# challenge is decided against is the arithmetic the holder of the device does rather than the
+# service's own implementation of it.
+hmac = "0.12"
+sha1 = "0.10"
+data-encoding = "2"
 
 [lints]
 workspace = true

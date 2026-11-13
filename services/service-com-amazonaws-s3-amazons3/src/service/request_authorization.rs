@@ -11,7 +11,7 @@
 //! bucket owner's by assumption: it is judged, per action, against the documents in force on
 //! the principal that signed it and against the bucket's own policy.
 //!
-//! Three pieces, each held in exactly one place:
+//! Four pieces, each held in exactly one place:
 //!
 //! 1. **who** — the principal the request's access key id speaks for ([`request_caller`]):
 //!    the session STS minted that key for (the same place `sts:GetCallerIdentity` answers
@@ -23,21 +23,38 @@
 //!    the collection rule itself lives, groups included), so a policy `iam:PutUserPolicy`
 //!    wrote takes effect on the next request and deleting it lifts it again; and the
 //!    BUCKET's own policy, which this service holds.
-//! 3. **the decision** — [`::service_common::iam_authorization`], the tree's ONE evaluation
-//!    of policy documents against `(action, resource, principal)`, so this service and every
-//!    other one handed the same documents answer alike.
+//! 3. **what the CREDENTIAL itself was scoped to** — the session policies the mint of the
+//!    credential passed, which STS holds on the session the access key id names
+//!    (`sts_store::session_scoping_documents`) and which are read by the one reading of a
+//!    resolved scope (`sts_store::ScopingPolicies::decision`). They SCOPE the permissions of
+//!    the identity down and grant nothing of their own: "the resulting session's permissions
+//!    are the intersection of the role's identity-based policies and the session policies"
+//!    (`AssumeRoleRequest$Policy`). A long-term access key is scoped by none.
+//! 4. **the decision** — [`::service_common::iam_authorization`], the tree's ONE evaluation
+//!    of policy documents against `(action, resource, principal, context)`, so this service
+//!    and every other one handed the same documents answer alike.
 //!
 //! ## The rule
 //!
 //! In IAM's own order ("Determining whether a request is allowed or denied within an
-//! account"): an explicit `Deny` about the request — in the bucket policy or in an
-//! identity-based document — refuses it, whatever any grant says. Otherwise the request
+//! account"): an explicit `Deny` about the request — in the bucket policy, in an
+//! identity-based document or in a session policy — refuses it, whatever any grant says.
+//! Otherwise the request
 //! needs a grant: an `Allow` about it among the caller's identity-based documents, or one in
 //! the bucket policy that names the CALLER ("the resource-based policy and the
 //! identity-based policy are evaluated together, and access is granted if either allows
 //! it"). With neither the request falls to IAM's implicit deny and is refused 403
 //! `AccessDenied` ([`state::ACCESS_DENIED_CODE`]), naming the principal, the action and the
-//! resource it addressed.
+//! resource it addressed. A grant still has to pass the scope the credential was minted
+//! with: a request the session policies do not allow is refused even where the documents in
+//! force on the identity allow it, and the refusal names THEM as the document that withheld
+//! the grant, because that needs a different fix.
+//!
+//! A statement may be CONDITIONED, and a condition is decided against the keys the request
+//! carries values for — the request's own members, the global keys this gate answers for
+//! every request, and whether the credential that signed was MFA-backed
+//! ([`authorization::multi_factor_auth_conditions`], read from the credential rather than
+//! decided here), which is what a "deny unless MFA is present" statement is written over.
 //!
 //! A statement that names the ACCOUNT rather than the caller (the account's root ARN, or the
 //! bare account id that stands for it) delegates to the account rather than granting — "you
@@ -60,7 +77,10 @@
 //! * **A principal holding an attachment this emulator cannot read.** An AWS-managed policy
 //!   is owned by AWS rather than by the account, so the account's store holds no document for
 //!   it; refusing on a grant this emulator cannot see would deny access AWS permits. An
-//!   explicit `Deny` in a document that CAN be read still refuses.
+//!   explicit `Deny` in a document that CAN be read still refuses. A credential scoped by a
+//!   MANAGED session policy whose document is likewise unheld is in that same position: a
+//!   scope this emulator cannot read withholds no grant, while a `Deny` in a document it CAN
+//!   read still refuses.
 //! * **An engine carrying no STS or IAM store**, where no session and no identity can exist.
 //!
 //! An expired session credential speaks for nobody: it carries no documents and no principal
@@ -218,6 +238,16 @@ pub struct Caller {
     pub account_principals: Vec<String>,
     /// The identity-based policy documents in force on the principal.
     pub documents: Vec<String>,
+    /// The session policy documents the mint of this credential scoped it with, as they read
+    /// at the instant of this request, and whether a managed one among them names a document
+    /// the IAM store does not hold (see the module docs). Empty for a credential no mint
+    /// scoped, which nothing scopes down.
+    pub scope: sts_store::ScopingPolicies,
+    /// What the request's MFA condition key answers for the credential presented: `Some` for a
+    /// session, whose mint either satisfied an MFA challenge or did not, and `None` for a
+    /// long-term access key, which carries no value for the key
+    /// (`sts_store::Caller::multi_factor_auth_present`).
+    pub multi_factor_auth_present: Option<bool>,
     /// Set when this request presents the account's own published credential, which holds no
     /// IAM policies (see the module docs).
     pub account_credential: bool,
@@ -306,14 +336,26 @@ pub fn request_caller<Eng: Send + Sync + 'static>(
             ctx.credential_store(),
             long_term.clone(),
         )
-        .map(|caller| (caller.identity.arn, caller.role_arn)),
+        .map(|caller| {
+            (
+                caller.identity.arn.clone(),
+                caller.role_arn.clone(),
+                caller.session_policies.clone(),
+                caller.multi_factor_auth_present(),
+            )
+        }),
         // No STS store on this engine: the credential names no session, so it speaks for the
         // long-term identity it was resolved to.
-        None => Ok((long_term.arn.clone(), None)),
+        None => Ok((
+            long_term.arn.clone(),
+            None,
+            sts_store::SessionPolicies::default(),
+            None,
+        )),
     };
     // An expired session credential speaks for nobody: it carries no documents and no
     // principal spelling, so every action it asks for falls to the implicit deny.
-    let Ok((arn, role_arn)) = resolved else {
+    let Ok((arn, role_arn, session_policies, multi_factor_auth_present)) = resolved else {
         return Caller {
             arn: EXPIRED_CREDENTIAL_PRINCIPAL.to_string(),
             ..Caller::default()
@@ -324,6 +366,7 @@ pub fn request_caller<Eng: Send + Sync + 'static>(
         principals: vec![arn.clone()],
         account_principals: iam::account_principals(&arn),
         arn,
+        multi_factor_auth_present,
         ..Caller::default()
     };
     // An assumed-role session is also named by the ARN of the ROLE it is a session of, which
@@ -340,12 +383,22 @@ pub fn request_caller<Eng: Send + Sync + 'static>(
         None => caller.arn.clone(),
     };
     if let Some(iam_state) = iam_state {
-        if let Some(policies) = iam_state.lock().principal_policies(&identity_arn) {
+        // The IAM store of the same engine, read ONCE for both halves of what this credential
+        // may do: the documents in force on its identity, and the documents its mint scoped it
+        // with — the latter read at the instant of the request, so a managed scoping policy
+        // edited since the mint scopes by what it says NOW.
+        let held = iam_state.lock();
+        if let Some(policies) = held.principal_policies(&identity_arn) {
             caller.documents = policies.documents;
             // An attachment the collection resolved no document for is an entry of AWS's own
             // catalog this emulator does not carry: a grant it cannot read.
             caller.unreadable_attachment = !policies.uncarried.is_empty();
         }
+        caller.scope = sts_store::session_scoping_documents(Some(&held), &session_policies);
+    } else {
+        // No IAM store to read a managed scoping policy out of; the inline document the mint
+        // passed scopes the session whether or not a store is there.
+        caller.scope = sts_store::session_scoping_documents(None, &session_policies);
     }
     caller.identity_arn = identity_arn;
     caller
@@ -416,12 +469,16 @@ pub fn denial(
         .map(iam::PreparedDocument::read);
     // The condition context the decision is taken over: what the REQUEST carried, plus the
     // global keys this gate holds for every request (who the caller is, which account it and
-    // the resource belong to), so a statement written over one of those decides rather than
+    // the resource belong to, and whether the credential that signed was MFA-backed), so a
+    // statement written over one of those decides rather than
     // standing undecided. A request that came through an access point also answers the two
     // keys naming it, which is what a bucket policy that delegates to its access points is
     // written over.
     let mut context = conditions.to_vec();
     context.extend(authorization::global_conditions(&caller.identity_arn));
+    context.extend(authorization::multi_factor_auth_conditions(
+        caller.multi_factor_auth_present,
+    ));
     if let Some(route) = &through {
         context.extend(authorization::access_point_conditions(route));
     }
@@ -485,12 +542,41 @@ pub fn denial(
     {
         return refusal(IDENTITY_POLICY_DENY_REASON);
     }
+    // What the SCOPE the credential was minted with says about this request, read by the
+    // tree's one reading of a resolved scope (`sts_store::ScopingPolicies::decision`): a
+    // session policy CAPS what the documents in force grant and grants nothing of its own, so
+    // a request it explicitly denies is refused whatever any grant says — decided here,
+    // before the grants are read, because no grant overturns it — and a request it does not
+    // allow is refused once a grant is found, naming THEM as the document that withheld it.
+    // A credential no mint scoped is capped by nothing.
+    let scoped: Vec<Decision> = addressed
+        .iter()
+        .map(|resource| {
+            caller.scope.decision(&request_over(
+                action,
+                resource,
+                &caller.principals,
+                conditions,
+                published,
+            ))
+        })
+        .collect();
+    if scoped.contains(&Decision::Denied) {
+        return refusal(iam::SESSION_POLICY_EXPLICIT_DENY);
+    }
+    // Whether the scope leaves the request to the documents in force on the identity: a
+    // credential scoped by nothing readable is in that position for every request.
+    let within_scope = scoped.contains(&Decision::Allowed);
     if identity_said
         .iter()
         .any(|said| said.decision == Decision::Allowed)
         || caller.identity_is_unbounded()
     {
-        return None;
+        return if within_scope {
+            None
+        } else {
+            refusal(&iam::no_session_policy_allows(action))
+        };
     }
     // A grant in the BUCKET's own policy — or in the policy of the access point the request
     // came through — names this principal directly, which is a permission of its own (see
@@ -506,7 +592,11 @@ pub fn denial(
         })
     };
     if prepared.as_ref().is_some_and(granted) || access_point_policy.as_ref().is_some_and(granted) {
-        return None;
+        return if within_scope {
+            None
+        } else {
+            refusal(&iam::no_session_policy_allows(action))
+        };
     }
     refusal(&format!(
         "because no identity-based policy allows the {action} action"

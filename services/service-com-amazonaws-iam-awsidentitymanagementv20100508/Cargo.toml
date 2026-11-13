@@ -53,6 +53,11 @@ png = "0.18"
 # Spells a minted virtual MFA device seed in base32, "as specified in RFC3548"
 # (`VirtualMFADevice$Base32StringSeed`).
 data-encoding = "2"
+# Computes the one-time pass code a virtual MFA device emits from that seed (RFC 6238's TOTP),
+# which `EnableMFADevice` authenticates a device with: the code has to be byte-identical to the
+# one the authenticator app that scanned the device shows, so it comes from a library of that
+# algorithm rather than from an implementation of it here.
+totp-lite = "2.0"
 # Hashes a console password into the salted verifier the account holds in place of it, so
 # `ChangePassword` can check the caller's current password without the password being kept.
 sha2 = { workspace = true }
@@ -68,6 +73,11 @@ hex = { workspace = true }
 # Generates the real certificates and key pairs the server-certificate tests feed the
 # service, independently of the DER this crate reads.
 rcgen = "0.13"
+# The MFA enrolment suite computes the pass codes it presents from RFC 6238's definition — the
+# HMAC-SHA-1 of the time step over the device's seed — rather than from the TOTP library the
+# service computes with, so a wrong algorithm in the service cannot be the reason a row passes.
+hmac = "0.12"
+sha1 = "0.10"
 
 [lints]
 workspace = true

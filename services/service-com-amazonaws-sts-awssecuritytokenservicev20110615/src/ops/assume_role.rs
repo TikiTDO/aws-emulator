@@ -492,6 +492,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &caller.identity,
             input.serial_number.as_deref(),
             input.token_code.as_deref(),
+            now,
         ) {
             return Err(crate::scaffolded::Scaffolded::access_denied(
                 failed.message(),
@@ -716,6 +717,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 },
                 external_id: input.external_id.clone(),
                 role_arn: Some(role.arn.clone()),
+                // Past the MFA challenge decided above, a request that PRESENTED one
+                // satisfied it, so the session it mints is MFA-authenticated — what the
+                // credential answers the global MFA condition key with on every later
+                // request it signs (`crate::state::Caller::multi_factor_auth_present`).
+                mfa_authenticated: input.serial_number.is_some() && input.token_code.is_some(),
                 ..NewSession::new(identity, SessionKind::AssumedRole, duration_seconds)
             },
         );

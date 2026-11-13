@@ -263,6 +263,7 @@ fn caller<Eng: Send + Sync + 'static>(
             role_arn: None,
             federated_claims: Vec::new(),
             session_policies: sts_store::SessionPolicies::default(),
+            mfa_authenticated: false,
         }),
     };
     // An expired session credential speaks for nobody: it carries no document, so every

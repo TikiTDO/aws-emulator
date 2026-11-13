@@ -407,5 +407,7 @@ mod user_tag_removal;
 mod user_tags;
 #[path = "all/validation_error_clauses.rs"]
 mod validation_error_clauses;
+#[path = "all/virtual_mfa_device_enablement.rs"]
+mod virtual_mfa_device_enablement;
 #[path = "all/virtual_mfa_devices.rs"]
 mod virtual_mfa_devices;

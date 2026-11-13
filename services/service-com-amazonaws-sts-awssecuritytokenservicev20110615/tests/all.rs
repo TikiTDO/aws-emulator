@@ -23,6 +23,9 @@ mod encoded_message_decoding;
 #[path = "all/malformed_session_policy.rs"]
 mod malformed_session_policy;
 
+#[path = "all/mfa_challenged_mints.rs"]
+mod mfa_challenged_mints;
+
 #[path = "all/packed_policy_budget.rs"]
 mod packed_policy_budget;
 

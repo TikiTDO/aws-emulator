@@ -442,6 +442,9 @@ pub const GET_MFA_DEVICE: &str = "iam:GetMFADevice";
 /// `iam:CreateVirtualMFADevice`.
 pub const CREATE_VIRTUAL_MFA_DEVICE: &str = "iam:CreateVirtualMFADevice";
 
+/// `iam:EnableMFADevice`.
+pub const ENABLE_MFA_DEVICE: &str = "iam:EnableMFADevice";
+
 /// `iam:ListVirtualMFADevices`.
 pub const LIST_VIRTUAL_MFA_DEVICES: &str = "iam:ListVirtualMFADevices";
 

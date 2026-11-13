@@ -5,8 +5,10 @@
 //! One concern, held in one place: the record the account keeps of a device
 //! ([`VirtualMfaDeviceRecord`]), the serial number that identifies it
 //! ([`virtual_mfa_device_arn`]), the seed and the QR code a create mints for it
-//! ([`mint_virtual_mfa_device_seed`], [`virtual_mfa_device_qr_code`]) and the report every
-//! reader of a device makes ([`ComAmazonawsIamAwsidentitymanagementv20100508State::virtual_mfa_device_report`]).
+//! ([`mint_virtual_mfa_device_seed`], [`virtual_mfa_device_qr_code`]), the one-time pass codes
+//! a device provisioned with that seed emits ([`virtual_mfa_device_answers`],
+//! [`virtual_mfa_device_answers_in_sequence`]) and the report every reader of a device makes
+//! ([`ComAmazonawsIamAwsidentitymanagementv20100508State::virtual_mfa_device_report`]).
 
 #[allow(unused_imports)]
 use super::*;
@@ -262,6 +264,109 @@ pub fn virtual_mfa_device_qr_code(
     Some(rendered)
 }
 
+/// How long one time step of a virtual MFA device's one-time pass code lasts.
+///
+/// The device the `otpauth://totp/` URI provisions is a TOTP authenticator
+/// ([`virtual_mfa_device_otpauth_uri`]), and RFC 6238 states this as the default time step —
+/// "we RECOMMEND a default time-step size of 30 seconds" — which is what the authenticator
+/// apps that scan such a URI use when it names none.
+const PASS_CODE_TIME_STEP: ::std::time::Duration = ::std::time::Duration::from_secs(30);
+
+/// How many digits one pass code carries: "the format for this parameter is a string of six
+/// digits" (`EnableMFADeviceRequest$AuthenticationCode1`).
+const PASS_CODE_DIGITS: u32 = 6;
+
+/// How many time steps either side of the current one a presented pass code is still accepted
+/// at: the resynchronisation allowance RFC 6238 states — "we RECOMMEND that at most one
+/// time step is allowed as the network delay" — which is what keeps a code generated a moment
+/// before the step rolled over from being rejected.
+const PASS_CODE_DRIFT_STEPS: u64 = 1;
+
+/// The time step `at` falls in: the TOTP counter, `floor(unix seconds / time step)`.
+///
+/// `None` for an instant before the UNIX epoch, which no counter counts from.
+fn pass_code_time_step(at: ::std::time::SystemTime) -> Option<u64> {
+    let since_epoch = at.duration_since(::std::time::UNIX_EPOCH).ok()?;
+    Some(since_epoch.as_secs() / PASS_CODE_TIME_STEP.as_secs())
+}
+
+/// The seed material a `Base32StringSeed` spells, or `None` for text that is not base32 at all
+/// — "the base32 seed defined as specified in RFC3548"
+/// (`VirtualMFADevice$Base32StringSeed`), which [`mint_virtual_mfa_device_seed`] writes without
+/// padding and an authenticator app may be handed with it.
+fn pass_code_key(base32_string_seed: &str) -> Option<Vec<u8>> {
+    let spelled = base32_string_seed.trim_end_matches('=');
+    ::data_encoding::BASE32_NOPAD
+        .decode(spelled.as_bytes())
+        .ok()
+        .filter(|key| !key.is_empty())
+}
+
+/// The pass code a device holding `key` emits for the time step `step`.
+///
+/// RFC 6238's TOTP over RFC 4226's HOTP, computed by the `totp-lite` crate rather than here:
+/// SHA-1 is the algorithm an `otpauth://` URI implies when it names none, which is what the
+/// authenticator app that scanned the device's QR code computes with, and the code has to be
+/// byte-identical to the one that app shows.
+fn time_based_pass_code(key: &[u8], step: u64) -> String {
+    ::totp_lite::totp_custom::<::totp_lite::Sha1>(
+        PASS_CODE_TIME_STEP.as_secs(),
+        PASS_CODE_DIGITS,
+        key,
+        step.saturating_mul(PASS_CODE_TIME_STEP.as_secs()),
+    )
+}
+
+/// Whether a virtual MFA device provisioned with `base32_string_seed` emits `code` around
+/// `at` — the one-time pass code a request presents as proof that its sender holds the device.
+///
+/// Decided against the steps within the drift allowance ([`PASS_CODE_DRIFT_STEPS`]) of the one
+/// `at` falls in, so a code generated just before the step rolled over still authenticates. A
+/// seed that is not base32, or an instant no counter counts from, authenticates nothing.
+#[must_use]
+pub fn virtual_mfa_device_answers(
+    base32_string_seed: &str,
+    code: &str,
+    at: ::std::time::SystemTime,
+) -> bool {
+    let Some(key) = pass_code_key(base32_string_seed) else {
+        return false;
+    };
+    let Some(step) = pass_code_time_step(at) else {
+        return false;
+    };
+    (step.saturating_sub(PASS_CODE_DRIFT_STEPS)..=step.saturating_add(PASS_CODE_DRIFT_STEPS))
+        .any(|step| time_based_pass_code(&key, step) == code)
+}
+
+/// Whether `first` and `second` are the pass codes that device emits in TWO CONSECUTIVE time
+/// steps around `at`.
+///
+/// What `EnableMFADevice` authenticates a device with: "an authentication code emitted by the
+/// device" and "a subsequent authentication code emitted by the device"
+/// (`EnableMFADeviceRequest$AuthenticationCode1` / `$AuthenticationCode2`) — so the pair proves
+/// the sender holds a device whose clock runs with this one, which one code alone does not.
+#[must_use]
+pub fn virtual_mfa_device_answers_in_sequence(
+    base32_string_seed: &str,
+    first: &str,
+    second: &str,
+    at: ::std::time::SystemTime,
+) -> bool {
+    let Some(key) = pass_code_key(base32_string_seed) else {
+        return false;
+    };
+    let Some(step) = pass_code_time_step(at) else {
+        return false;
+    };
+    (step.saturating_sub(PASS_CODE_DRIFT_STEPS)..=step.saturating_add(PASS_CODE_DRIFT_STEPS)).any(
+        |step| {
+            time_based_pass_code(&key, step) == first
+                && time_based_pass_code(&key, step.saturating_add(1)) == second
+        },
+    )
+}
+
 impl ComAmazonawsIamAwsidentitymanagementv20100508State {
     /// The virtual MFA device the account holds under the serial number `serial_number`,
     /// or `None` when it holds none.
@@ -308,6 +413,96 @@ impl ComAmazonawsIamAwsidentitymanagementv20100508State {
                 .cloned(),
             enable_date: record.enable_date,
             tags: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RFC 6238's own published TOTP-SHA-1 test values, which pin the algorithm a virtual MFA
+    /// device's pass codes are computed by: the shared secret is the ASCII `12345678901234567890`
+    /// of its Appendix B (spelled in base32, which is how a device's seed is held), and each row
+    /// is one of that appendix's instants with the SHA-1 code it publishes for it, read to the
+    /// six digits an authentication code carries.
+    const RFC_6238_SHA1_VALUES: &[(u64, &str)] = &[
+        (59, "287082"),
+        (1_111_111_109, "081804"),
+        (1_111_111_111, "050471"),
+        (1_234_567_890, "005924"),
+        (2_000_000_000, "279037"),
+        (20_000_000_000, "353130"),
+    ];
+
+    /// The base32 spelling of that published shared secret.
+    const RFC_6238_SEED: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+    /// The instant `seconds` after the UNIX epoch.
+    fn at(seconds: u64) -> ::std::time::SystemTime {
+        ::std::time::UNIX_EPOCH + ::std::time::Duration::from_secs(seconds)
+    }
+
+    /// RULE: a device answers exactly the time-based pass codes of its own seed — the values
+    /// RFC 6238 publishes for each instant — and no other code.
+    #[test]
+    fn a_device_answers_the_published_pass_codes_of_its_seed() {
+        for (seconds, code) in RFC_6238_SHA1_VALUES {
+            let answered = virtual_mfa_device_answers(RFC_6238_SEED, code, at(*seconds));
+            assert!(
+                answered,
+                "case {seconds}: expected the device to answer {code}, got answered={answered}"
+            );
+            // One digit off is a different code, and a code of another instant is not this
+            // instant's: a window wide enough to admit either would admit anything.
+            let shifted = format!("{:06}", (code.parse::<u32>().unwrap_or(0) + 1) % 1_000_000);
+            assert!(
+                !virtual_mfa_device_answers(RFC_6238_SEED, &shifted, at(*seconds)),
+                "case {seconds}: expected {shifted} not to be answered, got answered=true"
+            );
+            let elsewhere = at(seconds.saturating_add(600));
+            assert!(
+                !virtual_mfa_device_answers(RFC_6238_SEED, code, elsewhere),
+                "case {seconds}: expected {code} not to be answered ten minutes later, got \
+                 answered=true"
+            );
+        }
+    }
+
+    /// RULE: the pair `EnableMFADevice` authenticates a device with is two codes IN A ROW, so
+    /// the published code of one instant followed by the next step's is accepted and any other
+    /// pairing is not.
+    #[test]
+    fn a_pair_of_pass_codes_is_accepted_only_in_sequence() {
+        // The two instants of RFC 6238's appendix that fall in CONSECUTIVE time steps:
+        // 1111111109 is in step 37037036 and 1111111111 in 37037037.
+        let (first, second) = ("081804", "050471");
+        let now = at(1_111_111_109);
+        let rows: [(&str, &str, &str, bool); 4] = [
+            ("the pair in order", first, second, true),
+            ("the pair reversed", second, first, false),
+            ("one code twice", first, first, false),
+            ("a code of another instant", first, "287082", false),
+        ];
+        for (case, one, two, accepted) in rows {
+            let answer = virtual_mfa_device_answers_in_sequence(RFC_6238_SEED, one, two, now);
+            assert_eq!(
+                answer, accepted,
+                "case {case:?}: expected accepted={accepted}, got {answer}"
+            );
+        }
+    }
+
+    /// RULE: a seed that is not base32 at all answers nothing, rather than answering every
+    /// code or panicking.
+    #[test]
+    fn a_seed_that_is_not_base32_answers_nothing() {
+        for case in ["", "not base32!", "0189"] {
+            let answered = virtual_mfa_device_answers(case, "287082", at(59));
+            assert!(
+                !answered,
+                "case {case:?}: expected no code to be answered, got answered={answered}"
+            );
         }
     }
 }

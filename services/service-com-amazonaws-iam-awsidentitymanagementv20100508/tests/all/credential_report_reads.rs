@@ -421,10 +421,10 @@ async fn the_report_is_rendered_from_the_accounts_own_credentials() {
         );
     }
 
-    // A user holding a virtual MFA device, and one holding a FIDO security key. Nothing
-    // reachable over the wire enables either — `EnableMFADevice` is still a scaffolded 501
-    // and no operation enrolls a security key — so the device is written into the store the
-    // handler reads, as `tests/all/mfa_device_reads.rs` writes one.
+    // A user holding a virtual MFA device, and one holding a FIDO security key. The security
+    // key is enrolled by no operation at all, so both devices are written into the store the
+    // handler reads, as `tests/all/mfa_device_reads.rs` writes one — what a report reads is the
+    // device a user holds, whichever call put it there.
     let with_virtual_mfa = "virtual-mfa-user";
     let with_fido = "fido-user";
     for user_name in [with_virtual_mfa, with_fido] {
@@ -659,9 +659,10 @@ async fn the_report_is_rendered_from_the_accounts_own_credentials() {
 
 /// Enable a virtual MFA device for `user_name`, in the service's OWN store.
 ///
-/// `EnableMFADevice` is still a scaffolded 501, so the fact a report reads — a device a
-/// user holds — is written into the store the handler reads rather than into a second copy
-/// of it.
+/// The fact a report reads is a device a user holds, so it is written into the store the
+/// handler reads rather than into a second copy of it; what `EnableMFADevice` does with a
+/// presented pair of pass codes is its own suite's subject
+/// (`tests/all/virtual_mfa_device_enablement.rs`).
 fn enable_virtual_mfa_device(engine: &engine::InMemoryEngine, user_name: &str) {
     let serial_number = state::virtual_mfa_device_arn(state::DEFAULT_PATH, user_name);
     let store = state::service_state(engine).expect("the IAM store");

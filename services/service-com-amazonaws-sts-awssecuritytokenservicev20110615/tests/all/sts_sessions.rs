@@ -901,6 +901,7 @@ async fn an_expired_session_credential_is_refused_and_a_live_one_is_served() {
                 policies: SessionPolicies::default(),
                 external_id: None,
                 role_arn: None,
+                mfa_authenticated: false,
                 federated_claims: Vec::new(),
                 revoked: false,
             })
@@ -1008,6 +1009,7 @@ async fn the_session_registry_is_bounded_and_prunes_what_the_clock_retired() {
                 policies: SessionPolicies::default(),
                 external_id: None,
                 role_arn: None,
+                mfa_authenticated: false,
                 federated_claims: Vec::new(),
                 revoked: false,
             };
@@ -1036,6 +1038,7 @@ async fn the_session_registry_is_bounded_and_prunes_what_the_clock_retired() {
             policies: SessionPolicies::default(),
             external_id: None,
             role_arn: None,
+            mfa_authenticated: false,
             federated_claims: Vec::new(),
             revoked: false,
         });
@@ -1089,6 +1092,7 @@ async fn the_session_registry_is_bounded_and_prunes_what_the_clock_retired() {
             policies: SessionPolicies::default(),
             external_id: None,
             role_arn: None,
+            mfa_authenticated: false,
             federated_claims: Vec::new(),
             revoked: false,
         })
@@ -1158,6 +1162,7 @@ async fn get_access_key_info_answers_from_the_session_registry() {
                 policies: SessionPolicies::default(),
                 external_id: None,
                 role_arn: None,
+                mfa_authenticated: false,
                 federated_claims: Vec::new(),
                 revoked: false,
             })

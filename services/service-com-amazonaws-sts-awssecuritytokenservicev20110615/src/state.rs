@@ -173,6 +173,11 @@ pub struct Session {
     /// it — the spelling a trust policy names when this session chains into another
     /// role. `None` for every other kind of session.
     pub role_arn: Option<String>,
+    /// Set when the mint of this session SATISFIED an MFA challenge — a `SerialNumber`
+    /// with the `TokenCode` the device answers ([`mfa_challenge_failure`]); see
+    /// [`Caller::multi_factor_auth_present`], which is what a policy condition over the
+    /// request's MFA key is decided against.
+    pub mfa_authenticated: bool,
     /// The condition keys the WEB IDENTITY this session was minted by exchanging publishes,
     /// as `(key, value)` pairs already named after the provider that issued the token; see
     /// [`federated_claim_keys`]. Empty for a session no web-identity exchange minted.
@@ -209,6 +214,8 @@ pub struct NewSession {
     pub external_id: Option<String>,
     /// See [`Session::role_arn`].
     pub role_arn: Option<String>,
+    /// See [`Session::mfa_authenticated`].
+    pub mfa_authenticated: bool,
     /// See [`Session::federated_claims`].
     pub federated_claims: Vec<(String, String)>,
 }
@@ -228,6 +235,7 @@ impl NewSession {
             policies: SessionPolicies::default(),
             external_id: None,
             role_arn: None,
+            mfa_authenticated: false,
             federated_claims: Vec::new(),
         }
     }
@@ -265,6 +273,7 @@ impl NewSession {
             policies: self.policies,
             external_id: self.external_id,
             role_arn: self.role_arn,
+            mfa_authenticated: self.mfa_authenticated,
             federated_claims: self.federated_claims,
             revoked: false,
         }
@@ -1009,6 +1018,9 @@ pub struct Caller {
     /// request signed with it may do; see [`SessionPolicies`]. Empty for a long-term
     /// access key, which no mint scoped.
     pub session_policies: SessionPolicies,
+    /// Set when the mint of this credential satisfied an MFA challenge; see
+    /// [`Session::mfa_authenticated`] and [`Caller::multi_factor_auth_present`].
+    pub mfa_authenticated: bool,
 }
 
 impl Caller {
@@ -1023,7 +1035,25 @@ impl Caller {
             role_arn: None,
             federated_claims: Vec::new(),
             session_policies: SessionPolicies::default(),
+            mfa_authenticated: false,
         }
+    }
+
+    /// What the global condition key naming whether the request was signed with
+    /// MULTI-FACTOR-AUTHENTICATED credentials answers for this caller: `Some(true)` for a
+    /// session whose mint satisfied an MFA challenge, `Some(false)` for every other
+    /// session, and `None` for a long-term access key, which carries no value for the key
+    /// at all.
+    ///
+    /// "This key is present in the request context only when the principal uses temporary
+    /// credentials" (AWS General Reference, *Global condition context keys*,
+    /// `aws:MultiFactorAuthPresent`), which is why a long-term key answers nothing rather
+    /// than answering `false`: the difference is what an `…IfExists` clause over the key is
+    /// written about. ONE reading, so every service that authorizes a request signed with a
+    /// credential this registry minted decides such a clause alike.
+    #[must_use]
+    pub fn multi_factor_auth_present(&self) -> Option<bool> {
+        self.kind.map(|_| self.mfa_authenticated)
     }
 
     /// Every spelling of this caller a role's trust policy may name in its `Principal`
@@ -1072,6 +1102,7 @@ pub fn resolve_request_caller(
             role_arn: session.role_arn.clone(),
             federated_claims: session.federated_claims.clone(),
             session_policies: session.policies.clone(),
+            mfa_authenticated: session.mfa_authenticated,
         }),
         None => Ok(Caller::long_term(long_term)),
     }
@@ -1748,18 +1779,73 @@ pub struct HeldMfaDevice {
     /// the IAM user the device is enabled for: the challenge is the CALLER's, so a device
     /// enabled for another user answers none of the caller's codes.
     pub user_key: String,
+    /// What one-time pass codes this device answers, which is what a presented `TokenCode`
+    /// is authenticated against.
+    pub pass_codes: PassCodes,
+}
+
+impl HeldMfaDevice {
+    /// Whether this device emits `token_code` at `now` — the proof a request presenting an
+    /// MFA challenge has to carry.
+    #[must_use]
+    pub fn answers(&self, token_code: &str, now: SystemTime) -> bool {
+        match &self.pass_codes {
+            PassCodes::None => false,
+            PassCodes::TimeBased(base32_string_seed) => {
+                ::service_com_amazonaws_iam_awsidentitymanagementv20100508::state::virtual_mfa_device_answers(
+                    base32_string_seed,
+                    token_code,
+                    now,
+                )
+            }
+        }
+    }
+}
+
+/// Whether an MFA device answers a one-time pass code at all, and what the codes it answers
+/// are computed from.
+///
+/// `Debug` is written out rather than derived, so no formatter of a resolved device can print
+/// the seed — the same treatment the IAM store's own device record gives it.
+#[derive(Clone)]
+pub enum PassCodes {
+    /// A device that answers no one-time pass code: a FIDO security key authenticates by
+    /// challenge and response, so no six-digit code presented against one is a code it emits.
+    None,
+    /// A virtual MFA device, which emits the time-based pass codes of the seed it was
+    /// provisioned with ("the base32 seed", `VirtualMFADevice$Base32StringSeed`).
+    TimeBased(String),
+}
+
+impl ::std::fmt::Debug for PassCodes {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match self {
+            Self::None => f.write_str("None"),
+            Self::TimeBased(_) => f.write_str("TimeBased(..)"),
+        }
+    }
 }
 
 /// The MFA device the account holds under `serial_number`, or `None` when it holds none.
 ///
-/// A READ of the IAM store: the only MFA devices this emulator's IAM holds are the FIDO
-/// security keys its own device registry keeps, so that is where a serial number is
-/// resolved.
+/// A READ of the IAM store, which holds the two kinds of device a serial number can name: a
+/// FIDO security key of its own device registry, and a VIRTUAL MFA device `iam:EnableMFADevice`
+/// enabled for a user — addressed, as the model says, by the device's ARN
+/// (`VirtualMFADevice$SerialNumber`). A virtual device no user holds is enabled for nobody, so
+/// it answers no caller's challenge.
 pub fn held_mfa_device(iam: &IamState, serial_number: &str) -> Option<HeldMfaDevice> {
-    let device = iam.fido_security_key(serial_number)?;
+    if let Some(device) = iam.fido_security_key(serial_number) {
+        return Some(HeldMfaDevice {
+            serial_number: device.serial_number.clone(),
+            user_key: device.user_key.clone(),
+            pass_codes: PassCodes::None,
+        });
+    }
+    let device = iam.virtual_mfa_device(serial_number)?;
     Some(HeldMfaDevice {
-        serial_number: device.serial_number.clone(),
-        user_key: device.user_key.clone(),
+        serial_number: serial_number.to_string(),
+        user_key: device.user_key.clone()?,
+        pass_codes: PassCodes::TimeBased(device.base32_string_seed.clone()),
     })
 }
 
@@ -1819,26 +1905,26 @@ impl MfaChallengeFailure {
 /// the refusal the caller gets instead of a credential.
 ///
 /// `None` when the request presents no challenge at all (neither member), which is every
-/// request of an identity no policy requires MFA of. `device` is the record
-/// [`held_mfa_device`] read for the serial the request named.
+/// request of an identity no policy requires MFA of, and when it presents one the device
+/// ANSWERS — the case a session is MFA-authenticated by. `device` is the record
+/// [`held_mfa_device`] read for the serial the request named, and `now` the instant the
+/// presented code is checked at.
 ///
-/// A COMPLETE challenge is never authenticated today, and that is a fact about the devices
-/// the account can hold rather than about this rule: the only kind IAM holds is a FIDO
-/// security key, which authenticates by challenge and response and answers no one-time
-/// pass code, so no six-digit code presented against one is the code it would answer. A
-/// device kind that answers one — a virtual MFA device, whose seed `iam:CreateVirtualMFADevice`
-/// would hold, an operation that is still a 501 stub — is what makes the success path
-/// reachable, and it is read here through the device record rather than assumed.
+/// Which codes a device answers is the device's own property ([`HeldMfaDevice::answers`]): a
+/// virtual MFA device emits the time-based pass codes of the seed it was provisioned with,
+/// while a FIDO security key authenticates by challenge and response and emits none, so no
+/// code presented against one is a code it would answer.
 pub fn mfa_challenge_failure(
     device: Option<&HeldMfaDevice>,
     identity: &Identity,
     serial_number: Option<&str>,
     token_code: Option<&str>,
+    now: SystemTime,
 ) -> Option<MfaChallengeFailure> {
-    let serial_number = match (serial_number, token_code) {
+    let (serial_number, token_code) = match (serial_number, token_code) {
         // No challenge: nothing to validate, and nothing MFA-gated is claimed either.
         (None, None) => return None,
-        (Some(serial_number), Some(_presented)) => serial_number,
+        (Some(serial_number), Some(presented)) => (serial_number, presented),
         // Half a challenge cannot be validated: a code with no device named to validate it
         // against, or a device named with no code to validate.
         _ => return Some(MfaChallengeFailure::SerialNotAssociated),
@@ -1851,9 +1937,9 @@ pub fn mfa_challenge_failure(
         // The account holds no device of this identity under that serial, which is what
         // the refusal tells the caller to check.
         None => Some(MfaChallengeFailure::SerialNotAssociated),
-        // The serial IS this identity's, so what cannot be validated is the CODE: the
-        // device answers none, as the note above records.
-        Some(_device) => Some(MfaChallengeFailure::InvalidPassCode),
+        // The serial IS this identity's, so what is validated is the CODE: the challenge is
+        // satisfied exactly when the device emits the one presented.
+        Some(device) => (!device.answers(token_code, now)).then_some(MfaChallengeFailure::InvalidPassCode),
     }
 }
 
