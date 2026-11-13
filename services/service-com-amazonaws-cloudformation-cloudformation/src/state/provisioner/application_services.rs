@@ -1248,6 +1248,159 @@ pub(super) async fn describe_cluster(
     }
 }
 
+/// The error code Amazon ECS answers for a service it does not hold
+/// (`ServiceNotFoundException`: "The specified service wasn't found").
+pub(super) const SERVICE_NOT_FOUND: &str = "ServiceNotFoundException";
+
+/// CloudFormation `AWS::ECS::Service` properties mapped to `CreateService` members.
+pub(super) const ECS_SERVICE_MEMBERS: &[(&str, &str)] = &[
+    ("Cluster", "cluster"),
+    ("DesiredCount", "desiredCount"),
+    ("LaunchType", "launchType"),
+    ("NetworkConfiguration", "networkConfiguration"),
+    ("LoadBalancers", "loadBalancers"),
+    ("DeploymentConfiguration", "deploymentConfiguration"),
+    ("Role", "role"),
+    ("SchedulingStrategy", "schedulingStrategy"),
+    ("TaskDefinition", "taskDefinition"),
+    ("PlatformVersion", "platformVersion"),
+    ("EnableExecuteCommand", "enableExecuteCommand"),
+    ("HealthCheckGracePeriodSeconds", "healthCheckGracePeriodSeconds"),
+    ("PlacementConstraints", "placementConstraints"),
+    ("PlacementStrategies", "placementStrategy"),
+    ("ServiceConnectConfiguration", "serviceConnectConfiguration"),
+    ("VolumeConfigurations", "volumeConfigurations"),
+];
+
+/// Create the service an `AWS::ECS::Service` declares.
+pub(super) async fn create_service(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    resource: &StoredResource,
+    propagated: &[(String, String)],
+) -> Result<Created, Refusal> {
+    let mut request = Map::new();
+    if let Value::Object(properties) = &resource.properties {
+        for (property, member) in ECS_SERVICE_MEMBERS {
+            if let Some(value) = properties.get(*property) {
+                request.insert((*member).to_string(), lower_camel_members(value, 0)?);
+            }
+        }
+    }
+    let tags = tags_of(&resource.properties, propagated);
+    if !tags.is_empty() {
+        request.insert("tags".to_string(), tags_as_list(&tags, LOWER_CASED_TAG));
+    }
+    let service_name = resource
+        .properties
+        .get("ServiceName")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            if let Some((_, name)) = resource.physical_resource_id.rsplit_once('/') {
+                name.to_string()
+            } else {
+                resource.physical_resource_id.clone()
+            }
+        });
+    request.insert("serviceName".to_string(), Value::String(service_name));
+
+    let reported = call_json_rpc(
+        ctx,
+        ECS_SIGNING_NAME,
+        region,
+        AWS_JSON_1_1,
+        &format!("{ECS_TARGET_PREFIX}.CreateService"),
+        &Value::Object(request),
+    )
+    .await?;
+
+    let mut attributes = BTreeMap::new();
+    let mut physical_resource_id = None;
+    if let Some(service) = reported.get("service") {
+        if let Some(arn) = service.get("serviceArn").and_then(Value::as_str) {
+            attributes.insert("Arn".to_string(), arn.to_string());
+            attributes.insert("ServiceArn".to_string(), arn.to_string());
+            physical_resource_id = Some(arn.to_string());
+        }
+        if let Some(name) = service.get("serviceName").and_then(Value::as_str) {
+            attributes.insert("Name".to_string(), name.to_string());
+        }
+    }
+
+    Ok(Created {
+        physical_resource_id,
+        attributes,
+    })
+}
+
+pub(super) async fn delete_service(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    resource: &StoredResource,
+) -> Result<(), Refusal> {
+    let mut request = Map::new();
+    request.insert(
+        "service".to_string(),
+        Value::String(resource.physical_resource_id.clone()),
+    );
+    if let Some(cluster) = resource
+        .properties
+        .get("Cluster")
+        .and_then(Value::as_str)
+    {
+        request.insert("cluster".to_string(), Value::String(cluster.to_string()));
+    }
+    request.insert("force".to_string(), Value::Bool(true));
+    match call_json_rpc(
+        ctx,
+        ECS_SIGNING_NAME,
+        region,
+        AWS_JSON_1_1,
+        &format!("{ECS_TARGET_PREFIX}.DeleteService"),
+        &Value::Object(request),
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(refusal) if refusal.code == SERVICE_NOT_FOUND => Ok(()),
+        Err(refusal) => Err(refusal),
+    }
+}
+
+pub(super) async fn describe_service(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    physical_resource_id: &str,
+    cluster: Option<&str>,
+) -> Result<Option<Value>, Refusal> {
+    const INACTIVE: &str = "INACTIVE";
+    let mut request = Map::new();
+    request.insert(
+        "services".to_string(),
+        Value::Array(vec![Value::String(physical_resource_id.to_string())]),
+    );
+    if let Some(c) = cluster {
+        request.insert("cluster".to_string(), Value::String(c.to_string()));
+    }
+    match call_json_rpc(
+        ctx,
+        ECS_SIGNING_NAME,
+        region,
+        AWS_JSON_1_1,
+        &format!("{ECS_TARGET_PREFIX}.DescribeServices"),
+        &Value::Object(request),
+    )
+    .await
+    {
+        Ok(answer) => Ok(first_listed(&answer, "services").filter(|service| {
+            service.get("status").and_then(Value::as_str) != Some(INACTIVE)
+        })),
+        Err(refusal) if refusal.code == SERVICE_NOT_FOUND => Ok(None),
+        Err(refusal) => Err(refusal),
+    }
+}
+
 /// The collection's configuration as OpenSearch Serverless reports it, for drift
 /// detection, in the TYPE's own property vocabulary — the same correspondence the create
 /// maps the other way, so an actual configuration is comparable with the template's.

@@ -4346,7 +4346,7 @@ pub(super) fn ec2_network_identity(
 }
 
 /// The `AWS::ECS::Service` resource type: a service running on an ECS cluster.
-pub(super) const ECS_SERVICE: &str = "AWS::ECS::Service";
+pub const ECS_SERVICE: &str = "AWS::ECS::Service";
 
 /// The two AWS Lambda types whose published identifier is the FUNCTION's ARN with a
 /// qualifier: a published version's carries the version number, an alias's the alias name.

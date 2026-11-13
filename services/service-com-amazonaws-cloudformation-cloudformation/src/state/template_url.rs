@@ -276,8 +276,8 @@ pub async fn fetch_as(
         ctx,
         region,
         &object,
-        super::TEMPLATE_BODY_MAX_BYTES,
-        &super::template_body_too_long(None),
+        super::TEMPLATE_MAX_BYTES,
+        &super::template_body_too_long_within(None, super::TEMPLATE_MAX_BYTES),
         refused,
     )
     .await

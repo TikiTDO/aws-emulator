@@ -515,7 +515,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // it addresses is read from this emulator's own Amazon S3 and becomes the body this
         // update deploys, so a template submitted by reference and the same one submitted
         // inline apply the same update (`crate::state::template_url`).
-        if let Some(url) = input.template_url.take() {
+        let max_template_bytes = if let Some(url) = input.template_url.take() {
             let body = crate::state::template_url::fetch(
                 ctx,
                 &crate::state::request_region(ctx.parts()),
@@ -524,7 +524,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .await
             .map_err(crate::scaffolded::Scaffolded::validation_error)?;
             input.template_body = Some(body);
-        }
+            crate::state::TEMPLATE_MAX_BYTES
+        } else {
+            crate::state::TEMPLATE_BODY_MAX_BYTES
+        };
         // A stack policy reaches CloudFormation either inline, as the request's own policy
         // body, or by reference, as a URL naming "a policy (maximum size: 16 KB) located in
         // an Amazon S3 bucket in the same Amazon Web Services Region as the stack" — and
@@ -608,7 +611,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             Some(body) => {
                 // The documented `TemplateBody` maximum, which the model carries no
                 // `@length` for.
-                crate::state::validate_template_body(body)
+                crate::state::validate_template_body_within(body, max_template_bytes)
                     .map_err(crate::scaffolded::Scaffolded::validation_error)?;
                 // The documented per-template quotas, the ceilings
                 // `DescribeAccountLimits` advertises for this account: a body past one is

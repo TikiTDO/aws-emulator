@@ -348,7 +348,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // body everything below plans from, so a template submitted by reference and the
         // same one submitted inline produce the same change set
         // (`crate::state::template_url`).
-        if let Some(url) = input.template_url.take() {
+        let max_template_bytes = if let Some(url) = input.template_url.take() {
             let body = crate::state::template_url::fetch(
                 ctx,
                 &crate::state::request_region(ctx.parts()),
@@ -357,7 +357,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .await
             .map_err(crate::scaffolded::Scaffolded::validation_error)?;
             input.template_body = Some(body);
-        }
+            crate::state::TEMPLATE_MAX_BYTES
+        } else {
+            crate::state::TEMPLATE_BODY_MAX_BYTES
+        };
         // "By default, CloudFormation specifies UPDATE."
         let requested_type = input
             .change_set_type
@@ -417,7 +420,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some(body) = &input.template_body {
             // The documented `TemplateBody` maximum, which the model carries no `@length`
             // for.
-            crate::state::validate_template_body(body)
+            crate::state::validate_template_body_within(body, max_template_bytes)
                 .map_err(crate::scaffolded::Scaffolded::validation_error)?;
             // The documented per-template quotas, the ceilings `DescribeAccountLimits`
             // advertises for this account: a body past one is refused before the change
