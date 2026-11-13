@@ -91,6 +91,9 @@ impl Owner {
             Self::SecretsManagerSecret => {
                 secretsmanager_secret::create(ctx, region, resource, propagated).await
             }
+            Self::SecretsManagerSecretTargetAttachment => {
+                secretsmanager_secret_target_attachment::create(ctx, region, resource).await
+            }
             // A nested stack carries the stack-level tags CloudFormation propagates to the
             // resources it creates and is created under the acknowledgement the parent's own
             // operation gave, which `CreateStack` takes as its `Tags` and `Capabilities`.
@@ -222,6 +225,9 @@ impl Owner {
                     .await
             }
             Self::SecretsManagerSecret => Ok(secretsmanager_secret::readiness()),
+            Self::SecretsManagerSecretTargetAttachment => {
+                Ok(secretsmanager_secret_target_attachment::readiness())
+            }
             Self::StepFunctionsStateMachine => Ok(step_functions_state_machine::readiness()),
             // Each of these resources EXISTS from the moment its create answers: API Gateway
             // reports no state an api, a resource, a method, a deployment or a stage is still
@@ -326,7 +332,9 @@ impl Owner {
             // A rotation schedule's `Id` is the ARN of the secret it was configured on, which
             // its own create answered, so there is nothing left to read once it is up.
             Self::SecretsManagerRotationSchedule => Ok(BTreeMap::new()),
-            Self::SecretsManagerSecret | Self::StepFunctionsStateMachine => Ok(BTreeMap::new()),
+            Self::SecretsManagerSecret
+            | Self::SecretsManagerSecretTargetAttachment
+            | Self::StepFunctionsStateMachine => Ok(BTreeMap::new()),
             // An api's id and its root resource, and the id of a resource or a deployment, are
             // the ones their own creates answered with, so there is nothing left to read once
             // the resource is up.
@@ -422,6 +430,9 @@ impl Owner {
             }
             Self::SecretsManagerRotationSchedule => {
                 Ok(secretsmanager_rotation_schedule::removal())
+            }
+            Self::SecretsManagerSecretTargetAttachment => {
+                Ok(secretsmanager_secret_target_attachment::removal())
             }
             Self::SecretsManagerSecret => {
                 secretsmanager_secret::removal(ctx, region, physical_resource_id).await
@@ -550,6 +561,10 @@ impl Owner {
             Self::SecretsManagerSecret => {
                 secretsmanager_secret::update(ctx, region, resource, declared).await
             }
+            Self::SecretsManagerSecretTargetAttachment => {
+                secretsmanager_secret_target_attachment::update(ctx, region, resource, declared)
+                    .await
+            }
             Self::StepFunctionsStateMachine => {
                 step_functions_state_machine::update(ctx, region, resource, declared, propagated)
                     .await
@@ -645,7 +660,8 @@ impl Owner {
             // no arm here yet ([`Provisioner::retag`]'s own default), so nothing is asked about
             // them.
             // A rotation schedule is not taggable at all, so nothing is asked about its tags.
-            Self::SecretsManagerRotationSchedule => Ok(()),
+            Self::SecretsManagerRotationSchedule
+            | Self::SecretsManagerSecretTargetAttachment => Ok(()),
             Self::SecretsManagerSecret | Self::StepFunctionsStateMachine => Ok(()),
             // Nor are the tags of an api or a stage that already exists ([`Provisioner::retag`]'s
             // own default), so nothing is asked about those either.
@@ -758,6 +774,9 @@ impl Owner {
             // snapshot invented for it.
             Self::SecretsManagerSecret => {
                 secretsmanager_secret::delete(ctx, region, resource).await
+            }
+            Self::SecretsManagerSecretTargetAttachment => {
+                secretsmanager_secret_target_attachment::delete(ctx, region, resource).await
             }
             // Step Functions takes no snapshot of a state machine on the way out: there is no
             // such call, so a `Snapshot` deletion policy on this type deletes the machine with
@@ -873,6 +892,12 @@ impl Owner {
             Self::SecretsManagerSecret => {
                 secretsmanager_secret::actual_configuration(ctx, region, resource).await
             }
+            Self::SecretsManagerSecretTargetAttachment => {
+                secretsmanager_secret_target_attachment::actual_configuration(
+                    ctx, region, resource,
+                )
+                .await
+            }
             Self::StepFunctionsStateMachine => {
                 step_functions_state_machine::actual_configuration(
                     ctx,
@@ -927,6 +952,7 @@ impl Owner {
             // AWS Secrets Manager's and AWS Step Functions' do the same.
             Self::SecretsManagerRotationSchedule
             | Self::SecretsManagerSecret
+            | Self::SecretsManagerSecretTargetAttachment
             | Self::StepFunctionsStateMachine => message.to_string(),
             // Amazon API Gateway's does the same.
             Self::ApiGatewayRestApi(_) => message.to_string(),
