@@ -181,14 +181,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // A token this listing did not mint names no position in it, so it is
         // refused on the member rather than answered with an empty page.
-        let after = match input.next_token.as_deref() {
-            Some(token) => Some(
-                crate::state::decode_page_token_or_reject(Self::NAME, token).map_err(
-                    ListAttachmentRoutingPolicyAssociationsErrorModeled::ValidationException,
-                )?,
-            ),
-            None => None,
-        };
+        let after = crate::state::page_start_or_reject(Self::NAME, input.next_token.as_deref())
+            .map_err(ListAttachmentRoutingPolicyAssociationsErrorModeled::ValidationException)?;
 
         // One entry per attachment of this core network that carries a routing policy label;
         // an attachment with no label has no routing policy association, so it is absent

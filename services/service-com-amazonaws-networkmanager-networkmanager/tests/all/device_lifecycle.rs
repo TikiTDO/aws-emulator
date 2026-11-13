@@ -617,8 +617,10 @@ async fn a_next_token_this_service_did_not_mint_is_refused_by_get_devices() {
     let network = emulator.create_global_network("tokens").await;
     create_device_ok(&emulator, &network, json!({})).await;
 
+    // Every row is a NON-empty value: the empty string is no token at all — it satisfies
+    // the modelled `length 0..2048` and names no position, so it asks for the first page
+    // (`crate::empty_page_token`).
     let cases: Vec<(&str, String)> = vec![
-        ("empty", String::new()),
         ("not hex", "zzzz".to_string()),
         ("an odd number of hex digits", "abc".to_string()),
         (

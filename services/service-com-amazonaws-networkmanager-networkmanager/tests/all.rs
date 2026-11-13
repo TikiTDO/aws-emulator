@@ -131,6 +131,8 @@ mod disassociate_link_tie_scope;
 mod edge_location_in_force;
 #[path = "all/empty_optional_reference.rs"]
 mod empty_optional_reference;
+#[path = "all/empty_page_token.rs"]
+mod empty_page_token;
 #[path = "all/empty_reference_filter.rs"]
 mod empty_reference_filter;
 #[path = "all/filter_id_list_maximum.rs"]

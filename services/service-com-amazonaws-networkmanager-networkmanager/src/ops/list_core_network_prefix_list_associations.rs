@@ -205,14 +205,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // A token this listing did not mint names no position in it, so it is
         // refused on the member rather than answered with an empty page — the refusal every
         // other listing of this service gives for the same input.
-        let after = match input.next_token.as_deref() {
-            Some(token) => Some(
-                crate::state::decode_page_token_or_reject(Self::NAME, token).map_err(
-                    ListCoreNetworkPrefixListAssociationsErrorModeled::ValidationException,
-                )?,
-            ),
-            None => None,
-        };
+        let after = crate::state::page_start_or_reject(Self::NAME, input.next_token.as_deref())
+            .map_err(ListCoreNetworkPrefixListAssociationsErrorModeled::ValidationException)?;
 
         // The store key `crate::state::prefix_list_association_key` mints begins with this
         // core network's id and ends in the prefix list ARN that identifies the association

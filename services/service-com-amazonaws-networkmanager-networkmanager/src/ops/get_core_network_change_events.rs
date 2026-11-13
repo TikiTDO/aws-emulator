@@ -194,13 +194,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let entries = version.change_events_at(now);
         drop(store);
 
-        let after = match input.next_token.as_deref() {
-            Some(token) => Some(
-                crate::state::decode_page_token_or_reject(Self::NAME, token)
-                    .map_err(GetCoreNetworkChangeEventsErrorModeled::ValidationException)?,
-            ),
-            None => None,
-        };
+        let after = crate::state::page_start_or_reject(Self::NAME, input.next_token.as_deref())
+            .map_err(GetCoreNetworkChangeEventsErrorModeled::ValidationException)?;
 
         // The events are keyed by `IdentifierPath`, which "uniquely identifies the path for
         // a change within the changeset", so a page resumes after the last path it carried.

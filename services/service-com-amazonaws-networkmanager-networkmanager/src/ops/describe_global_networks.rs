@@ -152,13 +152,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // An opaque token this service did not mint cannot name a key offset, so it is a
         // client error rather than an empty page.
-        let after = match input.next_token.as_deref() {
-            Some(token) => Some(
-                crate::state::decode_page_token_or_reject(Self::NAME, token)
-                    .map_err(DescribeGlobalNetworksErrorModeled::ValidationException)?,
-            ),
-            None => None,
-        };
+        let after = crate::state::page_start_or_reject(Self::NAME, input.next_token.as_deref())
+            .map_err(DescribeGlobalNetworksErrorModeled::ValidationException)?;
 
         // `GlobalNetworkIds` NARROWS this listing to the stored global networks it names:
         // it is a selector over what the caller holds, intersected with state, so an id

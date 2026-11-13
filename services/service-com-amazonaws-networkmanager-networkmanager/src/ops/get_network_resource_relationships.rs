@@ -196,13 +196,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         crate::state::check_network_resource_type(input.resource_type.as_deref())
             .map_err(GetNetworkResourceRelationshipsErrorModeled::ValidationException)?;
 
-        let after = match input.next_token.as_deref() {
-            Some(token) => Some(
-                crate::state::decode_page_token_or_reject(Self::NAME, token)
-                    .map_err(GetNetworkResourceRelationshipsErrorModeled::ValidationException)?,
-            ),
-            None => None,
-        };
+        let after = crate::state::page_start_or_reject(Self::NAME, input.next_token.as_deref())
+            .map_err(GetNetworkResourceRelationshipsErrorModeled::ValidationException)?;
 
         // The filters select RESOURCES, exactly as they do for `GetNetworkResources`, and a
         // relationship is reported when one of the two resources it joins is selected: a

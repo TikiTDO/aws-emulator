@@ -213,13 +213,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         crate::state::check_filter_ids("LinkIds", &requested)
             .map_err(GetLinksErrorModeled::ValidationException)?;
 
-        let after = match input.next_token.as_deref() {
-            Some(token) => Some(
-                crate::state::decode_page_token_or_reject(Self::NAME, token)
-                    .map_err(GetLinksErrorModeled::ValidationException)?,
-            ),
-            None => None,
-        };
+        let after = crate::state::page_start_or_reject(Self::NAME, input.next_token.as_deref())
+            .map_err(GetLinksErrorModeled::ValidationException)?;
 
         // Every filter the request carries narrows the global network's links; an absent
         // one matches everything, and `LinkIds` filters on the ids it names.

@@ -165,13 +165,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         crate::state::check_network_resource_type(requested_type)
             .map_err(GetNetworkResourceCountsErrorModeled::ValidationException)?;
 
-        let after = match input.next_token.as_deref() {
-            Some(token) => Some(
-                crate::state::decode_page_token_or_reject(Self::NAME, token)
-                    .map_err(GetNetworkResourceCountsErrorModeled::ValidationException)?,
-            ),
-            None => None,
-        };
+        let after = crate::state::page_start_or_reject(Self::NAME, input.next_token.as_deref())
+            .map_err(GetNetworkResourceCountsErrorModeled::ValidationException)?;
 
         let store = state.lock();
         // The resource the path addresses is checked next. This operation models no

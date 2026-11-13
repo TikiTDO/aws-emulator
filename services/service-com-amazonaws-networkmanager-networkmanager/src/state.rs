@@ -3910,9 +3910,22 @@ pub fn decode_page_token(listing: &str, token: &str) -> Option<String> {
     (encode_page_token(listing, last_key) == token).then(|| last_key.to_string())
 }
 
-/// Decode a continuation token with [`decode_page_token`], or answer the ONE refusal every
-/// paginated listing of this service gives for a token it did not mint — whether no listing
-/// of this service minted it or another one did.
+/// Where the `next_token` a request carries makes a paginated listing START: the key offset
+/// the token names, or `None` for the first page. Every paginated listing of this service
+/// reads its `NextToken` through here, so one value has one reading whatever is listed.
+///
+/// An EMPTY token is NO token. The member is modelled `length 0..2048` (`smithy_query
+/// query="shape" shape="NextToken"`) and travels in the query string, so `?nextToken=`
+/// satisfies the schema and reaches the handler as the empty string — a value that names no
+/// position, and whose only page can be the first one. That is the reading this service
+/// gives every optional string member whose modelled length admits the empty string
+/// ([`optional_reference`], [`normalized_client_token`]): empty is the ABSENCE of the value,
+/// not a value nothing can resolve. The first page is also what a listing answers for the
+/// omitted member, so the two spellings of "no token" agree.
+///
+/// Any other token [`decode_page_token`] cannot decode for `listing` gets the ONE refusal
+/// every paginated listing of this service gives for a token it did not mint — whether no
+/// listing of this service minted it or another one did.
 ///
 /// A request carrying such a token was itself read perfectly well — it is the value of the
 /// single input member `NextToken` that names no position in the listing, which is what the
@@ -3923,18 +3936,23 @@ pub fn decode_page_token(listing: &str, token: &str) -> Option<String> {
 /// TEXT it was handed could not be read at all (a resource policy document that is no
 /// JSON: [`validate_resource_policy_document`]). Stated once here so no listing of this
 /// service can answer another `Reason`, or another `Fields` entry, for the same input.
-pub fn decode_page_token_or_reject(
+pub fn page_start_or_reject(
     listing: &str,
-    token: &str,
-) -> Result<String, ValidationException> {
-    decode_page_token(listing, token).ok_or_else(|| ValidationException {
-        message: "NextToken does not name a position in this listing".to_string(),
-        reason: Some(REASON_FIELD_VALIDATION_FAILED.to_string()),
-        fields: Some(vec![ValidationExceptionField {
-            name: FIELD_NEXT_TOKEN.to_string(),
-            message: "the token names no position in this listing".to_string(),
-        }]),
-    })
+    next_token: Option<&str>,
+) -> Result<Option<String>, ValidationException> {
+    let Some(token) = next_token.filter(|token| !token.is_empty()) else {
+        return Ok(None);
+    };
+    decode_page_token(listing, token)
+        .map(Some)
+        .ok_or_else(|| ValidationException {
+            message: "NextToken does not name a position in this listing".to_string(),
+            reason: Some(REASON_FIELD_VALIDATION_FAILED.to_string()),
+            fields: Some(vec![ValidationExceptionField {
+                name: FIELD_NEXT_TOKEN.to_string(),
+                message: "the token names no position in this listing".to_string(),
+            }]),
+        })
 }
 
 /// Take one page of `listing`'s `entries` (which must be sorted by key) starting after
@@ -3945,7 +3963,7 @@ pub fn decode_page_token_or_reject(
 /// follows tokens sees every item exactly once.
 ///
 /// `listing` is the same listing name the `after` key was decoded with
-/// ([`decode_page_token_or_reject`]): the token minted here names a position in THIS
+/// ([`page_start_or_reject`]): the token minted here names a position in THIS
 /// listing's key space, so only this listing accepts it back.
 pub fn paginate<T>(
     listing: &str,

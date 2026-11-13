@@ -385,14 +385,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // A token this listing did not mint names no position in it, so it is
         // refused on the member rather than answered with an empty page — the refusal every
         // other listing of this service gives for the same input.
-        let after = match input.next_token.as_deref() {
-            Some(token) => Some(
-                crate::state::decode_page_token_or_reject(Self::NAME, token).map_err(
-                    ListCoreNetworkRoutingInformationErrorModeled::ValidationException,
-                )?,
-            ),
-            None => None,
-        };
+        let after = crate::state::page_start_or_reject(Self::NAME, input.next_token.as_deref())
+            .map_err(ListCoreNetworkRoutingInformationErrorModeled::ValidationException)?;
 
         // The routes the segment holds at this edge, keyed by [`route_key`] so the listing
         // is in a stable key order and a route declared twice is held once.

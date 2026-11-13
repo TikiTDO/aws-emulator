@@ -48,11 +48,11 @@ const EDGE_LOCATION: &str = "us-west-2";
 const SEGMENT_NAME: &str = "shared";
 
 /// One paginated listing under test: the case name and the request that reaches it.
-struct Listing {
-    case: &'static str,
-    method: &'static str,
-    uri: String,
-    body: Option<Value>,
+pub(crate) struct Listing {
+    pub(crate) case: &'static str,
+    pub(crate) method: &'static str,
+    pub(crate) uri: String,
+    pub(crate) body: Option<Value>,
 }
 
 /// A listing reached with a GET and no request body.
@@ -67,7 +67,7 @@ fn listing(case: &'static str, uri: String) -> Listing {
 
 /// Every operation of this service that pages with a `NextToken`, at the method and URI
 /// the model binds it to, against the `global_network` and `core_network` the test set up.
-fn listings(global_network: &str, core_network: &str, device: &str) -> Vec<Listing> {
+pub(crate) fn listings(global_network: &str, core_network: &str, device: &str) -> Vec<Listing> {
     vec![
         listing(
             "ListOrganizationServiceAccessStatus",
@@ -191,7 +191,7 @@ async fn refuse(emulator: &Emulator, listing: &Listing, token: &str) -> (u16, Va
 
 /// A global network, an AVAILABLE core network inside it and a device of it, so every
 /// listing in the table addresses resources that exist and reaches its own token check.
-async fn fixture(emulator: &Emulator) -> (String, String, String) {
+pub(crate) async fn fixture(emulator: &Emulator) -> (String, String, String) {
     let (global_network, core_network) =
         core_network_at(emulator, "unminted page token", &[EDGE_LOCATION]).await;
     let device = create_device_ok(

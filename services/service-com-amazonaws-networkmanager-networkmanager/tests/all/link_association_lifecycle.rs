@@ -878,8 +878,10 @@ async fn get_link_associations_pages_the_selected_associations_exactly_once() {
         );
     }
 
-    // A token this service never minted is a field failure, not an empty page.
-    for token in ["", "not-hex", "6e6f74206f7572732d746f6b656e"] {
+    // A NON-empty token this service never minted is a field failure, not an empty page.
+    // The empty string is no token at all — it satisfies the modelled `length 0..2048` and
+    // names no position, so it asks for the first page (`crate::empty_page_token`).
+    for token in ["not-hex", "6e6f74206f7572732d746f6b656e"] {
         let (status, body) =
             get_associations(&emulator, &network, &format!("deviceId={device}&nextToken={token}"))
                 .await;

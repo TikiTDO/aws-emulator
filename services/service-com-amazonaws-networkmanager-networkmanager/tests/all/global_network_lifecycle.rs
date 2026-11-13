@@ -696,8 +696,10 @@ async fn a_next_token_this_service_did_not_mint_is_refused() {
     let network = emulator.create_global_network("tokens").await;
     emulator.create_site(&network, "one").await;
 
+    // Every row is a NON-empty value: the empty string is no token at all — it satisfies
+    // the modelled `length 0..2048` and names no position, so it asks for the first page
+    // (`crate::empty_page_token`) — and `hex::encode("")` is that same empty string.
     let cases: Vec<(&str, String)> = vec![
-        ("empty", String::new()),
         ("not hex", "zzzz".to_string()),
         ("an odd number of hex digits", "abc".to_string()),
         (
@@ -705,7 +707,7 @@ async fn a_next_token_this_service_did_not_mint_is_refused() {
             hex::encode("someone-else:global-network-0"),
         ),
         ("hex of non-utf8 bytes", hex::encode([0xff, 0xfe, 0xfd])),
-        ("hex of an empty payload", hex::encode("")),
+        ("hex of a prefix with no key", hex::encode("networkmanager:")),
     ];
 
     for (case, token) in cases {

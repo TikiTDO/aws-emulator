@@ -689,13 +689,14 @@ async fn a_global_network_the_store_does_not_hold_is_not_found_and_a_foreign_tok
         );
     }
 
-    // A token this service did not mint names no offset into the listing, so it is refused
-    // on the member rather than silently answered from the first page.
+    // A NON-empty token this service did not mint names no offset into the listing, so it
+    // is refused on the member rather than silently answered from the first page. The
+    // empty string is no token at all — it satisfies the modelled `length 0..2048` and
+    // names no position, so it asks for the first page (`crate::empty_page_token`).
     for (case, token) in [
         ("not hex at all", "not-a-token"),
         ("hex of foreign text", "6e6f742d612d746f6b656e"),
         ("a truncated token", "6e6574776f726b6d616e61"),
-        ("empty", ""),
     ] {
         let query = format!("nextToken={}", escape(token));
         let (status, body) = emulator.get(&relationships_uri(&network, &query)).await;

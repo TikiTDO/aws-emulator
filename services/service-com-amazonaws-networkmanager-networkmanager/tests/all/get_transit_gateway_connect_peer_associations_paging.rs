@@ -384,18 +384,15 @@ async fn a_page_token_this_service_did_not_issue_is_refused_on_the_member_that_c
         .unwrap_or_else(|| panic!("case the first page: expected a NextToken in {first}"))
         .to_string();
 
-    // The rows: nothing at all in the slot, a string that is no token of any kind, one that
-    // cannot be decoded at all, one that decodes to a plain word, one that decodes to bytes
-    // that are no text at all, and one that decodes to a token another service would have
-    // minted.
+    // The rows: a string that is no token of any kind, one that cannot be decoded at all,
+    // one that decodes to a plain word, one that decodes to bytes that are no text at all,
+    // and one that decodes to a token another service would have minted.
     let tokens: Vec<(&str, String)> = vec![
-        // A `NextToken` is opaque and every one this service issues is hex of a prefixed
-        // store key, so the empty string — which the modelled `len 0..2048, pattern
-        // ^[\s\S]*$` admits as a VALUE but which carries no prefix — names no page this
-        // service handed out, and is refused like any other foreign token. That is how every
-        // paged reader of this service treats it (`crate::get_transit_gateway_registrations_paging`
-        // pins the same row for its own listing), so the two cannot disagree.
-        ("an empty token", String::new()),
+        // Every row is a NON-empty value. The empty string — which the modelled `len
+        // 0..2048, pattern ^[\s\S]*$` admits as a VALUE — names no position at all, so it
+        // is no token rather than a foreign one and asks for the first page. That is how
+        // every paged reader of this service reads it (`crate::empty_page_token` pins it
+        // over all of them), so the two cannot disagree.
         ("a string that is no token", "not-a-token".to_string()),
         (
             "a half-decodable token",

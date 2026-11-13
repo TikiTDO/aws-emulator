@@ -176,13 +176,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         crate::state::check_filter_ids("DeviceIds", &requested)
             .map_err(GetDevicesErrorModeled::ValidationException)?;
 
-        let after = match input.next_token.as_deref() {
-            Some(token) => Some(
-                crate::state::decode_page_token_or_reject(Self::NAME, token)
-                    .map_err(GetDevicesErrorModeled::ValidationException)?,
-            ),
-            None => None,
-        };
+        let after = crate::state::page_start_or_reject(Self::NAME, input.next_token.as_deref())
+            .map_err(GetDevicesErrorModeled::ValidationException)?;
 
         // `SiteId` is an OPTIONAL reference member, so what it names is read the way every
         // other reader and writer of an optional reference reads it

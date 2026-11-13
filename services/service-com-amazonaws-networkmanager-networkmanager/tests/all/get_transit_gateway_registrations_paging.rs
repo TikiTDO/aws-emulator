@@ -256,12 +256,13 @@ async fn a_page_token_this_service_did_not_issue_is_refused_on_the_member_that_c
         .unwrap_or_else(|| panic!("case the first page: expected a NextToken in {first}"))
         .to_string();
 
-    // The rows: nothing at all in the slot, a string that is no token of any kind, one that
-    // cannot be decoded at all, one that decodes to a plain word, one that decodes to bytes
-    // that are no text at all, and one that decodes to a token another service would have
-    // minted.
+    // The rows: a string that is no token of any kind, one that cannot be decoded at all,
+    // one that decodes to a plain word, one that decodes to bytes that are no text at all,
+    // and one that decodes to a token another service would have minted. Each is NON-empty:
+    // nothing at all in the slot is no token rather than an unminted one — it satisfies the
+    // modelled `length 0..2048` and names no position, so it asks for the first page
+    // (`crate::empty_page_token`).
     let rows: Vec<(&str, String)> = vec![
-        ("an empty token", String::new()),
         ("a string that is no token", "not-a-token".to_string()),
         (
             "a half-decodable token",

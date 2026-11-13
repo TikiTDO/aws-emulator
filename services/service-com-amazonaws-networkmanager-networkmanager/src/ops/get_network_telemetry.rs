@@ -188,13 +188,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         crate::state::check_telemetry_resource_type(input.resource_type.as_deref())
             .map_err(GetNetworkTelemetryErrorModeled::ValidationException)?;
 
-        let after = match input.next_token.as_deref() {
-            Some(token) => Some(
-                crate::state::decode_page_token_or_reject(Self::NAME, token)
-                    .map_err(GetNetworkTelemetryErrorModeled::ValidationException)?,
-            ),
-            None => None,
-        };
+        let after = crate::state::page_start_or_reject(Self::NAME, input.next_token.as_deref())
+            .map_err(GetNetworkTelemetryErrorModeled::ValidationException)?;
 
         // Every filter the request carries narrows the global network's registrations and
         // an absent one matches everything. A filter is matched against the STORED

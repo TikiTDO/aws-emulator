@@ -714,8 +714,10 @@ async fn a_next_token_this_service_did_not_mint_is_refused_by_get_links() {
     let site = emulator.create_site(&network, "hq").await;
     create_link_ok(&emulator, &network, &site, &plain_link()).await;
 
+    // Every row is a NON-empty value: the empty string is no token at all — it satisfies
+    // the modelled `length 0..2048` and names no position, so it asks for the first page
+    // (`crate::empty_page_token`).
     let cases: Vec<(&str, String)> = vec![
-        ("empty", String::new()),
         ("not hex", "zzzz".to_string()),
         ("an odd number of hex digits", "abc".to_string()),
         (

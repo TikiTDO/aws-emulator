@@ -167,13 +167,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // A token this listing did not mint names no position in the history, so it is
         // refused on the member rather than answered with an empty page — the refusal every
         // other paginated listing of this service gives it.
-        let after = match input.next_token.as_deref() {
-            Some(token) => Some(
-                crate::state::decode_page_token_or_reject(Self::NAME, token)
-                    .map_err(ListCoreNetworkPolicyVersionsErrorModeled::ValidationException)?,
-            ),
-            None => None,
-        };
+        let after = crate::state::page_start_or_reject(Self::NAME, input.next_token.as_deref())
+            .map_err(ListCoreNetworkPolicyVersionsErrorModeled::ValidationException)?;
 
         // A core network that holds no version at all is answered with an EMPTY list rather
         // than a refusal: the core network the path names exists, and an empty history is
