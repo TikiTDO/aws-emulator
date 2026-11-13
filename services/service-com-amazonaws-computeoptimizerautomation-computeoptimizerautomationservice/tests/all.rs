@@ -45,6 +45,8 @@ mod automation_rule_validation;
 mod client_token_request_spellings;
 #[path = "all/cross_operation_page_tokens.rs"]
 mod cross_operation_page_tokens;
+#[path = "all/denial_in_every_wire_protocol.rs"]
+mod denial_in_every_wire_protocol;
 #[path = "all/denial_principal_agrees_with_sts.rs"]
 mod denial_principal_agrees_with_sts;
 #[path = "all/disassociated_member_initiation.rs"]

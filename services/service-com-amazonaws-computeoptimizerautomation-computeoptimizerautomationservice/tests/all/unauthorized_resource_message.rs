@@ -56,7 +56,10 @@ pub(crate) fn expected_message(principal: &str, operation: &str, resource: &str)
 /// Every operation of this service whose input names a resource by ARN:
 /// `ruleArn` on the three rule operations and `resourceArn` on the three tagging
 /// ones (`smithy_query(query="operation",operation="GetAutomationRule,UpdateAutomationRule,DeleteAutomationRule,TagResource,UntagResource,ListTagsForResource")`).
-const RESOURCE_OPERATIONS: [&str; 6] = [
+///
+/// `pub(crate)` for the sibling suites that assert the SAME sentence about other
+/// inputs, so there is ONE list of the operations the rule covers.
+pub(crate) const RESOURCE_OPERATIONS: [&str; 6] = [
     "GetAutomationRule",
     "UpdateAutomationRule",
     "DeleteAutomationRule",
@@ -95,7 +98,10 @@ pub(crate) fn request_for(operation: &str, resource: &str) -> Value {
 /// automation rule of this service, whose form is the model's `RuleArn`
 /// (`^arn:aws:compute-optimizer::[0-9]{12}:automation-rule/[a-zA-Z0-9_-]+$`,
 /// from `smithy_query(query="shape",shape="RuleArn")`).
-fn unauthorized_resources() -> Vec<(&'static str, String)> {
+///
+/// `pub(crate)` for the same reason [`RESOURCE_OPERATIONS`] is: the sibling
+/// suites judge the same forms rather than each listing their own.
+pub(crate) fn unauthorized_resources() -> Vec<(&'static str, String)> {
     let account = engine::EMULATOR_ACCOUNT_ID;
     vec![
         ("not-an-arn", "not-an-arn".to_string()),

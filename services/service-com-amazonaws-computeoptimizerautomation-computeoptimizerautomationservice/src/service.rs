@@ -28,7 +28,10 @@
 //!   there — with the denial built from the request's own principal, action and
 //!   resource string — because authorization is evaluated against the supplied
 //!   resource string before the service parses it; see
-//!   [`DenyUnauthorizedResource`].
+//!   [`DenyUnauthorizedResource`]. The resource string is read, and the denial
+//!   answered, through the protocol THAT request is served in, so a client of
+//!   either protocol this service declares is answered the same decision in its
+//!   own envelope.
 //! - `override_refusal` — how this service words a request the framework refused
 //!   before any handler ran. The default returns `None`, keeping the framework's
 //!   wording. See the inline note on that method for how to reword.
@@ -46,6 +49,7 @@
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
 
+use aws_smithy_schema::{Schema, ShapeId, ShapeType};
 use smithy_server_runtime::{
     http, BoxFuture, ErasedOperation, OperationContext, Refusal, Refused, ServerHttpProtocol,
     Service,
@@ -61,8 +65,9 @@ use std::sync::Arc;
 const ACCESS_DENIED_CODE: &str = "AccessDeniedException";
 const ACCESS_DENIED_STATUS: u16 = 403;
 
-/// The operations whose input names a resource by ARN, and the member each one
-/// names it in.
+/// The operations whose input names a resource by ARN, and the one-member body
+/// schema each one's resource string is read through
+/// ([`RULE_ARN_REQUEST`] / [`RESOURCE_ARN_REQUEST`], which name the member).
 ///
 /// These are exactly the `RuleArn`-typed input members of this service:
 /// `ruleArn` on the three rule operations and `resourceArn` on the three tagging
@@ -71,13 +76,13 @@ const ACCESS_DENIED_STATUS: u16 = 403;
 /// operation that happens to be called `resourceArn` without being a `RuleArn`
 /// is not judged by this gate — and an operation that takes no resource never
 /// has its body read here.
-const RESOURCE_MEMBERS: [(&str, &str); 6] = [
-    ("GetAutomationRule", "ruleArn"),
-    ("UpdateAutomationRule", "ruleArn"),
-    ("DeleteAutomationRule", "ruleArn"),
-    ("TagResource", "resourceArn"),
-    ("UntagResource", "resourceArn"),
-    ("ListTagsForResource", "resourceArn"),
+const RESOURCE_MEMBERS: [(&str, &Schema); 6] = [
+    ("GetAutomationRule", &RULE_ARN_REQUEST),
+    ("UpdateAutomationRule", &RULE_ARN_REQUEST),
+    ("DeleteAutomationRule", &RULE_ARN_REQUEST),
+    ("TagResource", &RESOURCE_ARN_REQUEST),
+    ("UntagResource", &RESOURCE_ARN_REQUEST),
+    ("ListTagsForResource", &RESOURCE_ARN_REQUEST),
 ];
 
 /// Answers one request `AccessDeniedException` (HTTP 403), with the IAM denial
@@ -133,7 +138,12 @@ impl<Eng: Send + Sync + 'static> DenyUnauthorizedResource<Eng> {
         ctx: &OperationContext<'_>,
     ) -> aws_smithy_runtime_api::http::Response {
         let definition = svc.definition();
-        let Some((operation, resource)) = unauthorized_resource(definition.protocol(), req) else {
+        // The protocol THIS request is served in: the refusal is read out of the
+        // request and answered back in the one codec the request arrived in, so
+        // a client of either of this service's protocols reads the denial in
+        // its own envelope.
+        let wire = definition.wire_protocol(req);
+        let Some((operation, resource)) = unauthorized_resource(wire.protocol(), req) else {
             // Unreachable: this operation is reached only for a request whose
             // operation and resource member [`Service::override_operation`] has
             // already read out of these same bytes. A request whose resource
@@ -154,8 +164,7 @@ impl<Eng: Send + Sync + 'static> DenyUnauthorizedResource<Eng> {
                 &resource,
             )),
         };
-        definition
-            .protocol()
+        wire.protocol()
             .serialize_error(
                 &denial,
                 &crate::ops::types::SCHEMA_ACCESS_DENIED_EXCEPTION,
@@ -172,27 +181,109 @@ impl<Eng: Send + Sync + 'static> DenyUnauthorizedResource<Eng> {
 ///
 /// Resolves the operation first, so only the operations that take a resource ARN
 /// ([`RESOURCE_MEMBERS`]) are judged at all, then reads that operation's
-/// resource member out of the body and asks
+/// resource member out of the body ([`supplied_resource`]) and asks
 /// [`crate::state::names_automation_rule`] whether it names an automation rule
 /// of this service. A request this cannot read — an unknown operation, a
-/// streamed body, a body that is not the protocol's JSON object — is `None` and
-/// is left to the modelled walk, which refuses it on its own terms.
+/// streamed body, a body that is not the serving protocol's object — is `None`
+/// and is left to the modelled walk, which refuses it on its own terms.
+///
+/// `protocol` is the codec the request is SERVED in, so both reads are the ones
+/// the rest of the request uses: a service that declares several protocols is
+/// reached over each of them, and an authorization decision is taken from what a
+/// request states, never from the encoding it stated it in.
 fn unauthorized_resource(
     protocol: &dyn ServerHttpProtocol,
     req: &aws_smithy_runtime_api::http::Request,
 ) -> Option<(&'static str, String)> {
     let routing_key = protocol.routing_key(req).ok()?;
-    let (operation, arn_member) = RESOURCE_MEMBERS
+    let (operation, request_schema) = RESOURCE_MEMBERS
         .iter()
         .find(|(candidate, _)| *candidate == routing_key)?;
-    let body = req.body().bytes()?;
-    let serde_json::Value::Object(members) =
-        serde_json::from_slice::<serde_json::Value>(body).ok()?
-    else {
-        return None;
-    };
-    let supplied = members.get(*arn_member)?.as_str()?;
-    (!crate::state::names_automation_rule(supplied)).then(|| (*operation, supplied.to_string()))
+    let supplied = supplied_resource(protocol, req, request_schema)?;
+    (!crate::state::names_automation_rule(&supplied)).then_some((*operation, supplied))
+}
+
+/// The namespace the two read-only schemas below name themselves in. They stand
+/// for the READ this gate performs, not for a shape of the model — the model's
+/// own input shapes carry every other member of their operation, which this read
+/// deliberately does not look at — so they are named after the gate.
+const AUTHORIZATION_READ_NAMESPACE: &str = "emulator.authorization";
+
+/// The `ruleArn` member of a request, typed as the string it is on the wire.
+static RULE_ARN: Schema = Schema::new_member(
+    ShapeId::from_static(
+        "emulator.authorization#RuleArnRequest$ruleArn",
+        AUTHORIZATION_READ_NAMESPACE,
+        "ruleArn",
+    ),
+    ShapeType::String,
+    "ruleArn",
+    0,
+);
+
+/// The `resourceArn` member of a request, the name the tagging operations spell
+/// the same `RuleArn` with.
+static RESOURCE_ARN: Schema = Schema::new_member(
+    ShapeId::from_static(
+        "emulator.authorization#ResourceArnRequest$resourceArn",
+        AUTHORIZATION_READ_NAMESPACE,
+        "resourceArn",
+    ),
+    ShapeType::String,
+    "resourceArn",
+    0,
+);
+
+/// The body schema a `ruleArn` request is read through: a structure declaring
+/// THAT ONE member.
+///
+/// Authorization is taken BEFORE the request is parsed as its operation's input,
+/// so the read that feeds it is not the modelled input shape: a codec skips every
+/// member a schema does not declare, so this reads the resource string and
+/// nothing else, and a body that also misses another required member, or carries
+/// one outside its constraints, still names the resource the decision is about.
+static RULE_ARN_REQUEST: Schema = Schema::new_struct(
+    ShapeId::from_static(
+        "emulator.authorization#RuleArnRequest",
+        AUTHORIZATION_READ_NAMESPACE,
+        "RuleArnRequest",
+    ),
+    ShapeType::Structure,
+    &[&RULE_ARN],
+);
+
+/// The body schema a `resourceArn` request is read through; see
+/// [`RULE_ARN_REQUEST`].
+static RESOURCE_ARN_REQUEST: Schema = Schema::new_struct(
+    ShapeId::from_static(
+        "emulator.authorization#ResourceArnRequest",
+        AUTHORIZATION_READ_NAMESPACE,
+        "ResourceArnRequest",
+    ),
+    ShapeType::Structure,
+    &[&RESOURCE_ARN],
+);
+
+/// The resource string `req` supplies, read through the codec the request is
+/// SERVED in and against `request_schema`'s one member.
+///
+/// `None` when the body is not a structure in that codec, carries no such member,
+/// or carries something other than a string there: then the request names no
+/// resource this gate can judge, and the modelled walk answers it.
+fn supplied_resource(
+    protocol: &dyn ServerHttpProtocol,
+    req: &aws_smithy_runtime_api::http::Request,
+    request_schema: &Schema,
+) -> Option<String> {
+    let mut reader = protocol.deserialize_input(req, request_schema).ok()?;
+    let mut supplied = None;
+    reader
+        .read_struct(request_schema, &mut |member, value| {
+            supplied = Some(value.read_string(member)?);
+            Ok(())
+        })
+        .ok()?;
+    supplied
 }
 
 /// The `com-amazonaws-computeoptimizerautomation-computeoptimizerautomationservice` emulated service: the generated [`ServiceDefinition`] plus
@@ -226,7 +317,7 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     /// built from too, so the gate and the message it answers with cannot
     /// disagree about which request is refused.
     fn names_unauthorized_resource(&self, req: &aws_smithy_runtime_api::http::Request) -> bool {
-        unauthorized_resource(self.entry.protocol(), req).is_some()
+        unauthorized_resource(self.entry.wire_protocol(req).protocol(), req).is_some()
     }
 }
 

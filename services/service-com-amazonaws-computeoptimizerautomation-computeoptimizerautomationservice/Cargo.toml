@@ -34,5 +34,11 @@ hex = { workspace = true }
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
+[dev-dependencies]
+# Encodes the rpcv2Cbor request a CBOR client of this service sends, and decodes
+# the error envelope it is answered in, so a test can assert the refusal this
+# service serves over each protocol the model declares.
+aws-smithy-cbor = "0.62.2"
+
 [lints]
 workspace = true
