@@ -346,9 +346,9 @@ impl Reader {
                     let document: Value = serde_json::from_str(text).unwrap_or_else(|error| {
                         panic!("case {case:?}: expected an event document, got {text:?} ({error})")
                     });
-                    document["id"]
+                    document["event_id"]
                         .as_str()
-                        .unwrap_or_else(|| panic!("case {case:?}: {text} carries no id"))
+                        .unwrap_or_else(|| panic!("case {case:?}: {text} carries no event_id"))
                         .to_string()
                 }
             })

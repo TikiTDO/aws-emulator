@@ -5,8 +5,9 @@
 //! Reports the raw performance events `PutRumEvents` appended to the app monitor the
 //! route names: the monitor's own stored buffer, narrowed to the requested time window
 //! and to the events matching one of the requested `Filters`, returned one page at a
-//! time. Every event is reported as the JSON document the data plane accepted, so a read
-//! answers from persisted state and writes nothing of its own.
+//! time. Every event is reported as the RUM event document the data plane enriched it into
+//! when it was accepted ([`crate::state::rum_event`]), so a read answers from persisted
+//! state and writes nothing of its own.
 //!
 //! ## Shape of an operation
 //!
@@ -276,12 +277,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .events_from(resume_after)
             .filter(|(_, stored)| match parsed_event(&stored.event_json) {
                 // The instant is read through the ONE codec the data-plane write stored
-                // it with ([`crate::state::event_instant_seconds`]) rather than
+                // it with ([`crate::state::rum_event::event_instant_millis`]) rather than
                 // re-derived from anything else, so an event is placed in the window at
-                // the instant it was delivered at — whichever form that codec had to
-                // carry it in.
+                // the instant it was delivered at, on the scale the window's own bounds
+                // are expressed on.
                 Some(document) => {
-                    window.covers(crate::state::event_instant_seconds(&document))
+                    window.covers(crate::state::rum_event::event_instant_millis(&document))
                         && matches_filters(&document, &selections)
                 }
                 // An event whose stored document does not parse cannot be placed in the
@@ -465,7 +466,8 @@ fn selections_digest(selections: &[Selection<'_>]) -> String {
     hex::encode(digest.finalize())
 }
 
-/// The time window a query selects events from.
+/// The time window a query selects events from, in the unit its bounds are expressed in:
+/// milliseconds since the epoch.
 #[derive(Clone, Copy)]
 struct Window {
     /// `TimeRange$After`: the first instant the window covers.
@@ -488,9 +490,11 @@ impl Window {
     /// that left it at the default ([`OMITTED_BEFORE`]) is answered against the window
     /// ending NOW. Every OTHER value the member admits is one the caller SENT, so it
     /// bounds the window where it says: `QueryTimestamp` is a `long` with no `@range`, and
-    /// an instant before the epoch is as much an instant as one after it. Both bounds are
-    /// read in the unit this protocol carries a `RumEvent$timestamp` in — seconds since
-    /// the epoch — because they bound that same instant.
+    /// an instant before the epoch is as much an instant as one after it. Recorded
+    /// behaviour: both bounds are read in MILLISECONDS since the epoch — the unit a RUM
+    /// event document carries its own `event_timestamp` in
+    /// ([`crate::state::rum_event::EVENT_TIMESTAMP_FIELD`]) — because they bound that same
+    /// instant, and a window and an event compared on two different scales select nothing.
     ///
     /// This resolution is made by the call that STARTS a query — the one carrying no
     /// continuation token — and the window it produces is then carried by that query's
@@ -500,26 +504,26 @@ impl Window {
         Self {
             after: time_range.after,
             before: if time_range.before == OMITTED_BEFORE {
-                now_seconds()
+                now_millis()
             } else {
                 time_range.before
             },
         }
     }
 
-    /// Whether an event at `seconds` falls in this window. Both bounds are inclusive —
+    /// Whether an event at `millis` falls in this window. Both bounds are inclusive —
     /// they are the beginning and the end of the range, not exclusive neighbours of it —
     /// and an event whose instant cannot be read falls in no window.
-    fn covers(&self, seconds: Option<i64>) -> bool {
-        seconds.is_some_and(|seconds| self.after <= seconds && seconds <= self.before)
+    fn covers(&self, millis: Option<i64>) -> bool {
+        millis.is_some_and(|millis| self.after <= millis && millis <= self.before)
     }
 }
 
-/// Now, in seconds since the epoch.
-fn now_seconds() -> i64 {
+/// Now, in milliseconds since the epoch — the unit this query's bounds are expressed in.
+fn now_millis() -> i64 {
     ::std::time::SystemTime::now()
         .duration_since(::std::time::UNIX_EPOCH)
-        .map(|since_epoch| i64::try_from(since_epoch.as_secs()).unwrap_or(i64::MAX))
+        .map(|since_epoch| i64::try_from(since_epoch.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or_default()
 }
 
@@ -548,7 +552,7 @@ const FILTER_ATTRIBUTES: &[(&str, &str)] = &[
     ("Page", "pageId"),
 ];
 
-/// The `QueryFilter$Name` key that searches the event's own `type` rather than an
+/// The `QueryFilter$Name` key that searches the event's own `event_type` rather than an
 /// attribute of its client JSON.
 const EVENT_TYPE_KEY: &str = "EventType";
 
@@ -624,20 +628,27 @@ fn matches_filters(document: &::serde_json::Value, selections: &[Selection<'_>])
 ///
 /// A dimension other than the event type is an attribute of the client JSON the event
 /// arrived with: looked up in `metadata`, which is where a RUM web client reports the
-/// session's identity, and then in `details`, since the model constrains neither document
-/// and a client may report a page's identity with that page event's own details.
+/// session's identity, and then in the event's own details, since the model constrains
+/// neither document and a client may report a page's identity with that page event's own
+/// details. Both are read under the field names the RUM event document carries them under
+/// ([`crate::state::rum_event`]), which is the document this query walks.
 fn dimension(document: &::serde_json::Value, key: &str) -> Option<String> {
     if key == EVENT_TYPE_KEY {
-        return document.get("type").and_then(scalar_text);
+        return document
+            .get(crate::state::EVENT_TYPE_FIELD)
+            .and_then(scalar_text);
     }
     let attribute = FILTER_ATTRIBUTES
         .iter()
         .find(|(filter_key, _)| *filter_key == key)
         .map(|(_, attribute)| *attribute)?;
-    ["metadata", "details"]
-        .into_iter()
-        .filter_map(|section| document.get(section)?.get(attribute))
-        .find_map(scalar_text)
+    [
+        crate::state::rum_event::METADATA_FIELD,
+        crate::state::EVENT_DETAILS_FIELD,
+    ]
+    .into_iter()
+    .filter_map(|section| document.get(section)?.get(attribute))
+    .find_map(scalar_text)
 }
 
 /// One JSON scalar as the text a `QueryFilterValue` is compared against: a string as

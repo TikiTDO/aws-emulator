@@ -123,6 +123,8 @@ mod resource_policy;
 mod resource_tagging;
 #[path = "all/resource_tags.rs"]
 mod resource_tags;
+#[path = "all/rum_event_documents.rs"]
+mod rum_event_documents;
 #[path = "all/shared_destination_arn_rule.rs"]
 mod shared_destination_arn_rule;
 #[path = "all/shared_page_size_rule.rs"]

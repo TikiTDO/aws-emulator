@@ -5,18 +5,18 @@
 //!
 //! The rule under test: while a monitor's `CwLogEnabled` is on, every event of every batch
 //! `PutRumEvents` accepts for it is copied into the log group the monitor advertises as
-//! `DataStorage.CwLog.CwLogGroup` — one log event per delivered RUM event, carrying that
-//! event as the batch delivered it beside the batch's own context, in the stream of the
+//! `DataStorage.CwLog.CwLogGroup` — one log event per delivered RUM event, carrying exactly
+//! the RUM event document the data plane enriched that event into, in the stream of the
 //! user session the batch came from — and while it is off, nothing is copied anywhere. The
 //! copies are stored BESIDE the monitor's own buffer: `GetAppMonitorData` still reports
-//! every delivered event.
+//! every delivered event, as the same document.
 //!
 //! The rows span what the rule generalises over: how many events one batch carries, how
 //! many batches a session sends, how many sessions a monitor collects from, whether the
-//! batch names a session at all, whether it names an `Alias`, whether an event carries
-//! `metadata`, and the shape of an event's `details`. The second suite spans the other
-//! dimension — when delivery is on: off at the create, turned on by an update, turned off
-//! again.
+//! batch names a session at all, whether it names an `Alias` (a request-level condition
+//! value, which is no part of a RUM event), whether an event carries `metadata`, and the
+//! shape of an event's `details`. The second suite spans the other dimension — when
+//! delivery is on: off at the create, turned on by an update, turned off again.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,10 +33,10 @@ struct Event {
     id: &'static str,
     /// `RumEvent$type`.
     event_type: &'static str,
-    /// `RumEvent$timestamp` as seconds since the epoch, and the RFC 3339 rendering the
-    /// stored (and copied) document carries it as.
+    /// `RumEvent$timestamp` as seconds since the epoch — the unit the wire carries it in —
+    /// and the milliseconds the copied document carries it as.
     timestamp: i64,
-    instant: &'static str,
+    instant_millis: i64,
     /// `RumEvent$metadata`, an `@mediaType("application/json")` string, for the events that
     /// carry one.
     metadata: Option<&'static str>,
@@ -57,6 +57,17 @@ impl Event {
             event["metadata"] = json!(metadata);
         }
         event
+    }
+
+    /// The `event_interaction` the copy carries for this event: the `interaction` the
+    /// client stamped its payload with, and the session's zeroth for an event that names
+    /// none — which is every event of this suite, since none of these fixtures reports one.
+    fn interaction(&self) -> Value {
+        [self.details, self.metadata.unwrap_or("{}")]
+            .into_iter()
+            .filter_map(|document| parsed(document).get("interaction").cloned())
+            .find(|value| !value.is_null())
+            .unwrap_or_else(|| json!(0))
     }
 }
 
@@ -101,32 +112,37 @@ impl Delivery {
         body
     }
 
-    /// The copy this batch owes the log group for `event`: the event as delivered, plus the
-    /// batch's own context under the member names this service's model spells them with.
+    /// The copy this batch owes the log group for `event`: the RUM event document the data
+    /// plane enriched that event into, under the field names RUM publishes for a RUM event.
     fn expected_copy(&self, event: &Event, monitor: &str, monitor_id: &str) -> Value {
+        let metadata = event.metadata.map(parsed).unwrap_or_else(|| json!({}));
+        let (keys, values) = projections(&metadata);
         let mut copy = json!({
-            "id": event.id,
-            "timestamp": event.instant,
-            "type": event.event_type,
-            "details": parsed(event.details),
-            "BatchId": self.batch_id,
-            "AppMonitorDetails": {"name": monitor, "id": monitor_id},
-            "UserDetails": {},
+            "account_id": engine::emulator_account_id(),
+            "application_id": monitor_id,
+            "application_name": monitor,
+            "batch_id": self.batch_id,
+            "event_id": event.id,
+            "event_interaction": event.interaction(),
+            "event_timestamp": event.instant_millis,
+            "event_type": event.event_type,
+            "event_details": parsed(event.details),
+            "log_stream": self.stream(monitor_id),
+            "metadata": metadata,
+            "metadata_keys": keys,
+            "metadata_values": values,
+            "user_details": {},
         });
-        if let Some(metadata) = event.metadata {
-            copy["metadata"] = parsed(metadata);
-        }
-        if let Some(alias) = self.alias {
-            copy["Alias"] = json!(alias);
-        }
         if let Some(version) = self.version {
-            copy["AppMonitorDetails"]["version"] = json!(version);
+            copy["application_version"] = json!(version);
         }
         if let Some(user_id) = self.user_id {
-            copy["UserDetails"]["userId"] = json!(user_id);
+            copy["userId"] = json!(user_id);
+            copy["user_details"]["userId"] = json!(user_id);
         }
         if let Some(session_id) = self.session_id {
-            copy["UserDetails"]["sessionId"] = json!(session_id);
+            copy["sessionId"] = json!(session_id);
+            copy["user_details"]["sessionId"] = json!(session_id);
         }
         copy
     }
@@ -143,6 +159,29 @@ fn parsed(text: &str) -> Value {
     serde_json::from_str(text).unwrap_or_else(|error| {
         panic!("the fixture {text:?} must be a JSON document ({error})");
     })
+}
+
+/// The `metadata_keys` / `metadata_values` projections a document carries beside its
+/// `metadata`: the metadata's first-level keys, and its values at the same positions as
+/// the text each is written as.
+fn projections(metadata: &Value) -> (Vec<Value>, Vec<Value>) {
+    metadata
+        .as_object()
+        .map(|members| {
+            members
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        json!(key),
+                        match value {
+                            Value::String(text) => json!(text),
+                            other => json!(other.to_string()),
+                        },
+                    )
+                })
+                .unzip()
+        })
+        .unwrap_or_default()
 }
 
 /// Now, in milliseconds since the epoch — the unit a log event's timestamp is in.
@@ -305,7 +344,7 @@ async fn collected_event_ids(emulator: &Emulator, case: &str, monitor: &str) -> 
         .iter()
         .filter_map(|entry| {
             let document: Value = serde_json::from_str(entry.as_str().unwrap_or_default()).ok()?;
-            document["id"].as_str().map(str::to_string)
+            document["event_id"].as_str().map(str::to_string)
         })
         .collect()
 }
@@ -324,7 +363,7 @@ fn deliveries() -> Vec<Delivery> {
                 id: "11111111-1234-4234-8234-123456789012",
                 event_type: "com.amazon.rum.page_view_event",
                 timestamp: 1_704_067_200,
-                instant: "2024-01-01T00:00:00Z",
+                instant_millis: 1_704_067_200_000,
                 metadata: Some("{\"browserName\":\"Chrome\",\"pageId\":\"/home\"}"),
                 details: "{\"pageTitle\":\"Home\"}",
             }],
@@ -341,7 +380,7 @@ fn deliveries() -> Vec<Delivery> {
                     id: "21111111-1234-4234-8234-123456789012",
                     event_type: "com.amazon.rum.js_error_event",
                     timestamp: 1_704_067_260,
-                    instant: "2024-01-01T00:01:00Z",
+                    instant_millis: 1_704_067_260_000,
                     metadata: None,
                     details: "{\"message\":\"boom\"}",
                 },
@@ -349,7 +388,7 @@ fn deliveries() -> Vec<Delivery> {
                     id: "22111111-1234-4234-8234-123456789012",
                     event_type: "com.amazon.rum.http_event",
                     timestamp: 1_704_067_320,
-                    instant: "2024-01-01T00:02:00Z",
+                    instant_millis: 1_704_067_320_000,
                     metadata: Some("{\"deviceType\":\"mobile\"}"),
                     // A nested document, since `details` is any JSON value.
                     details: "{\"request\":{\"method\":\"GET\",\"status\":200}}",
@@ -358,7 +397,7 @@ fn deliveries() -> Vec<Delivery> {
                     id: "23111111-1234-4234-8234-123456789012",
                     event_type: "com.amazon.rum.performance_navigation_event",
                     timestamp: 1_704_067_380,
-                    instant: "2024-01-01T00:03:00Z",
+                    instant_millis: 1_704_067_380_000,
                     metadata: None,
                     details: "{\"duration\":12.5}",
                 },
@@ -376,7 +415,7 @@ fn deliveries() -> Vec<Delivery> {
                     id: "31111111-1234-4234-8234-123456789012",
                     event_type: "com.amazon.rum.session_start_event",
                     timestamp: 1_704_070_800,
-                    instant: "2024-01-01T01:00:00Z",
+                    instant_millis: 1_704_070_800_000,
                     metadata: None,
                     details: "{\"sessionStart\":true}",
                 },
@@ -384,7 +423,7 @@ fn deliveries() -> Vec<Delivery> {
                     id: "32111111-1234-4234-8234-123456789012",
                     event_type: "com.amazon.rum.page_view_event",
                     timestamp: 1_704_070_860,
-                    instant: "2024-01-01T01:01:00Z",
+                    instant_millis: 1_704_070_860_000,
                     metadata: Some("{\"countryCode\":\"JP\"}"),
                     details: "{\"pageTitle\":\"Checkout\"}",
                 },
@@ -401,7 +440,7 @@ fn deliveries() -> Vec<Delivery> {
                 id: "41111111-1234-4234-8234-123456789012",
                 event_type: "com.amazon.rum.js_error_event",
                 timestamp: 1_704_074_400,
-                instant: "2024-01-01T02:00:00Z",
+                instant_millis: 1_704_074_400_000,
                 metadata: None,
                 // An empty document, which is what the minimal client sends.
                 details: "{}",
@@ -612,7 +651,7 @@ async fn copies_are_stored_exactly_while_delivery_is_on() {
     assert_eq!(
         copied
             .iter()
-            .map(|copy| copy["id"].as_str().unwrap_or_default())
+            .map(|copy| copy["event_id"].as_str().unwrap_or_default())
             .collect::<Vec<_>>(),
         vec![delivery_on_event],
         "case \"delivery on\": only the batch delivered while delivery was on is copied, \
@@ -641,7 +680,7 @@ async fn copies_are_stored_exactly_while_delivery_is_on() {
     assert_eq!(
         copied
             .iter()
-            .map(|copy| copy["id"].as_str().unwrap_or_default())
+            .map(|copy| copy["event_id"].as_str().unwrap_or_default())
             .collect::<Vec<_>>(),
         vec![delivery_on_event],
         "case \"delivery off again\": a batch delivered while delivery is off is copied \

@@ -472,27 +472,27 @@ async fn put_rum_events_appends_to_the_monitor_its_id_names() {
             stored.events.len()
         );
         let newest = stored.events.back().expect("an appended event");
-        assert_eq!(
-            newest.batch_id, "11111111-2222-4333-8444-555555555555",
-            "case \"batch {batches}\": expected the stored event to keep its BatchId, got {:?}",
-            newest.batch_id
-        );
-        assert_eq!(
-            newest.app_monitor_details.version.as_deref(),
-            Some("1.0.0"),
-            "case \"batch {batches}\": expected the stored event to keep the client's \
-             AppMonitorDetails, got {:?}",
-            newest.app_monitor_details
-        );
         let document: Value = serde_json::from_str(&newest.event_json)
             .unwrap_or_else(|e| panic!("case \"batch {batches}\": stored event is not JSON ({e})"));
         assert_eq!(
-            document["type"].as_str(),
+            document["batch_id"].as_str(),
+            Some("11111111-2222-4333-8444-555555555555"),
+            "case \"batch {batches}\": expected the stored event to keep its BatchId, got \
+             {document}"
+        );
+        assert_eq!(
+            document["application_version"].as_str(),
+            Some("1.0.0"),
+            "case \"batch {batches}\": expected the stored event to keep the client's \
+             AppMonitorDetails version, got {document}"
+        );
+        assert_eq!(
+            document["event_type"].as_str(),
             Some("com.amazon.rum.js_error_event"),
             "case \"batch {batches}\": expected the last event of the batch, got {document}"
         );
         assert_eq!(
-            document["details"]["message"].as_str(),
+            document["event_details"]["message"].as_str(),
             Some("boom"),
             "case \"batch {batches}\": expected the event's details to be stored, got {document}"
         );

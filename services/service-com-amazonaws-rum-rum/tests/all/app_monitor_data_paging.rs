@@ -24,10 +24,9 @@ use aws_smithy_types::DateTime;
 use serde_json::{json, Value};
 use smithy_server_runtime::multi_service_router::MultiServiceRouter;
 
-use service_com_amazonaws_rum_rum::ops::types::AppMonitorDetails;
-use service_com_amazonaws_rum_rum::state::{
-    event_instant_value, StoredRumEvent, MAX_EVENTS_PER_APP_MONITOR,
-};
+use service_com_amazonaws_rum_rum::ops::types::RumEvent;
+use service_com_amazonaws_rum_rum::state::rum_event::{event_document, Delivery};
+use service_com_amazonaws_rum_rum::state::{StoredRumEvent, MAX_EVENTS_PER_APP_MONITOR};
 use service_com_amazonaws_rum_rum::ComAmazonawsRumRumState;
 
 use crate::support::{call, create, emulator, message, REGION};
@@ -86,24 +85,30 @@ fn wire_event(index: usize, instant: i64) -> Value {
 /// One event as the monitor's buffer holds it, for the one case that fills the buffer to its
 /// ceiling (which no wire body is the right size to do).
 ///
-/// The instant goes in through the SAME codec the data-plane write stores it with
-/// (`crate::state::event_instant_value`), so a seeded event is placed in a window exactly
-/// as a delivered one is.
-fn stored_event(index: usize, instant: i64) -> StoredRumEvent {
-    let document = json!({
-        "id": event_id(index),
-        "timestamp": event_instant_value(&DateTime::from_secs(instant)),
-        "type": EVENT_TYPE,
-        "metadata": {"browserName": browser_of(index)},
-        "details": {"pageTitle": "/home"},
-    });
+/// The document goes in through the SAME projection the data-plane write stores it with
+/// (`crate::state::rum_event::event_document`), so a seeded event is placed in a window,
+/// reported and filtered exactly as a delivered one is.
+fn stored_event(monitor_id: &str, index: usize, instant: i64) -> StoredRumEvent {
+    let event = RumEvent {
+        id: event_id(index),
+        timestamp: DateTime::from_secs(instant),
+        r#type: EVENT_TYPE.to_string(),
+        metadata: Some(json!({"browserName": browser_of(index)}).to_string()),
+        details: json!({"pageTitle": "/home"}).to_string(),
+    };
     StoredRumEvent {
-        batch_id: BATCH_ID.to_string(),
-        alias: None,
-        app_monitor_details: AppMonitorDetails::default(),
-        user_id: None,
-        session_id: None,
-        event_json: document.to_string(),
+        event_json: event_document(
+            &Delivery {
+                app_monitor_id: monitor_id,
+                app_monitor_name: MONITOR,
+                app_monitor_version: Some("1.0.0"),
+                batch_id: BATCH_ID,
+                user_id: None,
+                session_id: None,
+                log_stream: monitor_id,
+            },
+            &event,
+        ),
     }
 }
 
@@ -121,13 +126,25 @@ fn now_seconds() -> i64 {
     .expect("an instant an i64 can hold")
 }
 
-/// A query body for `after`, `before`, `filters` and `max_results`.
+/// A query body for `after`, `before`, `filters` and `max_results`, with both window
+/// bounds taken from the whole second a case seeds its events at ([`window_bound`]).
 fn query(after: i64, before: Option<i64>, filters: Value, max_results: i64) -> Value {
-    let mut time_range = json!({"After": after});
+    let mut time_range = json!({"After": window_bound(after)});
     if let Some(before) = before {
-        time_range["Before"] = json!(before);
+        time_range["Before"] = json!(window_bound(before));
     }
     json!({"TimeRange": time_range, "Filters": filters, "MaxResults": max_results})
+}
+
+/// How many milliseconds one second is: `TimeRange$After`/`$Before` bound an event in epoch
+/// MILLISECONDS, while `RumEvent$timestamp` travels as the epoch seconds restJson1 carries
+/// a `Timestamp` as, so a case seeds its events in seconds and asks for them in
+/// milliseconds.
+const MILLIS_PER_SECOND: i64 = 1_000;
+
+/// One window bound, from the whole second a case places its events at.
+fn window_bound(seconds: i64) -> i64 {
+    seconds * MILLIS_PER_SECOND
 }
 
 /// One monitor with `events` delivered to it through the data plane, and the engine behind
@@ -204,7 +221,7 @@ async fn page(
             let document: Value = serde_json::from_str(text).unwrap_or_else(|error| {
                 panic!("case {case:?}: expected a JSON document, got {text:?} ({error})")
             });
-            document["id"].as_str().unwrap_or_default().to_string()
+            document["event_id"].as_str().unwrap_or_default().to_string()
         })
         .collect();
     (ids, reported["NextToken"].as_str().map(str::to_string))
@@ -417,7 +434,8 @@ async fn a_page_resumes_after_the_event_it_ended_on_when_the_buffer_evicts_its_o
                 .app_monitor_mut(REGION, MONITOR)
                 .expect("the monitor the create stored");
             record.record_events(
-                (0..MAX_EVENTS_PER_APP_MONITOR).map(|index| stored_event(index, BASE)),
+                (0..MAX_EVENTS_PER_APP_MONITOR)
+                    .map(|index| stored_event(&monitor_id, index, BASE)),
             );
         }
 

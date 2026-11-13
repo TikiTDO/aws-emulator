@@ -302,6 +302,19 @@ async fn the_advertised_group_is_the_vended_name_and_the_group_that_exists() {
              got {groups:?}"
         );
 
+        // And a client that takes the advertised name apart the way the vended-logs
+        // convention lets it — the prefix plus the monitor's own name — addresses that very
+        // group in CloudWatch Logs, which is what correlating "the group RUM vended" with
+        // "the group RUM advertises" rests on.
+        let named = format!("{CW_LOG_GROUP_PREFIX}{name}");
+        let by_monitor = log_groups_in(&router, case, REGION, &named).await;
+        assert_eq!(
+            by_monitor,
+            vec![advertised.clone()],
+            "case {case:?}: expected the group RUM vended for this monitor to be the one \
+             DescribeLogGroups finds under {named:?}, got {by_monitor:?}"
+        );
+
         // And it is held in state rather than recomputed: a second read reports the same
         // name, and so does a read after an unrelated update.
         let again = vended_group_in(&router, case, REGION, name).await;

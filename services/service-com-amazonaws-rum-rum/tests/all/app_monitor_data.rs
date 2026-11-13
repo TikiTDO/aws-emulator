@@ -3,12 +3,12 @@
 //! `GetAppMonitorData`: the events one app monitor collected, read back through the wire.
 //!
 //! The rule under test: the operation reports the events the data plane persisted on the
-//! monitor the route names — each as the JSON document it was accepted as, oldest first —
-//! narrowed to the events whose instant falls inside the requested time range and whose
-//! attributes match one of the request's filters, and paged at the request's `MaxResults`.
-//! Each table below differs along what that rule generalises over: the window's bounds
-//! (including the published default for an omitted `Before`), the filter key and its
-//! values, the number of values and of filters, and the page size.
+//! monitor the route names — each as the RUM event document the service enriched it into,
+//! oldest first — narrowed to the events whose instant falls inside the requested time
+//! range and whose attributes match one of the request's filters, and paged at the
+//! request's `MaxResults`. Each table below differs along what that rule generalises over:
+//! the window's bounds (including the published default for an omitted `Before`), the
+//! filter key and its values, the number of values and of filters, and the page size.
 
 use serde_json::{json, Value};
 use smithy_server_runtime::multi_service_router::MultiServiceRouter;
@@ -27,10 +27,8 @@ const BASE: i64 = 1_704_067_200;
 struct Fixture {
     /// Which event this is, 1-based: also the last hex digit of its `id`.
     index: usize,
-    /// Its instant, as seconds after [`BASE`] and as the RFC 3339 rendering the reported
-    /// document carries.
+    /// Its instant, as seconds after [`BASE`] — the unit `RumEvent$timestamp` travels in.
     offset: i64,
-    rendered_instant: &'static str,
     /// `RumEvent$type`.
     event_type: &'static str,
     /// `RumEvent$metadata`, the client JSON a RUM web client reports the session's
@@ -45,6 +43,12 @@ impl Fixture {
     /// `^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`.
     fn id(&self) -> String {
         format!("1111111{}-1234-4234-8234-123456789012", self.index)
+    }
+
+    /// The instant the reported document carries for this event: milliseconds since the
+    /// epoch, the unit a RUM event document's `event_timestamp` is in.
+    fn instant_millis(&self) -> i64 {
+        millis(BASE + self.offset)
     }
 
     /// This event as `PutRumEvents` carries it: `metadata` and `details` are
@@ -77,7 +81,6 @@ fn fixtures() -> Vec<Fixture> {
         Fixture {
             index: 1,
             offset: 0,
-            rendered_instant: "2024-01-01T00:00:00Z",
             event_type: "com.amazon.rum.page_view_event",
             metadata: Some(json!({
                 "browserName": "Chrome",
@@ -92,7 +95,6 @@ fn fixtures() -> Vec<Fixture> {
         Fixture {
             index: 2,
             offset: 60,
-            rendered_instant: "2024-01-01T00:01:00Z",
             event_type: "com.amazon.rum.js_error_event",
             metadata: Some(json!({
                 "browserName": "Firefox",
@@ -106,7 +108,6 @@ fn fixtures() -> Vec<Fixture> {
         Fixture {
             index: 3,
             offset: 120,
-            rendered_instant: "2024-01-01T00:02:00Z",
             event_type: "com.amazon.rum.http_event",
             metadata: Some(json!({
                 "browserName": "Safari",
@@ -120,7 +121,6 @@ fn fixtures() -> Vec<Fixture> {
         Fixture {
             index: 4,
             offset: 180,
-            rendered_instant: "2024-01-01T00:03:00Z",
             event_type: "com.amazon.rum.page_view_event",
             metadata: Some(json!({
                 "browserName": "Chrome",
@@ -134,7 +134,6 @@ fn fixtures() -> Vec<Fixture> {
         Fixture {
             index: 5,
             offset: 240,
-            rendered_instant: "2024-01-01T00:04:00Z",
             event_type: "com.amazon.rum.performance_navigation_event",
             metadata: None,
             details: json!({"pageId": "/pricing", "duration": 12}),
@@ -142,7 +141,6 @@ fn fixtures() -> Vec<Fixture> {
         Fixture {
             index: 6,
             offset: 300,
-            rendered_instant: "2024-01-01T00:05:00Z",
             event_type: "com.amazon.rum.session_start_event",
             metadata: Some(json!({
                 "browserName": "Edge",
@@ -235,25 +233,37 @@ async fn events(router: &MultiServiceRouter, case: &str, body: Value) -> (Vec<Va
     (documents, next_token)
 }
 
-/// The `id` of each reported event, in the order they were reported.
+/// The `event_id` of each reported event, in the order they were reported.
 fn reported_ids(documents: &[Value]) -> Vec<String> {
     documents
         .iter()
-        .map(|document| document["id"].as_str().unwrap_or_default().to_string())
+        .map(|document| document["event_id"].as_str().unwrap_or_default().to_string())
         .collect()
 }
 
-/// A query body for `time_range`, `filters` and `max_results`.
+/// How many milliseconds one second is: the fixture's instants are the epoch SECONDS
+/// restJson1 carries a `Timestamp` as, while `TimeRange`'s bounds — and a reported
+/// document's `event_timestamp` — are epoch MILLISECONDS.
+const MILLIS_PER_SECOND: i64 = 1_000;
+
+/// The whole second `seconds` as the milliseconds a window bound is expressed in.
+fn millis(seconds: i64) -> i64 {
+    seconds * MILLIS_PER_SECOND
+}
+
+/// A query body for the window `[after, before]` — both named as the whole second a
+/// fixture event sits at, converted to the milliseconds `TimeRange` carries — with
+/// `filters` and `max_results`.
 fn body(after: i64, before: Option<i64>, filters: Value, max_results: i64) -> Value {
-    let mut time_range = json!({"After": after});
+    let mut time_range = json!({"After": millis(after)});
     if let Some(before) = before {
-        time_range["Before"] = json!(before);
+        time_range["Before"] = json!(millis(before));
     }
     json!({"TimeRange": time_range, "Filters": filters, "MaxResults": max_results})
 }
 
 #[tokio::test]
-async fn reported_events_are_the_documents_the_data_plane_accepted() {
+async fn reported_events_are_the_enriched_documents_of_what_the_data_plane_accepted() {
     let router = seeded().await;
 
     let (documents, next_token) = events(
@@ -277,17 +287,18 @@ async fn reported_events_are_the_documents_the_data_plane_accepted() {
         let case = format!("event {}", fixture.index);
         let document = &documents[fixture.index - 1];
         assert_eq!(
-            document["type"].as_str(),
+            document["event_type"].as_str(),
             Some(fixture.event_type),
             "case {case:?}: expected the type the batch carried, got {document}"
         );
         assert_eq!(
-            document["timestamp"].as_str(),
-            Some(fixture.rendered_instant),
-            "case {case:?}: expected the instant the batch carried, got {document}"
+            document["event_timestamp"].as_i64(),
+            Some(fixture.instant_millis()),
+            "case {case:?}: expected the instant the batch carried, in epoch milliseconds, \
+             got {document}"
         );
         assert_eq!(
-            document["details"], fixture.details,
+            document["event_details"], fixture.details,
             "case {case:?}: expected the details the batch carried, got {document}"
         );
         match &fixture.metadata {
@@ -295,9 +306,13 @@ async fn reported_events_are_the_documents_the_data_plane_accepted() {
                 &document["metadata"], metadata,
                 "case {case:?}: expected the metadata the batch carried, got {document}"
             ),
-            None => assert!(
-                document["metadata"].is_null(),
-                "case {case:?}: an event that carried no metadata reports none, got {document}"
+            // Metadata is part of every RUM event document; an event that carried none has
+            // nothing in it rather than no field at all.
+            None => assert_eq!(
+                document["metadata"],
+                json!({}),
+                "case {case:?}: an event that carried no metadata reports an empty one, got \
+                 {document}"
             ),
         }
     }

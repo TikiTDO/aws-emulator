@@ -63,9 +63,10 @@
 //! Three choices the copy's shape rests on, because the model describes the copy only as
 //! "a copy of this telemetry data" and publishes no log schema for it:
 //!
-//! * the MESSAGE is one JSON object per delivered event, carrying the event exactly as the
-//!   batch delivered it beside the batch context it arrived with, every member spelled as
-//!   this service's own model spells it ([`copy_of`]);
+//! * the MESSAGE is one log event per delivered RUM event, carrying exactly the RUM event
+//!   document the data plane enriched it into ([`super::rum_event::event_document`]) — the
+//!   same bytes the monitor's buffer holds and `GetAppMonitorData` reports, since the copy
+//!   is a copy and not a second rendering of the same telemetry;
 //! * the STREAM is the user session the batch came from ([`delivery_stream_name`]), since
 //!   "each PutRumEvents operation can send a batch of events from one user session", so one
 //!   session's copies accumulate in one stream across the batches it sends;
@@ -249,71 +250,6 @@ pub fn delivery_stream_name(session_id: Option<&str>, app_monitor_id: &str) -> S
         .to_string()
 }
 
-/// One delivered RUM event as the copy stored in the vended log group.
-///
-/// The event is carried exactly as the batch delivered it — the members
-/// `AppMonitorRecord`'s buffer already holds it under, which is the form
-/// `GetAppMonitorData` reports — with the context the batch arrived with beside it, each
-/// member spelled as this service's model spells it (`BatchId`, `Alias`,
-/// `AppMonitorDetails`, `UserDetails`). A MEMBER the batch did not carry is LEFT OUT
-/// rather than written as `null`, so nothing is reported that the client did not send;
-/// `AppMonitorDetails` and `UserDetails` are `@required` on the request, so each of those
-/// two structures is always present, carrying only the members the batch filled.
-pub fn copy_of(event: &StoredRumEvent) -> String {
-    let mut document = match ::serde_json::from_str(&event.event_json) {
-        // The stored event is a JSON object this service rendered, so this is the arm a
-        // copy takes; the other one keeps a document that somehow does not parse readable
-        // instead of dropping it.
-        Ok(::serde_json::Value::Object(members)) => members,
-        _ => {
-            let mut members = ::serde_json::Map::new();
-            members.insert(
-                "RumEvent".to_string(),
-                ::serde_json::Value::String(event.event_json.clone()),
-            );
-            members
-        }
-    };
-    document.insert(
-        "BatchId".to_string(),
-        ::serde_json::Value::String(event.batch_id.clone()),
-    );
-    if let Some(alias) = &event.alias {
-        document.insert(
-            "Alias".to_string(),
-            ::serde_json::Value::String(alias.clone()),
-        );
-    }
-    let mut details = ::serde_json::Map::new();
-    for (member, value) in [
-        ("name", &event.app_monitor_details.name),
-        ("id", &event.app_monitor_details.id),
-        ("version", &event.app_monitor_details.version),
-    ] {
-        if let Some(value) = value {
-            details.insert(
-                member.to_string(),
-                ::serde_json::Value::String(value.clone()),
-            );
-        }
-    }
-    document.insert(
-        "AppMonitorDetails".to_string(),
-        ::serde_json::Value::Object(details),
-    );
-    let mut user = ::serde_json::Map::new();
-    for (member, value) in [("userId", &event.user_id), ("sessionId", &event.session_id)] {
-        if let Some(value) = value {
-            user.insert(
-                member.to_string(),
-                ::serde_json::Value::String(value.clone()),
-            );
-        }
-    }
-    document.insert("UserDetails".to_string(), ::serde_json::Value::Object(user));
-    ::serde_json::Value::Object(document).to_string()
-}
-
 /// Write a copy of every event of one delivered batch into `log_group`, in the stream
 /// `log_stream` ([`delivery_stream_name`]).
 ///
@@ -365,7 +301,7 @@ pub async fn deliver_events(
     let mut batch: Vec<::aws_sdk_cloudwatchlogs::types::InputLogEvent> = Vec::new();
     let mut batch_bytes = 0usize;
     for event in events {
-        let message = copy_of(event);
+        let message = event.event_json.clone();
         if message.len() > MAX_LOG_EVENT_BYTES {
             ::tracing::warn!(
                 log_group = %log_group,

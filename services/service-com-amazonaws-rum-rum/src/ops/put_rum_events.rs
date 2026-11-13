@@ -16,6 +16,12 @@
 //! advertises as well as to the monitor's own buffer
 //! ([`crate::state::cw_log_delivery::deliver_events`]).
 //!
+//! Both destinations hold the SERVICE's document, not the client's structure: every
+//! accepted event is enriched once, here, with the batch's context and with what only the
+//! service knows — the app monitor the batch was delivered to, the account that owns it
+//! and the log stream the copies accumulate in — under the field names RUM publishes for a
+//! RUM event ([`crate::state::rum_event::event_document`]).
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -184,7 +190,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // decision, which reads the IAM and STS stores and needs no lock of this
         // service's.
         let region = crate::state::request_region(ctx.parts());
-        let (resource_arn, resource_policy) = {
+        let (resource_arn, resource_policy, app_monitor_name, app_monitor_id) = {
             let store = state.lock();
             let Some(record) = store.app_monitor_by_id(&region, &input.id) else {
                 return Err(PutRumEventsErrorModeled::AccessDeniedException(
@@ -192,7 +198,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
                 .into());
             };
-            (record.arn.clone(), record.resource_policy_document())
+            (
+                record.arn.clone(),
+                record.resource_policy_document(),
+                record.name.clone(),
+                record.id.clone(),
+            )
         };
 
         // Who is calling, and may they write into THIS app monitor? Evaluated on every
@@ -235,24 +246,33 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let batch_id = input.batch_id;
-        let alias = input.alias;
-        let app_monitor_details = input.app_monitor_details;
         let user_id = input.user_details.user_id;
         let session_id = input.user_details.session_id;
+        // The stream this batch's copies accumulate in, resolved BEFORE the events are
+        // built because it is part of every one of their documents: an enriched event
+        // reports the log stream it is stored under.
+        let log_stream =
+            crate::state::cw_log_delivery::delivery_stream_name(session_id.as_deref(), &input.id);
+        // What the service enriches every event of this batch with: the monitor the `Id`
+        // resolved to, the batch's own context, and the session it was collected from.
+        let delivery = crate::state::rum_event::Delivery {
+            app_monitor_id: &app_monitor_id,
+            app_monitor_name: &app_monitor_name,
+            app_monitor_version: input.app_monitor_details.version.as_deref(),
+            batch_id: &batch_id,
+            user_id: user_id.as_deref(),
+            session_id: session_id.as_deref(),
+            log_stream: &log_stream,
+        };
         // Built once, as a Vec, because the batch has TWO destinations: this monitor's own
         // buffer (what `GetAppMonitorData` reports) and — when the monitor stores copies in
         // CloudWatch Logs — the vended log group it advertises. Both carry the same events,
-        // because they are the same delivery.
+        // because they are the same delivery, and both carry the SAME document.
         let delivered: Vec<crate::state::StoredRumEvent> = input
             .rum_events
             .iter()
             .map(|event| crate::state::StoredRumEvent {
-                batch_id: batch_id.clone(),
-                alias: alias.clone(),
-                app_monitor_details: app_monitor_details.clone(),
-                user_id: user_id.clone(),
-                session_id: session_id.clone(),
-                event_json: event_json(event),
+                event_json: crate::state::rum_event::event_document(&delivery, event),
             })
             .collect();
 
@@ -280,10 +300,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         if let Some(log_group) = log_group {
-            let log_stream = crate::state::cw_log_delivery::delivery_stream_name(
-                session_id.as_deref(),
-                &input.id,
-            );
             crate::state::cw_log_delivery::deliver_events(
                 ctx,
                 &region,
@@ -299,35 +315,3 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     }
 }
 
-/// One `RumEvent` as the JSON document it is stored (and later reported) as.
-///
-/// `metadata` and `details` are `@mediaType("application/json")` strings, so they are
-/// re-parsed into the document rather than nested as escaped text; a value that is not
-/// valid JSON is kept verbatim as a string, since the model constrains neither. The
-/// instant goes in through [`crate::state::event_instant_value`], so a `timestamp` RFC
-/// 3339 cannot render is still carried — the document is what the monitor's buffer, the
-/// query that reads it back and the CloudWatch Logs copy all carry the event as, so an
-/// instant dropped here is an instant nothing holds.
-fn event_json(event: &RumEvent) -> String {
-    let mut document = ::serde_json::Map::new();
-    document.insert("id".to_string(), ::serde_json::Value::String(event.id.clone()));
-    document.insert(
-        crate::state::EVENT_INSTANT_MEMBER.to_string(),
-        crate::state::event_instant_value(&event.timestamp),
-    );
-    document.insert(
-        "type".to_string(),
-        ::serde_json::Value::String(event.r#type.clone()),
-    );
-    if let Some(metadata) = event.metadata.as_deref() {
-        document.insert("metadata".to_string(), json_member(metadata));
-    }
-    document.insert("details".to_string(), json_member(&event.details));
-    ::serde_json::Value::Object(document).to_string()
-}
-
-/// A `JsonValue` member as the document it carries, or as a plain string when it does
-/// not parse as JSON.
-fn json_member(text: &str) -> ::serde_json::Value {
-    ::serde_json::from_str(text).unwrap_or_else(|_| ::serde_json::Value::String(text.to_string()))
-}

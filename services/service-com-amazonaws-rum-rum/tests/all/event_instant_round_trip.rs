@@ -2,18 +2,21 @@
 
 //! The INSTANT a delivered `RumEvent` occurred at, as the data plane persists it.
 //!
-//! The rule under test: a `@required` instant a client delivered is persisted in a form
-//! the service reads back as the same instant, so every event `PutRumEvents` acknowledges
-//! is reported by `GetAppMonitorData` for a time range covering it — and only for such a
-//! range — and the copy stored in CloudWatch Logs still says when the event occurred.
-//! Rendering an instant as RFC 3339 is fallible (the grammar spells the year as exactly
-//! four digits, so an instant far enough from the epoch has no rendering at all), and a
-//! failure to render is not a licence to drop the instant.
+//! The rule under test: a `@required` instant a client delivered is persisted in the unit a
+//! RUM event document carries it in — `event_timestamp`, MILLISECONDS since the epoch, the
+//! same unit `TimeRange`'s bounds are expressed in — so every event `PutRumEvents`
+//! acknowledges is reported by `GetAppMonitorData` for a time range covering it, and only
+//! for such a range, and the copy stored in CloudWatch Logs still says when the event
+//! occurred. `RumEvent$timestamp` travels as the epoch seconds restJson1 carries a
+//! `Timestamp` as and carries no `@range`, so an instant whose millisecond count no `i64`
+//! can hold is one a client may send, and it is placed at the nearest instant one can hold
+//! rather than wrapping onto the other side of the epoch.
 //!
 //! The rows span what the rule generalises over — the value of the instant: an ordinary
 //! one, the epoch, the second before it, each end of the range RFC 3339 can spell, one
-//! second past each end, instants far outside it in both directions, and one carrying a
-//! subsecond part.
+//! second past each end, instants far outside that range in both directions, instants whose
+//! millisecond count saturates an `i64` in both directions, and one carrying a subsecond
+//! part.
 
 use serde_json::{json, Value};
 
@@ -28,13 +31,14 @@ struct Row {
     /// (`smithy_query(query="shape", shape="RumEvent")` gives its `timestamp` member no
     /// `@range`), so every value below is one a client may send.
     delivered: Value,
-    /// The whole second the instant falls in: the unit `TimeRange`'s `After` and `Before`
-    /// bound an event at (both are `QueryTimestamp`, a `long`).
-    seconds: i64,
-    /// The `timestamp` member the stored document must carry — the RFC 3339 instant where
-    /// the instant renders, and the seconds since the epoch the wire delivered where it
-    /// does not.
-    stored: Value,
+    /// The `event_timestamp` the stored document must carry: the delivered instant in
+    /// MILLISECONDS since the epoch, saturated at the bound of the type that carries it
+    /// where no `i64` holds that many milliseconds.
+    stored_millis: i64,
+    /// Whether the millisecond count saturated, which is the one case where a window can
+    /// no longer be placed one millisecond outside the event: every instant past the
+    /// bound lands on the same one.
+    saturated: bool,
 }
 
 impl Row {
@@ -60,68 +64,81 @@ impl Row {
 /// The bounds of the renderable range are the RFC 3339 grammar's own: `date-fullyear =
 /// 4DIGIT` over a calendar whose first year is 0001, so the first instant it can spell is
 /// `0001-01-01T00:00:00Z` and the last is `9999-12-31T23:59:59Z`. Each bound is a row, and
-/// so is the second just outside it.
+/// so is the second just outside it; the last rows are instants so far from the epoch that
+/// their millisecond count saturates an `i64`.
 fn rows() -> Vec<Row> {
     vec![
         Row {
             case: "an ordinary instant",
             delivered: json!(1_704_067_200_i64),
-            seconds: 1_704_067_200,
-            stored: json!("2024-01-01T00:00:00Z"),
+            stored_millis: 1_704_067_200_000,
+            saturated: false,
         },
         Row {
             case: "the epoch itself",
             delivered: json!(0_i64),
-            seconds: 0,
-            stored: json!("1970-01-01T00:00:00Z"),
+            stored_millis: 0,
+            saturated: false,
         },
         Row {
             case: "the second before the epoch",
             delivered: json!(-1_i64),
-            seconds: -1,
-            stored: json!("1969-12-31T23:59:59Z"),
+            stored_millis: -1_000,
+            saturated: false,
         },
         Row {
             case: "the first instant RFC 3339 can spell",
             delivered: json!(-62_135_596_800_i64),
-            seconds: -62_135_596_800,
-            stored: json!("0001-01-01T00:00:00Z"),
+            stored_millis: -62_135_596_800_000,
+            saturated: false,
         },
         Row {
             case: "one second before the first instant RFC 3339 can spell",
             delivered: json!(-62_135_596_801_i64),
-            seconds: -62_135_596_801,
-            stored: json!(-62_135_596_801_i64),
+            stored_millis: -62_135_596_801_000,
+            saturated: false,
         },
         Row {
             case: "the last instant RFC 3339 can spell",
             delivered: json!(253_402_300_799_i64),
-            seconds: 253_402_300_799,
-            stored: json!("9999-12-31T23:59:59Z"),
+            stored_millis: 253_402_300_799_000,
+            saturated: false,
         },
         Row {
             case: "one second past the last instant RFC 3339 can spell",
             delivered: json!(253_402_300_800_i64),
-            seconds: 253_402_300_800,
-            stored: json!(253_402_300_800_i64),
+            stored_millis: 253_402_300_800_000,
+            saturated: false,
         },
         Row {
             case: "an instant far past every year RFC 3339 can spell",
             delivered: json!(99_999_999_999_999_i64),
-            seconds: 99_999_999_999_999,
-            stored: json!(99_999_999_999_999_i64),
+            stored_millis: 99_999_999_999_999_000,
+            saturated: false,
         },
         Row {
             case: "an instant far before every year RFC 3339 can spell",
             delivered: json!(-99_999_999_999_999_i64),
-            seconds: -99_999_999_999_999,
-            stored: json!(-99_999_999_999_999_i64),
+            stored_millis: -99_999_999_999_999_000,
+            saturated: false,
         },
         Row {
-            case: "an unrenderable instant with a subsecond part",
-            delivered: json!(99_999_999_999_999.5_f64),
-            seconds: 99_999_999_999_999,
-            stored: json!(99_999_999_999_999.5_f64),
+            case: "an instant whose millisecond count saturates past the epoch",
+            delivered: json!(10_000_000_000_000_000_i64),
+            stored_millis: i64::MAX,
+            saturated: true,
+        },
+        Row {
+            case: "an instant whose millisecond count saturates before the epoch",
+            delivered: json!(-10_000_000_000_000_000_i64),
+            stored_millis: i64::MIN,
+            saturated: true,
+        },
+        Row {
+            case: "an instant carrying a subsecond part",
+            delivered: json!(1_704_067_200.25_f64),
+            stored_millis: 1_704_067_200_250,
+            saturated: false,
         },
     ]
 }
@@ -194,25 +211,25 @@ async fn collected(emulator: &Emulator, case: &str, monitor: &str, time_range: V
         .collect()
 }
 
-/// The narrowest window that covers an event at `seconds`.
+/// The narrowest window that covers an event at `millis`.
 ///
 /// Both of `TimeRange`'s bounds are inclusive, so a positive instant is asked for by the
-/// single second it falls in. `Before` is modelled `@default(0)` and documented "If you
-/// omit this, the time range extends to the time that this operation is performed", so an
-/// instant at or before the epoch is asked for by its `After` alone: a `Before` of zero is
-/// that default, which stands for now.
-fn window_covering(seconds: i64) -> Value {
-    if seconds > 0 {
-        json!({"After": seconds, "Before": seconds})
+/// single millisecond it falls in. `Before` is modelled `@default(0)` and documented "If
+/// you omit this, the time range extends to the time that this operation is performed", so
+/// an instant at or before the epoch is asked for by its `After` alone: a `Before` of zero
+/// is that default, which stands for now.
+fn window_covering(millis: i64) -> Value {
+    if millis > 0 {
+        json!({"After": millis, "Before": millis})
     } else {
-        json!({"After": seconds})
+        json!({"After": millis})
     }
 }
 
-/// A window that starts one second AFTER an event at `seconds`, which therefore covers it
-/// nowhere.
-fn window_after(seconds: i64) -> Value {
-    json!({"After": seconds.saturating_add(1)})
+/// A window that starts one millisecond AFTER an event at `millis`, which therefore covers
+/// it nowhere.
+fn window_after(millis: i64) -> Value {
+    json!({"After": millis.saturating_add(1)})
 }
 
 #[tokio::test]
@@ -240,7 +257,7 @@ async fn every_delivered_instant_is_stored_and_reported_as_the_instant_delivered
             &emulator,
             row.case,
             &monitor,
-            window_covering(row.seconds),
+            window_covering(row.stored_millis),
         )
         .await;
         assert_eq!(
@@ -251,26 +268,35 @@ async fn every_delivered_instant_is_stored_and_reported_as_the_instant_delivered
             row.case
         );
         assert_eq!(
-            reported[0]["id"].as_str(),
+            reported[0]["event_id"].as_str(),
             Some(row.event_id(index).as_str()),
             "case {:?}: expected the accepted event to be reported, got {:?}",
             row.case,
             reported[0]
         );
         assert_eq!(
-            reported[0]["timestamp"], row.stored,
-            "case {:?}: expected the reported document to carry the delivered instant as \
-             {:?}, got {:?}",
-            row.case, row.stored, reported[0]["timestamp"]
+            reported[0]["event_timestamp"].as_i64(),
+            Some(row.stored_millis),
+            "case {:?}: expected the reported document to carry the delivered instant as {} \
+             milliseconds since the epoch, got {:?}",
+            row.case,
+            row.stored_millis,
+            reported[0]["event_timestamp"]
         );
 
-        let outside = collected(&emulator, row.case, &monitor, window_after(row.seconds)).await;
-        assert!(
-            outside.is_empty(),
-            "case {:?}: a window starting after the delivered instant must report nothing, \
-             got {outside:?}",
-            row.case
-        );
+        // A window that starts past the event covers it nowhere — except for an instant
+        // whose millisecond count saturated, where there IS no instant past it to ask
+        // from.
+        if !row.saturated {
+            let outside =
+                collected(&emulator, row.case, &monitor, window_after(row.stored_millis)).await;
+            assert!(
+                outside.is_empty(),
+                "case {:?}: a window starting after the delivered instant must report \
+                 nothing, got {outside:?}",
+                row.case
+            );
+        }
     }
 }
 
@@ -374,16 +400,20 @@ async fn every_delivered_instant_reaches_the_cloudwatch_logs_copy() {
     );
     for (index, row) in rows.iter().enumerate() {
         assert_eq!(
-            copies[index]["id"].as_str(),
+            copies[index]["event_id"].as_str(),
             Some(row.event_id(index).as_str()),
             "case {:?}: expected the copies in delivery order, got {:?}",
             row.case,
             copies[index]
         );
         assert_eq!(
-            copies[index]["timestamp"], row.stored,
-            "case {:?}: expected the copy to carry the delivered instant as {:?}, got {:?}",
-            row.case, row.stored, copies[index]["timestamp"]
+            copies[index]["event_timestamp"].as_i64(),
+            Some(row.stored_millis),
+            "case {:?}: expected the copy to carry the delivered instant as {} milliseconds \
+             since the epoch, got {:?}",
+            row.case,
+            row.stored_millis,
+            copies[index]["event_timestamp"]
         );
     }
 }

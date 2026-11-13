@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::ops::types::{
-    AccessDeniedException, AppMonitor, AppMonitorConfiguration, AppMonitorDetails,
+    AccessDeniedException, AppMonitor, AppMonitorConfiguration,
     AppMonitorSummary, ConflictException, CustomEvents, CwLog, DataStorage,
     DeobfuscationConfiguration, InternalServerException, InvalidPolicyRevisionIdException,
     JavaScriptSourceMaps, MalformedPolicyDocumentException, MetricDefinition,
@@ -41,6 +41,11 @@ pub mod authorization;
 /// on requires, the vended log group RUM provisions when it is on, and the copies of
 /// delivered telemetry it stores there.
 pub mod cw_log_delivery;
+
+/// The RUM event document: the enriched form a delivered `RumEvent` is stored in,
+/// reported as and copied as, and the codec placing it on the millisecond scale a query's
+/// `TimeRange` is expressed in.
+pub mod rum_event;
 
 /// The modelled constraints this service applies itself — the ones whose `@pattern` the
 /// boundary walk cannot compile — and the words every constraint refusal of this service
@@ -477,27 +482,15 @@ pub const NO_STORE: &str = "the com-amazonaws-rum-rum store is not mounted on th
 
 /// One RUM event a `PutRumEvents` call appended to an app monitor's buffer.
 ///
-/// The event itself is kept as the JSON document the wire carried (`event_json`), which
-/// is the form `GetAppMonitorData` reports events in (`EventDataList` is a list of
-/// `JsonValue`), while the per-batch context the event arrived with — the batch id, the
-/// optional alias and the user session it came from — is kept beside it.
+/// The event is kept as the ONE document the service enriched it into when the batch was
+/// accepted ([`rum_event::event_document`]): the event's own members beside the batch's
+/// context and the fields only the service knows, under the field names RUM publishes for
+/// a RUM event. That document is what `GetAppMonitorData` reports (`EventDataList` is a
+/// list of `JsonValue`) and what the CloudWatch Logs copy carries, so the per-batch
+/// context is held IN it rather than beside it and no reader has to re-derive it.
 #[derive(Debug, Clone)]
 pub struct StoredRumEvent {
-    /// `PutRumEventsRequest$BatchId` of the call that delivered this event.
-    pub batch_id: String,
-    /// `PutRumEventsRequest$Alias`, when the call carried one.
-    pub alias: Option<String>,
-    /// `PutRumEventsRequest$AppMonitorDetails`: the sending web client's own view of the
-    /// app monitor (name, id, version). Kept verbatim rather than re-derived from the
-    /// stored record, because it is the CLIENT's report — `GetAppMonitorData` returns the
-    /// events as they were received, and a client may name a version the server knows
-    /// nothing about.
-    pub app_monitor_details: AppMonitorDetails,
-    /// `UserDetails$userId` of the session this event came from.
-    pub user_id: Option<String>,
-    /// `UserDetails$sessionId` of the session this event came from.
-    pub session_id: Option<String>,
-    /// The event as a JSON object: `id`, `timestamp`, `type`, `metadata`, `details`.
+    /// The RUM event document ([`rum_event::event_document`]).
     pub event_json: String,
 }
 
@@ -511,66 +504,6 @@ pub struct StoredRumEvent {
 /// ([`AppMonitorRecord::record_events`]) or when the query a later page is evaluated
 /// against selects a different set of events.
 pub type EventRank = u64;
-
-/// The member a stored event document carries `RumEvent$timestamp` under, spelled as the
-/// model spells it — one spelling for the data-plane write, the query that selects on it
-/// and the copy stored in CloudWatch Logs.
-pub const EVENT_INSTANT_MEMBER: &str = "timestamp";
-
-/// `RumEvent$timestamp` as a stored event document carries it.
-///
-/// The instant is carried as the RFC 3339 instant it renders as, which is how a client
-/// reads a timestamp out of a JSON document. That rendering is FALLIBLE — RFC 3339 spells
-/// a year as four digits, so an instant far enough from the epoch has no rendering at all
-/// — and the instant a client delivered is not this service's to lose: one that does not
-/// render is carried as seconds since the epoch, the form this protocol carries a
-/// timestamp in on the wire, with its subsecond part when it has one. Either way the
-/// value a reader takes back out of the document ([`event_instant_seconds`]) is the
-/// instant the batch delivered, so an accepted event stays selectable by its instant and
-/// its copy still says when it occurred.
-///
-/// Two consequences worth stating, both of the fallback arm only. The member is then a
-/// NUMBER where it is usually a string, so a client reading the document reads whichever
-/// of the two the service could carry. And a fractional count of seconds is carried as a
-/// double, which holds a subsecond part exactly only while the whole seconds leave room
-/// for one: an instant large enough in magnitude keeps its second and rounds within it.
-pub fn event_instant_value(instant: &::aws_smithy_types::DateTime) -> ::serde_json::Value {
-    match instant.fmt(::aws_smithy_types::date_time::Format::DateTime) {
-        Ok(rendered) => ::serde_json::Value::String(rendered),
-        Err(_) if instant.subsec_nanos() == 0 => ::serde_json::Value::from(instant.secs()),
-        Err(_) => ::serde_json::Value::from(instant.as_secs_f64()),
-    }
-}
-
-/// The instant a stored event `document` carries, in seconds since the epoch, or `None`
-/// for a document whose `timestamp` member is missing or is no instant at all.
-///
-/// The one reading of what [`event_instant_value`] writes, so a query cannot place an
-/// event at an instant other than the one it was stored with: both forms that function
-/// writes are read here, and a whole-second result is what an instant is compared at
-/// (`TimeRange`'s bounds are seconds since the epoch).
-pub fn event_instant_seconds(document: &::serde_json::Value) -> Option<i64> {
-    match document.get(EVENT_INSTANT_MEMBER)? {
-        ::serde_json::Value::String(rendered) => ::aws_smithy_types::DateTime::from_str(
-            rendered,
-            ::aws_smithy_types::date_time::Format::DateTime,
-        )
-        .ok()
-        .map(|instant| instant.secs()),
-        carried => carried
-            .as_i64()
-            .or_else(|| carried.as_f64().map(whole_seconds)),
-    }
-}
-
-/// A fractional count of seconds since the epoch as the whole second it falls in, which
-/// is how [`::aws_smithy_types::DateTime`] itself splits an instant into `secs` and a
-/// subsecond remainder: the second BELOW the value, for an instant before the epoch as
-/// well as after it. A float-to-integer cast saturates at the integer's own bounds, so a
-/// value no `i64` can hold lands on the nearest instant one can.
-fn whole_seconds(seconds: f64) -> i64 {
-    seconds.floor() as i64
-}
 
 /// The identity of one extended-metrics destination of an app monitor: its
 /// `MetricDestination` and, for an Evidently destination, the ARN of the experiment that
