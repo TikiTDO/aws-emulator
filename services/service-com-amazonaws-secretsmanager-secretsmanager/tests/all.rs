@@ -81,6 +81,8 @@ mod secret_tags_and_replication;
 mod secret_value_lookup_messages;
 #[path = "all/secret_version_history.rs"]
 mod secret_version_history;
+#[path = "all/secret_version_id_token_forms.rs"]
+mod secret_version_id_token_forms;
 #[path = "all/secret_version_ids.rs"]
 mod secret_version_ids;
 #[path = "all/secret_version_ids_are_caller_named.rs"]
