@@ -1,15 +1,23 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetPartitions
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetPartitions`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetPartitions::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Serves "information about the partitions in a table": the partitions the addressed
+//! table holds, in the ONE order the catalog keeps them in — lexicographic by value list
+//! — filtered by the request's `Expression`, split by its `Segment`, and paged by its
+//! `MaxResults` and `NextToken`.
+//!
+//! Reporting only: the page is projected out of what the partition writes stored and
+//! nothing is written, so two listings of an unchanged table answer the same partitions.
+//!
+//! Each member the request may carry IS acted on: `Expression` selects by the filter it
+//! spells over the table's partition keys (`crate::state::PartitionFilter`), `Segment`
+//! names a non-overlapping region of the table's partitions, `ExcludeColumnSchema` drops
+//! the column schema from each reported partition, and `MaxResults`/`NextToken` page the
+//! selection. A request asking for a point-in-time or transactional read, or for a Lake
+//! Formation audit record, is refused as not written yet rather than served from the
+//! latest state — exactly as the single-partition read refuses an audit context
+//! (`crate::ops::get_partition`).
 //!
 //! ## Shape of an operation
 //!
@@ -112,6 +120,79 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+/// The largest page this listing serves, which is also the page a request that names no
+/// `MaxResults` is served.
+///
+/// Source: the model's `MaxResults` target `PageSize`, whose range is 1..1000 — so the
+/// largest page the model describes is the one a request that asks for no particular size
+/// gets, and every partition of a table under that count arrives on one page. A
+/// `MaxResults` outside that range is refused at the boundary walk before this handler
+/// runs (the member keeps its modelled `@range`), so this one number is the whole page
+/// policy.
+const MAX_PAGE_SIZE: i32 = 1_000;
+
+/// The member a continuation token that names no place in this listing is refused on,
+/// spelled as the model spells it.
+const NEXT_TOKEN_MEMBER: &str = "NextToken";
+
+/// One partition's place in this listing, as the continuation token renders it: the
+/// `Values` that address it, which are also what the table's partitions are ordered by.
+///
+/// Rendered as the JSON array of those values rather than joined, because a partition
+/// value is arbitrary text (`ValueString`) and a joined rendering of several of them could
+/// be read back as a different list.
+fn cursor_of(values: &[String]) -> String {
+    ::serde_json::Value::Array(
+        values
+            .iter()
+            .map(|value| ::serde_json::Value::String(value.clone()))
+            .collect(),
+    )
+    .to_string()
+}
+
+/// The value list a continuation token names, or `None` for a value that names none.
+///
+/// The position a token names travels INSIDE it — there is no page kept on the side to look
+/// up — so what this tells apart is a token carrying a value list from one that carries no
+/// list at all; a caller that builds a well-formed list of its own names a position in the
+/// same order, which is a position this listing would have offered.
+fn cursor_values(cursor: &str) -> Option<Vec<String>> {
+    ::serde_json::from_str::<Vec<String>>(cursor).ok()
+}
+
+/// The region of a table's `count` selected partitions that segment `segment_number` of a
+/// scan split into `total_segments` covers, as the half-open range of positions in the
+/// order the partitions are listed in.
+///
+/// "Defines a non-overlapping region of a table's partitions, allowing multiple requests
+/// to be run in parallel" (`Segment`): the regions are contiguous runs of that one order,
+/// so no partition is in two of them and every selected partition is in exactly one — a
+/// client that scans every segment sees the whole selection, whatever the segment count.
+fn segment_bounds(count: usize, segment_number: i32, total_segments: i32) -> (usize, usize) {
+    let number = usize::try_from(segment_number).unwrap_or(0);
+    let total = usize::try_from(total_segments).unwrap_or(1).max(1);
+    let start = count.saturating_mul(number) / total;
+    let end = count.saturating_mul(number.saturating_add(1)) / total;
+    (start.min(count), end.min(count))
+}
+
+/// One reported partition, narrowed by `ExcludeColumnSchema`.
+///
+/// "When true, specifies not returning the partition column schema. Useful when you are
+/// interested only in other partition attributes such as partition values or location"
+/// (`GetPartitionsRequest$ExcludeColumnSchema`): the column list of the partition's
+/// storage descriptor is what is left out, and every other member it carries is reported
+/// exactly as the single-partition read reports it.
+fn project(mut partition: Partition, exclude_column_schema: bool) -> Partition {
+    if exclude_column_schema {
+        if let Some(storage) = partition.storage_descriptor.as_mut() {
+            storage.columns = None;
+        }
+    }
+    partition
+}
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -188,18 +269,260 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetPartitions` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetPartitionsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetPartitions"))
+        // `AuditContext` is "a structure containing the Lake Formation audit context":
+        // what a Lake Formation integration asks this read to RECORD about the query
+        // behind it. This emulator keeps no audit record, so accepting the member and
+        // dropping it would report a logged read nothing logged; the listing is served
+        // only when it asks for no audit context, exactly as the single-partition read is
+        // (`crate::ops::get_partition`).
+        if input.audit_context.is_some() {
+            return Err(crate::scaffolded::Scaffolded::not_implemented(
+                "GetPartitions with AuditContext",
+            ));
+        }
+        // The model documents that `QueryAsOfTime` "cannot be specified along with
+        // TransactionId", so that pair is a client error whatever else is supported.
+        if input.transaction_id.is_some() && input.query_as_of_time.is_some() {
+            return Err(GetPartitionsErrorModeled::InvalidInputException(
+                InvalidInputException {
+                    message: Some(
+                        "QueryAsOfTime cannot be specified along with TransactionId".into(),
+                    ),
+                    from_federation_source: None,
+                },
+            )
+            .into());
+        }
+        // A transactional or point-in-time read needs a transaction log this emulator does
+        // not keep, so a request that asks for one is answered "not written yet" rather
+        // than silently served from the latest state (`crate::ops::get_tables`).
+        if input.transaction_id.is_some() || input.query_as_of_time.is_some() {
+            return Err(crate::scaffolded::Scaffolded::not_implemented(
+                "GetPartitions with TransactionId or QueryAsOfTime",
+            ));
+        }
+
+        // A `Segment` names one region of a scan split into `TotalSegments` of them, and
+        // `SegmentNumber` is "the zero-based index number of the segment": a number that is
+        // not below the segment count names no region of that scan. Both members keep
+        // their modelled ranges at the boundary; what is judged here is the pair.
+        if let Some(segment) = input.segment.as_ref() {
+            if segment.segment_number >= segment.total_segments {
+                return Err(GetPartitionsErrorModeled::InvalidInputException(
+                    InvalidInputException {
+                        message: Some(crate::state::messages::segment_number_outside_total(
+                            segment.segment_number,
+                            segment.total_segments,
+                        )),
+                        from_federation_source: None,
+                    },
+                )
+                .into());
+            }
+        }
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(GetPartitionsErrorModeled::InternalServiceException(
+                InternalServiceException {
+                    message: Some("the Glue Data Catalog store is unavailable".into()),
+                },
+            )
+            .into());
+        };
+
+        let catalog_id = crate::state::resolve_catalog_id(input.catalog_id.as_ref());
+        let region = crate::state::request_region(ctx.parts());
+        let exclude_column_schema = input.exclude_column_schema == Some(true);
+        // An `Expression` of no characters at all is admitted by the member's own
+        // `@length(min: 0)` and filters nothing: a filter is there to select, and a value
+        // spelling no comparison selects every partition. The filter's TEXT is read here,
+        // before the store is locked, and bound to the addressed table's partition keys
+        // once that table is in hand (`crate::state::ParsedPartitionFilter`).
+        let expression = input
+            .expression
+            .as_deref()
+            .filter(|expression| !expression.trim().is_empty());
+        let parsed_filter = match expression {
+            None => None,
+            Some(expression) => match crate::state::ParsedPartitionFilter::parse(expression) {
+                Ok(parsed) => Some(parsed),
+                Err(refusal) => {
+                    return Err(GetPartitionsErrorModeled::InvalidInputException(
+                        InvalidInputException {
+                            message: Some(refusal.message(expression)),
+                            from_federation_source: None,
+                        },
+                    )
+                    .into())
+                }
+            },
+        };
+        // The page size: what the request asked for, else the largest page the model
+        // describes, which is what a request naming no size is served. A `MaxResults`
+        // outside the modelled range never reaches here, so the only arithmetic left is the
+        // conversion.
+        let requested_page_size = input.max_results.unwrap_or(MAX_PAGE_SIZE);
+        let page_size = usize::try_from(requested_page_size.max(1)).unwrap_or(usize::MAX);
+
+        // The page is built under the store's guard and the guard released before KMS is
+        // asked anything: the key material of the partitions on the page travels out with
+        // it.
+        let (partitions, next_token, encryptions) = {
+            let store = state.lock();
+            let Some(database) = store.database(&catalog_id, &input.database_name) else {
+                return Err(GetPartitionsErrorModeled::EntityNotFoundException(
+                    EntityNotFoundException {
+                        message: Some(crate::state::messages::database_not_found(
+                            &input.database_name,
+                        )),
+                        from_federation_source: None,
+                    },
+                )
+                .into());
+            };
+            let Some(table) = database
+                .tables
+                .get(&crate::state::fold_name(&input.table_name))
+            else {
+                return Err(GetPartitionsErrorModeled::EntityNotFoundException(
+                    EntityNotFoundException {
+                        message: Some(crate::state::messages::table_not_found(&input.table_name)),
+                        from_federation_source: None,
+                    },
+                )
+                .into());
+            };
+
+            // The filter is bound to THIS table's partition keys, so a column that is no
+            // key of it, and a key whose declared type an expression cannot compare, are
+            // refused before any partition is examined — and the filter is read once
+            // however many partitions the table holds.
+            let filter = match parsed_filter.as_ref().zip(expression) {
+                None => None,
+                Some((parsed, expression)) => {
+                    match parsed.bind(table.partition_keys.as_deref().unwrap_or_default()) {
+                        Ok(filter) => Some(filter),
+                        Err(refusal) => {
+                            return Err(GetPartitionsErrorModeled::InvalidInputException(
+                                InvalidInputException {
+                                    message: Some(refusal.message(expression)),
+                                    from_federation_source: None,
+                                },
+                            )
+                            .into())
+                        }
+                    }
+                }
+            };
+
+            // The table's partitions in the ONE order the catalog keeps them in,
+            // lexicographic by value list, which is the order every reader of them walks
+            // and the order a continuation token resumes against.
+            let matching: Vec<&crate::state::PartitionEntry> = table
+                .partitions
+                .values()
+                .filter(|partition| {
+                    filter
+                        .as_ref()
+                        .is_none_or(|filter| filter.matches(&partition.values))
+                })
+                .collect();
+
+            // A `Segment` narrows the scan to its own region of that order; a request that
+            // names none scans the whole selection.
+            let scanned: &[&crate::state::PartitionEntry] = match input.segment.as_ref() {
+                None => matching.as_slice(),
+                Some(segment) => {
+                    let (start, end) = segment_bounds(
+                        matching.len(),
+                        segment.segment_number,
+                        segment.total_segments,
+                    );
+                    &matching[start..end]
+                }
+            };
+
+            // "A continuation token, if this is not the first call to retrieve these
+            // partitions": it names the last partition of the previous page, so this page
+            // resumes at the first partition strictly after it in that order — which stays
+            // correct across partitions created or deleted between two calls. A value that
+            // names no value list at all names no place in that order and is refused on the
+            // member it was sent at.
+            let start = match input.next_token.as_deref() {
+                Some(cursor) => {
+                    let Some(resume_after) = cursor_values(cursor) else {
+                        return Err(GetPartitionsErrorModeled::InvalidInputException(
+                            InvalidInputException {
+                                message: Some(crate::state::messages::parameter_value_not_valid(
+                                    NEXT_TOKEN_MEMBER,
+                                )),
+                                from_federation_source: None,
+                            },
+                        )
+                        .into());
+                    };
+                    scanned.partition_point(|partition| partition.values <= resume_after)
+                }
+                None => 0,
+            };
+            let end = start.saturating_add(page_size).min(scanned.len());
+
+            let page = &scanned[start..end];
+            // The listing serves the SAME projection as the single-partition read, element
+            // by element, so a client that works from a listing is never less informed than
+            // one that re-reads each partition. Only `ExcludeColumnSchema` narrows an
+            // element, and then to exactly what that member leaves out.
+            let partitions: Vec<Partition> = page
+                .iter()
+                .map(|partition| {
+                    project(partition.to_partition(table), exclude_column_schema)
+                })
+                .collect();
+            // The key material of every partition ON THE PAGE: this read answers each of
+            // them, so each has to be decrypted before any is served.
+            let encryptions: Vec<crate::state::catalog_encryption::ObjectEncryption> = page
+                .iter()
+                .filter_map(|partition| partition.encryption.clone())
+                .collect();
+            // "A continuation token, if the returned list of partitions does not include
+            // the last one": it names the last entry of the page, taken from the page
+            // itself so there is no index arithmetic to underflow on an empty page.
+            let next_token = if end < scanned.len() {
+                page.last().map(|partition| cursor_of(&partition.values))
+            } else {
+                None
+            };
+            ::tracing::info!(
+                operation = "GetPartitions",
+                catalog_id = %catalog_id,
+                database = %database.name,
+                table = %table.name,
+                selected = matching.len(),
+                reported = partitions.len(),
+                "listed Data Catalog partitions"
+            );
+            (partitions, next_token, encryptions)
+        };
+
+        // A partition written while its catalog encrypted catalog writes under a KMS key is
+        // listed only while that key is usable, exactly as the single-partition read serves
+        // it (`crate::ops::get_partition`): the page is answered once KMS has opened the
+        // data key of every partition on it, and KMS's own refusal about the key is relayed
+        // as this operation's `GlueEncryptionException`.
+        if let Err(message) =
+            crate::state::catalog_encryption::unseal_all(ctx, &region, &encryptions).await
+        {
+            return Err(GetPartitionsErrorModeled::GlueEncryptionException(
+                GlueEncryptionException {
+                    message: Some(message),
+                },
+            )
+            .into());
+        }
+
+        Ok(GetPartitionsOutput {
+            partitions: Some(partitions),
+            next_token,
+        })
     }
 }

@@ -1577,3 +1577,72 @@ pub fn unsupported_export_sse_algorithm(value: &str) -> String {
         super::EXPORT_SSE_ALGORITHMS.join(" and ")
     )
 }
+
+/// A partition listing (`GetPartitions`) whose `Expression` is no `WHERE`-clause filter
+/// over the addressed table's partition keys at all
+/// ([`super::ParsedPartitionFilter::parse`], [`super::ParsedPartitionFilter::bind`]).
+///
+/// NOT recorded: what is pinned is the behaviour — 400 with the operation's modelled
+/// `InvalidInputException` — and the sentence states the documented form the member takes,
+/// "SQL syntax similar to the SQL WHERE filter clause" built from the operators the member
+/// lists, carrying the expression as submitted.
+pub fn expression_is_not_a_partition_filter(expression: &str) -> String {
+    format!(
+        "Expression {expression} is not a filter on the table's partitions; an \
+             expression uses SQL syntax similar to the SQL WHERE filter clause, built \
+             from the operators =, <>, >, <, >=, <=, AND, OR, IN, BETWEEN, LIKE, NOT \
+             and IS NULL"
+    )
+}
+
+/// A partition listing whose `Expression` reads a column that is no partition key of the
+/// addressed table. NOT recorded: what is pinned is the behaviour — 400 with the
+/// operation's modelled `InvalidInputException` — and the sentence states the rule the
+/// expression broke, that a filter on a table's partitions reads the partition keys a
+/// partition is addressed by, carrying the column name as submitted.
+pub fn expression_names_no_partition_key(key: &str) -> String {
+    format!("Expression references {key}, which is not a partition key of the table")
+}
+
+/// A partition listing whose `Expression` filters a partition key whose declared type is
+/// outside the types the member documents ([`super::FILTERABLE_PARTITION_KEY_TYPES`]) —
+/// "if a type is encountered that is not valid, an exception is thrown".
+///
+/// NOT recorded: what is pinned is the behaviour — 400 with the operation's modelled
+/// `InvalidInputException` — and the sentence carries the partition key, the type it is
+/// declared with and the types an expression filters.
+pub fn partition_key_type_not_filterable(key: &str, declared: &str) -> String {
+    format!(
+        "Expression filters partition key {key} of type {declared}; the supported \
+             partition key types are {}",
+        super::FILTERABLE_PARTITION_KEY_TYPES.join(", ")
+    )
+}
+
+/// A partition listing whose `Expression` compares a partition key against a literal that
+/// is no value of that key's declared type. NOT recorded: what is pinned is the behaviour
+/// — 400 with the operation's modelled `InvalidInputException` — and the sentence states
+/// the rule the comparison broke, that a partition key is compared in the type it is
+/// declared with, carrying that key and that type.
+pub fn expression_value_not_of_partition_key_type(key: &str, declared: &str) -> String {
+    format!(
+        "Expression compares partition key {key} against a value that is not of its \
+             type {declared}"
+    )
+}
+
+/// A partition listing whose `Segment` names a segment outside the scan it splits the
+/// table into: "the zero-based index number of the segment. For example, if the total
+/// number of segments is 4, SegmentNumber values range from 0 through 3"
+/// (`Segment$SegmentNumber`).
+///
+/// NOT recorded: what is pinned is the behaviour — 400 with the operation's modelled
+/// `InvalidInputException` — and the sentence states that documented rule, carrying the
+/// segment the request asked for and the number of segments it split the table into.
+pub fn segment_number_outside_total(segment_number: i32, total_segments: i32) -> String {
+    format!(
+        "SegmentNumber {segment_number} is not a segment of a scan of {total_segments} \
+             segments; SegmentNumber is zero-based and ranges from 0 through {}",
+        total_segments.saturating_sub(1)
+    )
+}

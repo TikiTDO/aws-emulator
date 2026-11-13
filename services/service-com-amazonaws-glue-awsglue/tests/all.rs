@@ -273,6 +273,8 @@ mod mutations_are_applied;
 mod owed_status_materialisation;
 #[path = "all/partition_indexes.rs"]
 mod partition_indexes;
+#[path = "all/partition_listing.rs"]
+mod partition_listing;
 #[path = "all/partitions.rs"]
 mod partitions;
 #[path = "all/refusal_classification.rs"]

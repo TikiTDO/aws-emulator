@@ -27,6 +27,13 @@ hex = { workspace = true }
 # The `Expression` filter of `GetTables` is a regular expression, matched here by the
 # regex crate rather than by a hand-rolled matcher.
 regex = "1.13"
+# `sqlparser`: the `Expression` of a partition listing is a SQL WHERE-clause predicate, so
+# it is PARSED with it rather than scanned for operators by hand
+# (`state::partition_predicate`).
+sqlparser = "0.59"
+# The calendar a `date` or `timestamp` partition key's values are read against, so a value
+# that is no real day is refused rather than compared (`state::partition_predicate`).
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 # The shared IAM policy evaluator and IAM-ARN reading, for the crawler-role checks.
 service-common = { path = "../common" }
 # The account's own IAM records, read through the same shared engine, so a crawler's
