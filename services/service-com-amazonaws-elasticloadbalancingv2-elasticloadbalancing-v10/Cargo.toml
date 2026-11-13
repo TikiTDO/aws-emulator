@@ -32,7 +32,7 @@ http = { workspace = true }
 # is what makes the published `DNSName` an address a client dials with its own client
 # (`src/service/listener_socket.rs`). `hyper-util` carries the tokio IO and timer adapters
 # for it, `http-body-util` the bounded body reader and the one-shot body.
-hyper = { version = "1", features = ["server", "http1"] }
+hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 # Runs the SERVER side of the TLS handshake an HTTPS or TLS listener terminates, under the
