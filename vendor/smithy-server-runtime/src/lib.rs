@@ -25,6 +25,7 @@ pub mod pre_dispatch;
 pub mod router;
 pub mod service;
 pub mod signed_url;
+pub mod transport;
 pub mod virtual_host;
 pub mod wire;
 pub mod wire_protocol;
