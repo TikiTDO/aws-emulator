@@ -505,6 +505,10 @@ pub struct ComAmazonawsRdsAmazonrdsv19State {
     /// ([`data_plane::cluster_endpoint`]), and [`Self::settle_due_transitions`] drops it
     /// with the cluster.
     pub db_cluster_engine_endpoints: BTreeMap<RegionalKey, DbEngineEndpoint>,
+    /// Host-backed real database workloads (`EMULATOR_RDS_REAL_ENGINE`) keyed by
+    /// `(region, DBInstanceIdentifier)` so `DeleteDBInstance` releases the container and
+    /// volume and `CreateDBSnapshot` refuses unsupported live-container snapshots cleanly.
+    pub real_workloads: BTreeMap<RegionalKey, data_plane::real_engine::RealWorkload>,
 }
 
 impl ComAmazonawsRdsAmazonrdsv19State {
