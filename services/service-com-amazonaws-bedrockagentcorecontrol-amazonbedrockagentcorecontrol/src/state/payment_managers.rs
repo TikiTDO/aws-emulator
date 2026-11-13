@@ -55,8 +55,8 @@ pub const PAYMENT_MANAGER_STATUS_READY: &str = "READY";
 /// AWS documents no duration for the transition, so the span is chosen: long enough
 /// that a caller acting straight after the create still observes the transient
 /// status, short enough to keep a client script quick — the same span the sibling
-/// resources' transitions take ([`BROWSER_SETTLE_DELAY`]).
-pub const PAYMENT_MANAGER_SETTLE_DELAY: Duration = BROWSER_SETTLE_DELAY;
+/// resources' transitions take ([`super::REGISTRY_SETTLE_DELAY`]).
+pub const PAYMENT_MANAGER_SETTLE_DELAY: Duration = super::REGISTRY_SETTLE_DELAY;
 
 /// How many payment managers this emulator will hold.
 ///

@@ -25,9 +25,9 @@
 //!   holding the catalog's configuration and the status the clock owes it, so
 //!   `GetRegistry` and any later registry read answer from one store;
 //! * the browser (`/browsers/`): one [`BrowserRecord`] per `browserId`, holding
-//!   the configuration `CreateBrowser` persisted and the statuses the clock owes
-//!   it, so `GetBrowser` reports exactly that and `DeleteBrowser` reports what it
-//!   is removing;
+//!   the configuration `CreateBrowser` persisted and the status it reports, so
+//!   `GetBrowser` reports exactly that and `DeleteBrowser` reports what it
+//!   removed;
 //! * the browser profile (`/browser-profiles/`): one [`BrowserProfileRecord`]
 //!   per `profileId`, holding the name, description and tags
 //!   `CreateBrowserProfile` persisted, the instant a browser session last saved
@@ -90,7 +90,7 @@ use crate::ops::types::{
     AuthorizerConfiguration,
     BrowserEnterprisePolicy, BrowserNetworkConfiguration, BrowserSigningConfigOutput,
     CapacityProviderConfiguration, Certificate, CertificateConfiguration, Code,
-    ComponentConfiguration,
+    ComponentConfiguration, ConflictException,
     CodeInterpreterNetworkConfiguration, CreateCodeInterpreterOutput, DeleteCodeInterpreterOutput,
     GetCodeInterpreterOutput,
     CreateBrowserOutput, CreateGatewayOutput, DeleteBrowserOutput, GetBrowserOutput,
@@ -2312,19 +2312,32 @@ pub const BROWSER_ARN_RESOURCE: &str = "browser-custom";
 /// `BrowserStatus` members this service drives. The enum's full value list is
 /// `CREATING | CREATE_FAILED | READY | DELETING | DELETE_FAILED | DELETED`
 /// (`shared_types::BROWSER_STATUS_VALUES`, from `smithy_query
-/// shape=BrowserStatus`).
-pub const BROWSER_STATUS_CREATING: &str = "CREATING";
-pub const BROWSER_STATUS_READY: &str = "READY";
-pub const BROWSER_STATUS_DELETING: &str = "DELETING";
-
-/// How long a freshly created browser stays `CREATING` before the clock owes it
-/// `READY`, and how long an accepted deletion leaves it `DELETING` before the
-/// record is gone.
+/// shape=BrowserStatus`), and the two below are the TERMINAL ones.
 ///
-/// AWS documents no duration for either transition, so the span is chosen: long
-/// enough that a caller acting straight after the call still observes the
-/// transient status, short enough to keep a client script quick.
-pub const BROWSER_SETTLE_DELAY: Duration = Duration::from_secs(3);
+/// A browser is provisioned from a network configuration alone and torn down
+/// again within the call that asks for it, so it is serviceable the moment
+/// `CreateBrowser` answers and gone the moment `DeleteBrowser` does: the only
+/// statuses observable to a caller are `READY`, which it reports for as long as
+/// it exists, and `DELETED`, which the delete that removed it reports. The
+/// transient and failed members describe a browser nothing here produces.
+pub const BROWSER_STATUS_READY: &str = "READY";
+pub const BROWSER_STATUS_DELETED: &str = "DELETED";
+
+/// The modelled conflict for a browser `name` this account already holds.
+///
+/// `CreateBrowser`'s `name` "must be unique within your account", and the
+/// refusal names the name the request carried, quoted: "Browser with name
+/// '<name>' already exists in this account". The sentence around the name is
+/// fixed, the name itself is the caller's own value, and the browser already
+/// holding it is NOT disclosed. Shared by the handlers rather than written per
+/// operation, so one collision cannot be worded two ways.
+pub fn browser_name_conflict(name: &str) -> ConflictException {
+    ConflictException {
+        message: Some(format!(
+            "Browser with name '{name}' already exists in this account"
+        )),
+    }
+}
 
 /// How many browsers this emulator will hold.
 ///
@@ -2381,52 +2394,29 @@ pub struct BrowserRecord {
     pub tags: BTreeMap<String, String>,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
-    /// The status the browser reports until [`Self::settles_at`].
-    pub transient_status: String,
-    /// The status it reports from then on.
-    pub settled_status: String,
-    /// When the clock owes the move from one to the other. Stored, never slept
-    /// on: a read materialises the transition the clock already made due.
-    pub settles_at: SystemTime,
-    /// The instant an accepted deletion removes this record, once
-    /// `DeleteBrowser` has accepted one; `None` for a browser nobody has
-    /// deleted. Stored, never slept on, like
-    /// [`GatewayRecord::removal_due_at`](GatewayRecord#structfield.removal_due_at).
-    pub removal_due_at: Option<SystemTime>,
+    /// The status this browser reports — [`BROWSER_STATUS_READY`] for as long as
+    /// it is stored, since a browser is serviceable the moment its create
+    /// answers, and [`BROWSER_STATUS_DELETED`] on the record the delete that
+    /// removed it hands back. No transition is owed to the clock, so no read
+    /// ever has to materialise one.
+    pub status: String,
 }
 
 impl BrowserRecord {
-    /// The status at `now`: the transient one until the clock owes the
-    /// transition, the settled one from then on. No read performs it — it is due
-    /// at that instant whether or not anybody looks.
-    pub fn status_at(&self, now: SystemTime) -> &str {
-        if now < self.settles_at {
-            &self.transient_status
-        } else {
-            &self.settled_status
-        }
-    }
-
-    /// Whether a deletion has been accepted for this browser: it reports
-    /// `DELETING` and the clock owes its removal.
-    pub fn is_deleting(&self) -> bool {
-        self.removal_due_at.is_some()
-    }
-
     /// What the create of this browser reports: the four members
     /// `CreateBrowserResponse` declares, every one of them off the record just
     /// written.
-    pub fn create_output(&self, now: SystemTime) -> CreateBrowserOutput {
+    pub fn create_output(&self) -> CreateBrowserOutput {
         CreateBrowserOutput {
             browser_id: self.browser_id.clone(),
             browser_arn: self.browser_arn.clone(),
             created_at: timestamp(self.created_at),
-            status: self.status_at(now).to_string(),
+            status: self.status.clone(),
         }
     }
 
     /// What a read of this browser reports.
-    pub fn get_output(&self, now: SystemTime) -> GetBrowserOutput {
+    pub fn get_output(&self) -> GetBrowserOutput {
         GetBrowserOutput {
             browser_id: self.browser_id.clone(),
             browser_arn: self.browser_arn.clone(),
@@ -2439,20 +2429,21 @@ impl BrowserRecord {
             enterprise_policies: self.enterprise_policies.clone(),
             certificates: self.certificates.clone(),
             filesystem_configurations: self.filesystem_configurations.clone(),
-            status: self.status_at(now).to_string(),
+            status: self.status.clone(),
             // Reported only for a status that HAS a reason; a browser this
-            // emulator drives reaches READY, which has none.
+            // emulator drives is READY, which has none.
             failure_reason: None,
             created_at: timestamp(self.created_at),
             last_updated_at: timestamp(self.updated_at),
         }
     }
 
-    /// What the deletion of this browser reports.
-    pub fn delete_output(&self, now: SystemTime) -> DeleteBrowserOutput {
+    /// What the deletion of this browser reports: the record the delete removed,
+    /// in the status it left it in.
+    pub fn delete_output(&self) -> DeleteBrowserOutput {
         DeleteBrowserOutput {
             browser_id: self.browser_id.clone(),
-            status: self.status_at(now).to_string(),
+            status: self.status.clone(),
             last_updated_at: timestamp(self.updated_at),
         }
     }
@@ -2497,9 +2488,8 @@ pub const BROWSER_PROFILE_STATUS_DELETING: &str = "DELETING";
 ///
 /// AWS documents no duration for the transition, so the span is chosen: long
 /// enough that a caller acting straight after the delete still observes the
-/// transient status, short enough to keep a client script quick — the same span
-/// the sibling browser's transitions take ([`BROWSER_SETTLE_DELAY`]).
-pub const BROWSER_PROFILE_REMOVAL_DELAY: Duration = BROWSER_SETTLE_DELAY;
+/// transient status, short enough to keep a client script quick.
+pub const BROWSER_PROFILE_REMOVAL_DELAY: Duration = Duration::from_secs(3);
 
 /// How many browser profiles this emulator will hold.
 ///
@@ -2538,7 +2528,7 @@ pub struct BrowserProfileRecord {
     /// The instant an accepted deletion removes this record, once
     /// `DeleteBrowserProfile` has accepted one; `None` for a profile nobody has
     /// deleted. Stored, never slept on, like
-    /// [`BrowserRecord::removal_due_at`](BrowserRecord#structfield.removal_due_at).
+    /// [`GatewayRecord::removal_due_at`](GatewayRecord#structfield.removal_due_at).
     pub removal_due_at: Option<SystemTime>,
 }
 
@@ -2710,7 +2700,7 @@ pub struct CodeInterpreterRecord {
     /// The instant an accepted deletion removes this record, once
     /// `DeleteCodeInterpreter` has accepted one; `None` for an interpreter
     /// nobody has deleted. Stored, never slept on, like
-    /// [`BrowserRecord::removal_due_at`](BrowserRecord#structfield.removal_due_at).
+    /// [`GatewayRecord::removal_due_at`](GatewayRecord#structfield.removal_due_at).
     pub removal_due_at: Option<SystemTime>,
 }
 
@@ -2889,10 +2879,7 @@ impl SystemTools {
             tags: BTreeMap::new(),
             created_at: self.created_at,
             updated_at: self.created_at,
-            transient_status: BROWSER_STATUS_READY.to_string(),
-            settled_status: BROWSER_STATUS_READY.to_string(),
-            settles_at: self.created_at,
-            removal_due_at: None,
+            status: BROWSER_STATUS_READY.to_string(),
         }
     }
 

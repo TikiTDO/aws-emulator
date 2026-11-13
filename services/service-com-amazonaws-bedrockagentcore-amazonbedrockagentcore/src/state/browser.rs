@@ -270,17 +270,16 @@ pub enum BrowserAvailability {
 /// a browser that control plane returns from its own read — an identifier naming none is
 /// an identifier naming nothing, whatever it looks like.
 ///
-/// The deletion the clock has already made due is materialised first, exactly as the
-/// control plane's own read of a browser does, so this answers what `GetBrowser` would
-/// answer at the same instant.
+/// A browser's teardown completes inside the control plane's `DeleteBrowser` call, so its
+/// store holds exactly the browsers that exist at this instant: this answers what
+/// `GetBrowser` would answer at the same instant, with no transition left to materialise.
 ///
 /// WHY THE OWNER'S STORE AND NOT THE SHARED MIRROR: the sibling code interpreter plane
 /// asks `service_common::agentcore_resources::AgentCoreResourceInventory`, a registry the
 /// control plane writes as it creates and deletes. That inventory has no browser half,
-/// and a registry entry is not the owner's read: a browser whose accepted deletion the
-/// clock has since made due is gone from the owner's store at this instant, which is the
-/// answer a session has to be refused on. Converging the two planes on one idiom means
-/// giving the inventory that clock, not adding a third mechanism here.
+/// and a registry entry is not the owner's read: a browser the owner's store no longer
+/// holds is the answer a session has to be refused on. Converging the two planes on one
+/// idiom means giving the inventory that reach, not adding a third mechanism here.
 pub fn browser_availability<Eng: Send + Sync + 'static>(
     engine: &Eng,
     browser_identifier: &str,
@@ -291,8 +290,7 @@ pub fn browser_availability<Eng: Send + Sync + 'static>(
     if browser_identifier == control_plane::state::SYSTEM_BROWSER_ID {
         return BrowserAvailability::Held;
     }
-    let mut store = control.lock();
-    store.expire_deleted_browsers(SystemTime::now());
+    let store = control.lock();
     if store.browsers.contains_key(browser_identifier) {
         BrowserAvailability::Held
     } else {

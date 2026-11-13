@@ -23,13 +23,13 @@ impl BrowserRecord {
     /// This browser as `ListBrowsers` reports it: the members `BrowserSummary`
     /// declares, every one of them off the same record [`Self::get_output`]
     /// renders, so the listing and the read report one browser alike.
-    pub fn summary(&self, now: SystemTime) -> BrowserSummary {
+    pub fn summary(&self) -> BrowserSummary {
         BrowserSummary {
             browser_id: self.browser_id.clone(),
             browser_arn: self.browser_arn.clone(),
             name: Some(self.name.clone()),
             description: self.description.clone(),
-            status: self.status_at(now).to_string(),
+            status: self.status.clone(),
             created_at: timestamp(self.created_at),
             last_updated_at: Some(timestamp(self.updated_at)),
         }

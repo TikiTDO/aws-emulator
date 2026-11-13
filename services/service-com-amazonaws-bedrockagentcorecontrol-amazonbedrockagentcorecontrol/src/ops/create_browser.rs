@@ -207,9 +207,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let mut store = state.lock();
-        // A browser whose earlier deletion the clock has already made due is gone
-        // before this call looks at the names this account holds.
-        store.expire_deleted_browsers(now);
 
         // A replayed request carrying the same `clientToken` answers with the
         // browser that token first produced, rather than minting a second one:
@@ -221,19 +218,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // `replayed_browser_result` answers only for a browser the store
             // still holds, so this lookup cannot miss.
             if let Some(record) = store.browsers.get(&browser_id) {
-                return Ok(record.create_output(now));
+                return Ok(record.create_output());
             }
         }
 
         // "The name must be unique within your account", so a repeated name is a
         // conflict, not a second browser that later reads cannot tell apart.
-        if let Some(existing) = store.browser_names.get(&input.name) {
-            return Err(CreateBrowserErrorModeled::ConflictException(ConflictException {
-                message: Some(format!(
-                    "a browser named {} already exists (browserId {existing})",
-                    input.name
-                )),
-            })
+        if store.browser_names.contains_key(&input.name) {
+            return Err(CreateBrowserErrorModeled::ConflictException(
+                crate::state::browser_name_conflict(&input.name),
+            )
             .into());
         }
 
@@ -271,15 +265,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             tags: crate::state::sorted_map(input.tags),
             created_at: now,
             updated_at: now,
-            // A new browser is created, not ready: the transition to READY is
-            // owed by the clock, not by this call.
-            transient_status: crate::state::BROWSER_STATUS_CREATING.to_string(),
-            settled_status: crate::state::BROWSER_STATUS_READY.to_string(),
-            settles_at: now + crate::state::BROWSER_SETTLE_DELAY,
-            // Nobody has deleted this browser, so the clock owes no removal.
-            removal_due_at: None,
+            // A browser is provisioned from its network configuration alone, so
+            // it is serviceable as soon as this call answers: the create reports
+            // the settled status and no transition is left for the clock to owe.
+            status: crate::state::BROWSER_STATUS_READY.to_string(),
         };
-        let output = record.create_output(now);
+        let output = record.create_output();
 
         store
             .browser_names

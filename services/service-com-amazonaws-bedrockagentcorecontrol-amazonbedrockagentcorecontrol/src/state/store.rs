@@ -746,11 +746,13 @@ impl ComAmazonawsBedrockagentcorecontrolAmazonbedrockagentcorecontrolState {
     }
 
     /// Remove every browser profile whose accepted deletion the clock has made
-    /// due, and the name index entry and idempotency records naming it, on the
-    /// same clock-owed rule as [`Self::expire_deleted_browsers`]:
+    /// due, and the name index entry and idempotency records naming it:
     /// `DeleteBrowserProfile` reports the profile `DELETING`, and the record
     /// itself goes when the span it owes passes, so a caller polling the profile
-    /// sees `DELETING` and then the modelled 404.
+    /// sees `DELETING` and then the modelled 404. The removal is owed by the
+    /// CLOCK — it was due at this instant whether or not anybody called — so
+    /// every operation that reads the profile store materialises it first, and
+    /// nothing ever sleeps for it.
     pub fn expire_deleted_browser_profiles(&mut self, now: SystemTime) {
         let due: Vec<String> = self
             .browser_profiles
@@ -832,8 +834,7 @@ impl ComAmazonawsBedrockagentcorecontrolAmazonbedrockagentcorecontrolState {
     }
 
     /// Remove every code interpreter whose accepted deletion the clock has made
-    /// due, and the name index entry and idempotency records naming it, on the
-    /// same clock-owed rule as [`Self::expire_deleted_browsers`]:
+    /// due, and the name index entry and idempotency records naming it:
     /// `DeleteCodeInterpreter` ACCEPTS the deletion (202) and reports the
     /// interpreter `DELETING`, and the record itself goes when the span it owes
     /// passes, so a caller polling it sees `DELETING` and then the modelled 404.
@@ -852,28 +853,20 @@ impl ComAmazonawsBedrockagentcorecontrolAmazonbedrockagentcorecontrolState {
         }
     }
 
-    /// Remove every browser whose accepted deletion the clock has made due, and
-    /// the name index entry and idempotency records naming it.
+    /// Remove the browser `browser_id` names, with the name index entry and the
+    /// idempotency records naming it, and hand the record back.
     ///
-    /// `DeleteBrowser` ACCEPTS the deletion (202) and reports the browser
-    /// `DELETING`; the record itself goes when the span it owes passes, so a
-    /// caller polling the browser sees `DELETING` and then the modelled 404. The
-    /// removal is owed by the CLOCK — it was due at this instant whether or not
-    /// anybody called — so every operation that reads the browser store
-    /// materialises it first, and nothing ever sleeps for it.
-    pub fn expire_deleted_browsers(&mut self, now: SystemTime) {
-        let due: Vec<String> = self
-            .browsers
-            .iter()
-            .filter(|(_, record)| record.removal_due_at.is_some_and(|at| now >= at))
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in due {
-            if let Some(record) = self.browsers.remove(&id) {
-                self.browser_names.remove(&record.name);
-                self.forget_browser_client_tokens_for(&record.browser_id);
-            }
-        }
+    /// A browser's teardown completes inside the `DeleteBrowser` call, so the
+    /// removal is this call's own and not a span the clock owes: the delete
+    /// answers `DELETED` and every later read of the id is the modelled 404. The
+    /// name becomes this account's to use again, and an idempotency record naming
+    /// a browser that is gone can never replay anything, so nothing else would
+    /// reclaim it.
+    pub fn remove_browser(&mut self, browser_id: &str) -> Option<BrowserRecord> {
+        let record = self.browsers.remove(browser_id)?;
+        self.browser_names.remove(&record.name);
+        self.forget_browser_client_tokens_for(&record.browser_id);
+        Some(record)
     }
 
     /// Mint a `bundleId` for `bundle_name` that no stored bundle holds:

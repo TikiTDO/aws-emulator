@@ -162,37 +162,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })?;
         let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
-        // A browser whose earlier deletion the clock has already made due is gone
-        // before this call looks for it.
-        store.expire_deleted_browsers(now);
 
-        // The store is keyed by the `browserId` the create minted; an id naming
-        // no stored browser is the modelled 404 — which is also what a delete of
-        // an already-removed browser answers, and what a delete naming the
-        // browser tool the SERVICE provides answers: a delete addresses only a
-        // browser this account created, and that tool is in no account's store.
-        let record = store.browsers.get_mut(&input.browser_id).ok_or_else(|| {
+        // The store is keyed by the `browserId` the create minted, and a
+        // browser's teardown completes inside this call: the record is removed
+        // here, so the delete reports the browser DELETED and every later read
+        // of the id is the modelled 404.
+        //
+        // An id naming no stored browser is that same 404 — which is what a
+        // delete of an already-removed browser answers, and what a delete naming
+        // the browser tool the SERVICE provides answers: a delete addresses only
+        // a browser this account created, and that tool is in no account's store.
+        let mut record = store.remove_browser(&input.browser_id).ok_or_else(|| {
             DeleteBrowserErrorModeled::ResourceNotFoundException(crate::state::browser_not_found(
                 &input.browser_id,
             ))
         })?;
 
-        // The deletion is ACCEPTED here (202) and the browser reports `DELETING`
-        // from now on; the record is removed when the span the clock owes passes,
-        // so a caller that deletes and then polls sees `DELETING` and then the
-        // modelled 404 rather than a resource that vanished mid-call.
-        //
-        // `DeleteBrowser` is `@idempotent`, so a repeat while the deletion is
-        // still under way reports that same browser instead of re-arming the
-        // clock.
-        if !record.is_deleting() {
-            record.transient_status = crate::state::BROWSER_STATUS_DELETING.to_string();
-            record.settled_status = crate::state::BROWSER_STATUS_DELETING.to_string();
-            record.settles_at = now;
-            record.removal_due_at = Some(now + crate::state::BROWSER_SETTLE_DELAY);
-            record.updated_at = now;
-        }
+        // The deletion completed in this call, so the record handed back carries
+        // the terminal status and the instant it was deleted — nothing is left
+        // for the clock to settle.
+        record.status = crate::state::BROWSER_STATUS_DELETED.to_string();
+        record.updated_at = now;
 
-        Ok(record.delete_output(now))
+        Ok(record.delete_output())
     }
 }

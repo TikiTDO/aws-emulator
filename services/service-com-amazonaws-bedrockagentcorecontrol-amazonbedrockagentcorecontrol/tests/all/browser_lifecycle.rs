@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! End-to-end HTTP tests for the custom-browser lifecycle (`CreateBrowser`,
-//! `GetBrowser`, `DeleteBrowser`).
+//! `GetBrowser`, `DeleteBrowser`, `ListBrowsers`).
 //!
 //! Every test drives the service the way the router does: an `http::Request` through
 //! [`MultiServiceRouter::dispatch`], so the wire protocol (`restJson1`), the boundary
 //! constraint validation and the handlers are all exercised. The store is the one shared
 //! engine, so what one request writes is what the next request reads.
+//!
+//! A custom browser is provisioned from its network configuration alone and torn down
+//! again inside the call that asks for it, so the only statuses a caller can observe are
+//! the terminal ones: `READY` while the browser exists, `DELETED` in the answer to the
+//! delete that removed it, and the modelled 404 for every read after that.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use aws_smithy_types::date_time::Format;
 use aws_smithy_types::DateTime;
@@ -24,10 +28,6 @@ const REGION: &str = "us-east-1";
 
 /// The account id every emulated ARN carries (`engine::mock_account_id`).
 const ACCOUNT: &str = "000000000000";
-
-/// The settle span `src/state.rs` gives a browser's clock-owed transitions, plus
-/// slack, so a test can wait the clock out.
-const PAST_SETTLE: Duration = Duration::from_millis(3_300);
 
 /// A `clientToken` inside the modelled `ClientToken` constraints (len 33..256,
 /// `^[a-zA-Z0-9](-*[a-zA-Z0-9]){0,256}$`, `smithy_query operation=CreateBrowser`).
@@ -58,6 +58,18 @@ async fn send(
     uri: &str,
     body: Option<&Value>,
 ) -> (u16, Value) {
+    let (status, _, parsed) = send_with_error_type(router, method, uri, body).await;
+    (status, parsed)
+}
+
+/// The same request as [`send`], also reporting the `x-amzn-errortype` header the
+/// `restJson1` error serializer sets on a modelled failure (absent on a success).
+async fn send_with_error_type(
+    router: &MultiServiceRouter,
+    method: &str,
+    uri: &str,
+    body: Option<&Value>,
+) -> (u16, Option<String>, Value) {
     let payload = body.map_or_else(Bytes::new, |value| {
         Bytes::from(serde_json::to_vec(value).expect("the request body serializes"))
     });
@@ -72,12 +84,17 @@ async fn send(
     let request = request.body(payload).expect("a well-formed request");
     let response = router.dispatch(request).await;
     let status = response.status().as_u16();
+    let error_type = response
+        .headers()
+        .get("x-amzn-errortype")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.rsplit(['#', ':']).next().unwrap_or(value).to_string());
     let parsed = if response.body().is_empty() {
         Value::Null
     } else {
         serde_json::from_slice(response.body()).unwrap_or(Value::Null)
     };
-    (status, parsed)
+    (status, error_type, parsed)
 }
 
 /// `CreateBrowser`: `PUT /browsers` (`smithy_query operation=CreateBrowser`).
@@ -93,6 +110,25 @@ async fn get_browser(router: &MultiServiceRouter, browser_id: &str) -> (u16, Val
 /// `DeleteBrowser`: `DELETE /browsers/{browserId}`.
 async fn delete_browser(router: &MultiServiceRouter, browser_id: &str) -> (u16, Value) {
     send(router, "DELETE", &format!("/browsers/{browser_id}"), None).await
+}
+
+/// `ListBrowsers`: `POST /browsers`, filtered to what this account created
+/// (`ResourceType` is `SYSTEM | CUSTOM`, `smithy_query operation=ListBrowsers`).
+async fn list_custom_browser_ids(router: &MultiServiceRouter) -> Vec<String> {
+    let (status, listed) = send(router, "POST", "/browsers?type=CUSTOM", Some(&json!({}))).await;
+    assert_eq!(
+        status, 200,
+        "expected HTTP 200 from ListBrowsers, got {status} ({listed})"
+    );
+    listed["browserSummaries"]
+        .as_array()
+        .map(|summaries| {
+            summaries
+                .iter()
+                .map(|summary| summary["browserId"].as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The error code `restJson1` puts in `__type` / `x-amzn-errortype`.
@@ -228,8 +264,9 @@ async fn a_browser_is_created_and_read_back_for_every_configuration() {
         ),
     ];
 
-    // The browsers the table creates, so the clock-owed transition is waited out ONCE
-    // after the loop rather than per row.
+    // The browsers the table creates, so every one of them is read again after the loop:
+    // a browser's status is settled, not owed to the clock, so a later read reports the
+    // same thing as the first.
     let mut settling: Vec<(&str, String, Value)> = Vec::new();
 
     for (case, name, extra, network) in rows {
@@ -257,8 +294,9 @@ async fn a_browser_is_created_and_read_back_for_every_configuration() {
         );
         assert_eq!(
             text(&created, "status"),
-            "CREATING",
-            "case {case:?}: a browser is created in CREATING, got {}",
+            "READY",
+            "case {case:?}: a created browser is serviceable at once, so the create reports \
+             READY, got {}",
             text(&created, "status")
         );
         assert_date_time(case, "createdAt", &created["createdAt"]);
@@ -310,8 +348,8 @@ async fn a_browser_is_created_and_read_back_for_every_configuration() {
         );
         assert_eq!(
             text(&fetched, "status"),
-            "CREATING",
-            "case {case:?}: the browser is still CREATING straight after the create, got {}",
+            "READY",
+            "case {case:?}: the read of a created browser reports READY, got {}",
             text(&fetched, "status")
         );
         assert!(
@@ -338,9 +376,9 @@ async fn a_browser_is_created_and_read_back_for_every_configuration() {
         settling.push((case, id, fetched["createdAt"].clone()));
     }
 
-    // The transition to READY is the clock's: it is due at the settle instant whether or
-    // not anybody reads the browser.
-    tokio::time::sleep(PAST_SETTLE).await;
+    // Nothing about a browser is owed to the clock: every later read reports the same
+    // READY browser, at the same instant, and the listing agrees with the read.
+    let listed = list_custom_browser_ids(&router).await;
     for (case, id, created_at) in settling {
         let (status, fetched) = get_browser(&router, &id).await;
         assert_eq!(
@@ -350,8 +388,7 @@ async fn a_browser_is_created_and_read_back_for_every_configuration() {
         assert_eq!(
             text(&fetched, "status"),
             "READY",
-            "case {case:?}: the clock owes the browser READY once its settle span has passed, \
-             got {}",
+            "case {case:?}: a browser stays READY for every later read, got {}",
             text(&fetched, "status")
         );
         assert_eq!(
@@ -359,88 +396,114 @@ async fn a_browser_is_created_and_read_back_for_every_configuration() {
             "case {case:?}: a read does not re-date the browser, got {} against {created_at}",
             fetched["createdAt"]
         );
+        assert!(
+            listed.contains(&id),
+            "case {case:?}: ListBrowsers reports the browser the create minted, got {listed:?}"
+        );
     }
 }
 
-/// An accepted deletion reports `DELETING` and the browser is gone once the span the
-/// clock owes passes — for a browser deleted while still `CREATING` and for one deleted
-/// after it reached `READY`, and whether the delete is sent once or repeated.
+/// A deletion completes inside the `DeleteBrowser` call: it answers 202 with the terminal
+/// status, the browser is gone from the store at once — unreadable, unlisted and
+/// undeletable a second time — and its name is free again.
+///
+/// The rows differ along the browser the delete addresses: its configuration, whether it
+/// was read before the delete, and whether its create carried a `clientToken` whose
+/// idempotency record the removal has to drop.
 #[tokio::test]
-async fn a_deleted_browser_reports_deleting_and_is_then_not_found() {
+async fn a_deleted_browser_reports_deleted_and_is_gone_at_once() {
     let router = router();
 
-    // (case, name, whether to wait the create out first, how many deletes to send)
-    let rows: [(&str, &str, bool, usize); 3] = [
-        ("deleted while still creating", "earlyBrowser", false, 1),
-        ("deleted once it is ready", "readyBrowser", true, 1),
-        ("deleted twice", "repeatBrowser", true, 2),
+    // (case, name, the network configuration, read it before the delete, create token)
+    let rows: [(&str, &str, Value, bool, Option<String>); 4] = [
+        (
+            "a public browser deleted straight after the create",
+            "earlyBrowser",
+            json!({"networkMode": "PUBLIC"}),
+            false,
+            None,
+        ),
+        (
+            "a public browser read before the delete",
+            "readBrowser",
+            json!({"networkMode": "PUBLIC"}),
+            true,
+            None,
+        ),
+        (
+            "a VPC browser",
+            "vpcDeletedBrowser",
+            json!({
+                "networkMode": "VPC",
+                "vpcConfig": {
+                    "securityGroups": ["sg-0123456789abcdef0"],
+                    "subnets": ["subnet-0123456789abcdef0"]
+                }
+            }),
+            false,
+            None,
+        ),
+        (
+            "a browser whose create carried a clientToken",
+            "tokenBrowser",
+            json!({"networkMode": "PUBLIC"}),
+            true,
+            Some(client_token("deleted")),
+        ),
     ];
 
-    for (case, name, wait_for_ready, deletes) in rows {
-        let (status, created) = create_browser(
-            &router,
-            &json!({"name": name, "networkConfiguration": {"networkMode": "PUBLIC"}}),
-        )
-        .await;
+    for (case, name, network, read_first, token) in rows {
+        let mut body = json!({"name": name, "networkConfiguration": network});
+        if let Some(token) = token.as_deref() {
+            body["clientToken"] = json!(token);
+        }
+        let (status, created) = create_browser(&router, &body).await;
         assert_eq!(
             status, 202,
             "case {case:?}: expected HTTP 202 from CreateBrowser, got {status} ({created})"
         );
         let id = text(&created, "browserId");
 
-        if wait_for_ready {
-            tokio::time::sleep(PAST_SETTLE).await;
-            let (_, ready) = get_browser(&router, &id).await;
+        if read_first {
+            let (status, ready) = get_browser(&router, &id).await;
             assert_eq!(
-                text(&ready, "status"),
-                "READY",
-                "case {case:?}: the browser reaches READY before the delete, got {}",
-                text(&ready, "status")
+                (status, text(&ready, "status")),
+                (200, "READY".to_string()),
+                "case {case:?}: the browser is READY before the delete, got {status} ({ready})"
             );
         }
 
-        for attempt in 1..=deletes {
-            let (status, deleted) = delete_browser(&router, &id).await;
-            assert_eq!(
-                status, 202,
-                "case {case:?} (delete {attempt}): expected HTTP 202 from DeleteBrowser, got \
-                 {status} ({deleted})"
-            );
-            assert_eq!(
-                text(&deleted, "browserId"),
-                id,
-                "case {case:?} (delete {attempt}): DeleteBrowser reports the browser it deleted, \
-                 got {}",
-                text(&deleted, "browserId")
-            );
-            assert_eq!(
-                text(&deleted, "status"),
-                "DELETING",
-                "case {case:?} (delete {attempt}): an accepted deletion reports DELETING, got {}",
-                text(&deleted, "status")
-            );
-            assert_date_time(case, "lastUpdatedAt", &deleted["lastUpdatedAt"]);
-        }
-
-        // The browser reports `DELETING` until the removal the clock owes comes due.
-        let (status, deleting) = get_browser(&router, &id).await;
+        let (status, deleted) = delete_browser(&router, &id).await;
         assert_eq!(
-            status, 200,
-            "case {case:?}: a browser whose deletion is under way is still readable, got \
-             {status} ({deleting})"
+            status, 202,
+            "case {case:?}: expected HTTP 202 from DeleteBrowser, got {status} ({deleted})"
         );
         assert_eq!(
-            text(&deleting, "status"),
-            "DELETING",
-            "case {case:?}: a browser whose deletion is under way reports DELETING, got {}",
-            text(&deleting, "status")
+            text(&deleted, "browserId"),
+            id,
+            "case {case:?}: DeleteBrowser reports the browser it deleted, got {}",
+            text(&deleted, "browserId")
         );
+        assert_eq!(
+            text(&deleted, "status"),
+            "DELETED",
+            "case {case:?}: a deletion completes in the call, so it reports DELETED, got {}",
+            text(&deleted, "status")
+        );
+        assert_date_time(case, "lastUpdatedAt", &deleted["lastUpdatedAt"]);
 
-        tokio::time::sleep(PAST_SETTLE).await;
-        let (status, missing) = get_browser(&router, &id).await;
+        // The browser is gone from the store the moment the delete answers: the read, the
+        // listing and a second delete all agree it does not exist.
+        let (status, error_type, missing) = send_with_error_type(
+            &router,
+            "GET",
+            &format!("/browsers/{id}"),
+            None,
+        )
+        .await;
         assert_eq!(
             status, 404,
-            "case {case:?}: a removed browser is the modelled 404, got {status} ({missing})"
+            "case {case:?}: a deleted browser is the modelled 404, got {status} ({missing})"
         );
         assert_eq!(
             error_code(&missing),
@@ -449,18 +512,39 @@ async fn a_deleted_browser_reports_deleting_and_is_then_not_found() {
             error_code(&missing)
         );
         assert_eq!(
+            error_type.as_deref(),
+            Some("ResourceNotFoundException"),
+            "case {case:?}: the refusal carries the x-amzn-errortype header, got {error_type:?}"
+        );
+        assert_eq!(
             text(&missing, "message"),
             format!("Browser with ID {id} does not exist"),
             "case {case:?}: the refusal names the browser id the request carried, got {}",
             text(&missing, "message")
         );
 
-        // The name the removed browser held is this account's to use again.
-        let (status, recreated) = create_browser(
-            &router,
-            &json!({"name": name, "networkConfiguration": {"networkMode": "PUBLIC"}}),
-        )
-        .await;
+        let listed = list_custom_browser_ids(&router).await;
+        assert!(
+            !listed.contains(&id),
+            "case {case:?}: a deleted browser is no longer listed, got {listed:?}"
+        );
+
+        let (status, again) = delete_browser(&router, &id).await;
+        assert_eq!(
+            (status, error_code(&again)),
+            (404, "ResourceNotFoundException".to_string()),
+            "case {case:?}: a second delete finds nothing to delete, got {status} ({again})"
+        );
+
+        // The name the removed browser held is this account's to use again, and the
+        // browser it mints is a new one, READY like any other.
+        let mut again = json!({"name": name, "networkConfiguration": {"networkMode": "PUBLIC"}});
+        if let Some(token) = token.as_deref() {
+            // The idempotency record of a browser that is gone replays nothing: this
+            // create mints a browser rather than answering with the deleted one.
+            again["clientToken"] = json!(token);
+        }
+        let (status, recreated) = create_browser(&router, &again).await;
         assert_eq!(
             status, 202,
             "case {case:?}: the name of a removed browser can be used again, got {status} \
@@ -471,6 +555,12 @@ async fn a_deleted_browser_reports_deleting_and_is_then_not_found() {
             id,
             "case {case:?}: a second create under the name mints its own browser, got {}",
             text(&recreated, "browserId")
+        );
+        assert_eq!(
+            text(&recreated, "status"),
+            "READY",
+            "case {case:?}: the browser minted after the delete is READY, got {}",
+            text(&recreated, "status")
         );
     }
 }
@@ -556,6 +646,84 @@ async fn create_browser_refuses_a_duplicate_name_and_vpc_mode_without_a_vpc_conf
         "a refused create does not overwrite the stored browser, got {}",
         fetched["description"]
     );
+}
+
+/// The `ConflictException` a duplicate name is refused with names the name the REQUEST
+/// carried, quoted, and discloses nothing about the browser already holding it.
+///
+/// The rows differ along the name, over the span `SandboxName`'s pattern
+/// `^[a-zA-Z][a-zA-Z0-9_]{0,47}$` admits (`smithy_query operation=CreateBrowser`): its
+/// shortest name, its longest, one carrying digits and underscores, and one in mixed
+/// case. The second create of each also varies the rest of the request, which changes
+/// nothing about the refusal.
+#[tokio::test]
+async fn a_duplicate_name_is_refused_with_the_name_the_request_carried() {
+    let router = router();
+
+    // The 48-character maximum `SandboxName` admits: a leading letter and 47 more.
+    let longest = format!("b{}", "a".repeat(47));
+
+    // (case, the name, the members the second create adds)
+    let rows: [(&str, String, Value); 4] = [
+        ("the shortest name the pattern admits", "b".to_string(), json!({})),
+        ("the longest name the pattern admits", longest.clone(), json!({})),
+        (
+            "a name carrying digits and underscores",
+            "browser_0123456789_tool".to_string(),
+            json!({"description": "a second browser under a held name"}),
+        ),
+        (
+            "a mixed-case name",
+            "MixedCaseBrowser".to_string(),
+            json!({"executionRoleArn": format!("arn:aws:iam::{ACCOUNT}:role/BrowserRole")}),
+        ),
+    ];
+
+    for (case, name, extra) in rows {
+        let (status, created) = create_browser(
+            &router,
+            &json!({"name": name, "networkConfiguration": {"networkMode": "PUBLIC"}}),
+        )
+        .await;
+        assert_eq!(
+            status, 202,
+            "case {case:?}: the first create of a name succeeds, got {status} ({created})"
+        );
+        let held_id = text(&created, "browserId");
+
+        let mut body = json!({"name": name, "networkConfiguration": {"networkMode": "PUBLIC"}});
+        for (member, value) in extra.as_object().expect("the row's members are an object") {
+            body[member] = value.clone();
+        }
+        let (status, error_type, refused) =
+            send_with_error_type(&router, "PUT", "/browsers", Some(&body)).await;
+        assert_eq!(
+            status, 409,
+            "case {case:?}: expected HTTP 409 from a duplicate name, got {status} ({refused})"
+        );
+        assert_eq!(
+            error_code(&refused),
+            "ConflictException",
+            "case {case:?}: expected ConflictException, got {} ({refused})",
+            error_code(&refused)
+        );
+        assert_eq!(
+            error_type.as_deref(),
+            Some("ConflictException"),
+            "case {case:?}: the refusal carries the x-amzn-errortype header, got {error_type:?}"
+        );
+        assert_eq!(
+            text(&refused, "message"),
+            format!("Browser with name '{name}' already exists in this account"),
+            "case {case:?}: the refusal names the requested name, got {}",
+            text(&refused, "message")
+        );
+        assert!(
+            !text(&refused, "message").contains(&held_id),
+            "case {case:?}: the refusal discloses the browser already holding the name, in {}",
+            text(&refused, "message")
+        );
+    }
 }
 
 /// A `clientToken` replayed against `CreateBrowser` answers with the browser it first

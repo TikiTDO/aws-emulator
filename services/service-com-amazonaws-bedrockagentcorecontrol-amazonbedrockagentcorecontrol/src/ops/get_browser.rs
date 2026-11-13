@@ -177,29 +177,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
         })?;
         let region = crate::state::request_region(ctx.parts());
-        let now = ::std::time::SystemTime::now();
-        let mut store = state.lock();
-        // A browser whose accepted deletion the clock has already made due is
-        // gone before this read looks for it — the removal was due at this
-        // instant whether or not anybody called.
-        store.expire_deleted_browsers(now);
+        let store = state.lock();
 
         // The browser tool the SERVICE provides is held by every account
         // without anything having created it, and `BrowserId` reserves its id,
         // so a read of that id reports the tool rather than looking for it
         // among the browsers this account created.
         if input.browser_id == crate::state::SYSTEM_BROWSER_ID {
-            return Ok(store.system_tools.browser(&region).get_output(now));
+            return Ok(store.system_tools.browser(&region).get_output());
         }
 
         // The store is keyed by the `browserId` the create minted; an id naming
         // no stored browser is the modelled 404 rather than an empty envelope.
+        // A deleted browser is removed by the delete itself, so this is also
+        // what a read after a delete answers.
         let record = store.browsers.get(&input.browser_id).ok_or_else(|| {
             GetBrowserErrorModeled::ResourceNotFoundException(crate::state::browser_not_found(
                 &input.browser_id,
             ))
         })?;
 
-        Ok(record.get_output(now))
+        Ok(record.get_output())
     }
 }

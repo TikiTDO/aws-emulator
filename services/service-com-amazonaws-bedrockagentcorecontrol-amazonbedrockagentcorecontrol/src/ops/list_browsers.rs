@@ -149,12 +149,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
         })?;
         let region = crate::state::request_region(ctx.parts());
-        let now = ::std::time::SystemTime::now();
-        let mut store = state.lock();
-        // A browser whose accepted deletion the clock has already made due is
-        // gone before this listing looks at the store — the removal was owed at
-        // this instant whether or not anybody called.
-        store.expire_deleted_browsers(now);
+        let store = state.lock();
 
         // The token is opaque on the wire: it carries the id the previous page
         // ended on, hex-encoded, and the next page starts strictly after it.
@@ -200,7 +195,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let page_size = crate::state::page_size(input.max_results, MAX_PAGE_SIZE);
         let (browser_summaries, next_token) =
             crate::state::page_over(&listed, resume_after.as_deref(), page_size, |record| {
-                Some(record.summary(now))
+                Some(record.summary())
             });
 
         Ok(ListBrowsersOutput {
