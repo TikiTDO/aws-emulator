@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListDomains
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListDomains`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListDomains::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: pages the Studio domains stored in `crate::state`. This is the ONLY
+//! file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -140,18 +133,94 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListDomains` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListDomainsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListDomains"))
+        let state = crate::state::service_state(&*self.engine)
+            .ok_or_else(|| crate::scaffolded::Scaffolded::validation(crate::state::NO_STATE))?;
+
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        // The only write this reporting call makes: the `Pending` -> `InService` moves the
+        // clock already owed. Each was due at the domain's stored instant whether or not
+        // anybody listed the domains, so no caller's read changes what a later one sees.
+        let mut settled: Vec<String> = Vec::new();
+        for domain in store.domains.values_mut() {
+            if domain.settle_status(now) {
+                settled.push(domain.arn.clone());
+            }
+        }
+        for arn in &settled {
+            // Each transition is a state change, so it leaves the same record a create
+            // does rather than happening unobservably on a read path.
+            crate::state::record_state_change(Self::NAME, arn, ctx);
+        }
+
+        // The model documents no sort for this operation, so the domains are reported in
+        // the one order the store holds them in — by the `DomainId` that identifies them,
+        // which is stable across calls and is what makes a `NextToken` land on the same
+        // boundary on the next page. The summaries are built here, so the store guard is
+        // released before the response is.
+        let listed: Vec<(String, DomainDetails)> = store
+            .domains
+            .values()
+            .map(|domain| {
+                (
+                    domain.id.clone(),
+                    DomainDetails {
+                        domain_arn: Some(domain.arn.clone()),
+                        domain_id: Some(domain.id.clone()),
+                        domain_name: Some(domain.name.clone()),
+                        status: Some(domain.status.clone()),
+                        creation_time: Some(crate::state::timestamp(domain.creation_time)),
+                        last_modified_time: Some(crate::state::timestamp(
+                            domain.last_modified_time,
+                        )),
+                        url: Some(domain.url.clone()),
+                    },
+                )
+            })
+            .collect();
+        drop(store);
+
+        let start = match input.next_token.as_deref() {
+            None => 0,
+            Some(token) => {
+                let resumed_after = crate::state::decode_page_token(token)
+                    .and_then(|domain_id| {
+                        listed.iter().position(|listed| listed.0 == domain_id)
+                    })
+                    .ok_or_else(|| {
+                        crate::scaffolded::Scaffolded::validation(crate::state::STALE_PAGE_TOKEN)
+                    })?;
+                resumed_after + 1
+            }
+        };
+        let start = start.min(listed.len());
+
+        // `MaxResults` caps the page ("an upper bound, not a target", defaulting to 10),
+        // and so does the service's own ceiling: one call can never serialise the whole
+        // store. The token below is emitted whenever anything is left, so a paginating
+        // client walks the full result set exactly once either way.
+        let page_size = input
+            .max_results
+            .unwrap_or(crate::state::DOMAIN_DEFAULT_PAGE_SIZE)
+            .clamp(1, crate::state::MAX_PAGE_SIZE)
+            .unsigned_abs() as usize;
+        let end = start.saturating_add(page_size).min(listed.len());
+
+        let next_token = match listed.get(end.saturating_sub(1)) {
+            // A token only where a further page exists, so a paginating client stops.
+            Some(last) if end > start && end < listed.len() => {
+                Some(crate::state::encode_page_token(&last.0))
+            }
+            _ => None,
+        };
+        Ok(ListDomainsOutput {
+            domains: Some(
+                listed[start..end]
+                    .iter()
+                    .map(|(_, details)| details.clone())
+                    .collect(),
+            ),
+            next_token,
+        })
     }
 }

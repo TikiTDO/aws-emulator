@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateDomain
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateDomain`'s real behaviour. Implement it here — this is
+//! IMPLEMENTED: mints a Studio domain into `crate::state` — its `DomainId`, its ARN and
+//! its Studio URL — and leaves it `Pending` until the clock owes `InService`. This is
 //! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateDomain::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -210,18 +204,90 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateDomain` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateDomainErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateDomain"))
+        let state = crate::state::service_state(&*self.engine)
+            .ok_or_else(|| crate::scaffolded::Scaffolded::validation(crate::state::NO_STATE))?;
+
+        // Every enum-typed member of this request (`AuthMode`, `AppNetworkAccessType`,
+        // `AppSecurityGroupManagement`, `HomeEfsFileSystemCreation`, `TagPropagation`) is
+        // refused outside its modelled catalog by the boundary validator before this
+        // handler runs, so reaching here means each one carries a value its enum declares
+        // and the only values left to resolve are the three the model documents a default
+        // for.
+
+        // The id is the server's: `DomainId` is not an input member, it is what every
+        // later call addresses this domain by, and it is derived from nothing in the
+        // request. The ARN and the Studio URL are minted from it once, here, so every
+        // reader replays the same three values.
+        let region = crate::state::request_region(ctx);
+        let domain_id = crate::state::mint_domain_id();
+        let arn = crate::state::resource_arn(&region, crate::state::DOMAIN_ARN_KIND, &domain_id);
+        let url = crate::state::studio_domain_url(&region, &domain_id);
+
+        let mut store = state.lock();
+        // The store is bounded, so a caller creating domain after domain cannot grow it
+        // without end. `ResourceLimitExceeded` is the limit failure this operation models.
+        if !store.domains_below_quota() {
+            return Err(CreateDomainErrorModeled::ResourceLimitExceeded(
+                ResourceLimitExceeded {
+                    message: Some(format!(
+                        "The account-level service limit for domain is {}, with current \
+                         utilization of {} and a request delta of 1.",
+                        crate::state::DOMAIN_QUOTA,
+                        store.domains.len()
+                    )),
+                },
+            )
+            .into());
+        }
+
+        let now = ::std::time::SystemTime::now();
+        store.domains.insert(
+            domain_id.clone(),
+            crate::state::Domain {
+                id: domain_id.clone(),
+                arn: arn.clone(),
+                name: input.domain_name,
+                url: url.clone(),
+                auth_mode: input.auth_mode,
+                default_user_settings: input.default_user_settings,
+                domain_settings: input.domain_settings,
+                default_space_settings: input.default_space_settings,
+                subnet_ids: input.subnet_ids,
+                vpc_id: input.vpc_id,
+                kms_key_id: input.kms_key_id,
+                home_efs_file_system_kms_key_id: input.home_efs_file_system_kms_key_id,
+                // "The default value is PublicInternetOnly."
+                app_network_access_type: input.app_network_access_type.unwrap_or_else(|| {
+                    crate::state::DEFAULT_APP_NETWORK_ACCESS_TYPE.to_string()
+                }),
+                // The model documents no default: this member is required only for an
+                // RStudio domain in `VpcOnly` mode, so a domain that named none reports
+                // none rather than a value nobody asked for.
+                app_security_group_management: input.app_security_group_management,
+                // "Defaults to Enabled."
+                home_efs_file_system_creation: input.home_efs_file_system_creation.unwrap_or_else(
+                    || crate::state::DEFAULT_HOME_EFS_FILE_SYSTEM_CREATION.to_string(),
+                ),
+                // "Defaults to DISABLED."
+                tag_propagation: input
+                    .tag_propagation
+                    .unwrap_or_else(|| crate::state::DEFAULT_TAG_PROPAGATION.to_string()),
+                // A domain comes up `Pending` and owes `InService` to the clock, so a
+                // caller that reads it straight back still observes the transient status.
+                status: crate::state::DOMAIN_STATUS_PENDING.to_string(),
+                tags: input.tags.unwrap_or_default(),
+                creation_time: now,
+                last_modified_time: now,
+                in_service_due_at: now + crate::state::DOMAIN_IN_SERVICE_AFTER,
+            },
+        );
+        drop(store);
+
+        crate::state::record_state_change(Self::NAME, &arn, ctx);
+        Ok(CreateDomainOutput {
+            domain_arn: Some(arn),
+            domain_id: Some(domain_id),
+            url: Some(url),
+        })
     }
 }

@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeDomain
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeDomain`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeDomain::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: replays the Studio domain `CreateDomain` stored in `crate::state`,
+//! materialising the status transition the clock already owed. This is the ONLY file to
+//! touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -185,18 +179,72 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeDomain` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeDomainErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeDomain"))
+        let state = crate::state::service_state(&*self.engine)
+            .ok_or_else(|| crate::scaffolded::Scaffolded::validation(crate::state::NO_STATE))?;
+
+        let region = crate::state::request_region(ctx);
+
+        let mut store = state.lock();
+        let Some(domain) = store.domains.get_mut(&input.domain_id) else {
+            return Err(DescribeDomainErrorModeled::ResourceNotFound(
+                ResourceNotFound {
+                    message: Some(crate::state::domain_not_found(&region, &input.domain_id)),
+                },
+            )
+            .into());
+        };
+
+        // The only write a reporting call makes: the transition the clock already owed.
+        // It was due at the stored instant whether or not anybody described the domain,
+        // so a waiter terminates and no caller's read changes the outcome.
+        let settled = domain.settle_status(::std::time::SystemTime::now());
+
+        let output = DescribeDomainOutput {
+            domain_arn: Some(domain.arn.clone()),
+            domain_id: Some(domain.id.clone()),
+            domain_name: Some(domain.name.clone()),
+            // The EFS volume a real domain gets is an Amazon EFS file system, which no
+            // service of this emulator holds — so there is no file system whose id this
+            // could be, and reporting one would name a resource that resolves to nothing.
+            // What the request asked for is reported instead, by
+            // `HomeEfsFileSystemCreation` below.
+            home_efs_file_system_id: None,
+            // An `SSO` domain's IAM Identity Center application is created in Identity
+            // Center, which this emulator does not serve, so neither the managed
+            // application instance nor its ARN exists to be reported.
+            single_sign_on_managed_application_instance_id: None,
+            single_sign_on_application_arn: None,
+            status: Some(domain.status.clone()),
+            creation_time: Some(crate::state::timestamp(domain.creation_time)),
+            last_modified_time: Some(crate::state::timestamp(domain.last_modified_time)),
+            // Nothing has failed: this domain reaches `InService`, and only a domain in a
+            // failure status has a reason to report.
+            failure_reason: None,
+            // The security group SageMaker creates for a `VpcOnly` domain's boundary is an
+            // EC2 security group in the caller's VPC, which nothing here creates.
+            security_group_id_for_domain_boundary: None,
+            auth_mode: Some(domain.auth_mode.clone()),
+            default_user_settings: Some(domain.default_user_settings.clone()),
+            domain_settings: domain.domain_settings.clone(),
+            app_network_access_type: Some(domain.app_network_access_type.clone()),
+            home_efs_file_system_kms_key_id: domain.home_efs_file_system_kms_key_id.clone(),
+            subnet_ids: domain.subnet_ids.clone(),
+            url: Some(domain.url.clone()),
+            vpc_id: domain.vpc_id.clone(),
+            kms_key_id: domain.kms_key_id.clone(),
+            app_security_group_management: domain.app_security_group_management.clone(),
+            home_efs_file_system_creation: Some(domain.home_efs_file_system_creation.clone()),
+            tag_propagation: Some(domain.tag_propagation.clone()),
+            default_space_settings: domain.default_space_settings.clone(),
+        };
+        let arn = domain.arn.clone();
+        drop(store);
+
+        if settled {
+            // The transition is a state change, so it leaves the same record a create
+            // does rather than happening unobservably on a read path.
+            crate::state::record_state_change(Self::NAME, &arn, ctx);
+        }
+        Ok(output)
     }
 }

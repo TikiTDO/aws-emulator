@@ -1056,6 +1056,12 @@ pub use image::*;
 /// The custom-image slice under the name `state/custom_image.rs` gathers it.
 pub mod custom_image;
 
+/// The Studio DOMAIN slice — the domain `CreateDomain` writes, `DescribeDomain` replays
+/// and `ListDomains` pages over, with its ARN kind, id mint, Studio address, statuses,
+/// clock span, store bound and not-found sentence: see `state/domain.rs`.
+pub mod domain;
+pub use domain::*;
+
 /// The job slices (training, processing and transform jobs): see `state/jobs.rs`.
 pub mod jobs;
 pub use jobs::*;
@@ -2512,6 +2518,12 @@ pub struct ComAmazonawsSagemakerSagemakerState {
     pub code_repositories: BTreeMap<String, CodeRepository>,
     /// Keyed by [`AppKey`] — an app is named by five members, not by one name.
     pub apps: BTreeMap<AppKey, App>,
+    /// Studio domains, keyed by the `DomainId` SageMaker mints for them: a domain is
+    /// addressed by that id and by nothing else (`DescribeDomain` takes only
+    /// `DomainId`), and `DomainName` carries no documented uniqueness, so the id is the
+    /// key and `ListDomains` has one stable order to page over. See [`Domain`], whose
+    /// slice lives in [`domain`].
+    pub domains: BTreeMap<String, Domain>,
     /// Keyed by `ModelPackageGroupName`.
     pub model_package_groups: BTreeMap<String, ModelPackageGroup>,
     /// Keyed by `RecommendationJobName`, which AWS documents unique to the account in a
