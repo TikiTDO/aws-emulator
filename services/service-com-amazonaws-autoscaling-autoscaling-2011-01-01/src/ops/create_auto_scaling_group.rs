@@ -709,6 +709,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // carries no notification member, so the first one comes from
             // `PutNotificationConfiguration`.
             notification_configurations: crate::state::NotificationConfigurations::new(),
+            // A group is created with no warm pool either: the create carries no warm pool
+            // member, so the first one comes from `PutWarmPool`.
+            warm_pool: None,
         };
         state.groups.insert(name.clone(), group);
 

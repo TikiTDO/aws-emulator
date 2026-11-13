@@ -208,6 +208,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .iter()
             .map(|instance| instance.instance_id.clone())
             .collect();
+        // The instances the group's warm pool holds, which the force delete takes with the
+        // group: "if the group has a warm pool, the force delete option also deletes the
+        // warm pool" (this operation's own documentation). They are the account's own
+        // Amazon EC2 instances too, so they are shut down where they live rather than
+        // merely dropped with the group's record.
+        let warm_pool_instance_ids: Vec<String> = group
+            .warm_pool_instances()
+            .iter()
+            .map(|instance| instance.instance_id.clone())
+            .collect();
         // Where the group had placed each of them, read off its own record before the
         // group is removed: the lifecycle event a forced delete's terminations publish
         // reports the placement the group held, which is gone once the group is.
@@ -250,8 +260,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // A group that still has instances, or still asks for capacity, is in use:
-        // only `ForceDelete` terminates what is left along with the group.
-        if (instance_count > 0 || desired_capacity > 0) && !force_delete {
+        // only `ForceDelete` terminates what is left along with the group. The instances
+        // of its warm pool count among them — they are instances of the group, in a state
+        // other than `Terminated` — so a group whose pool is holding instances is in use
+        // even when the group's own capacity is zero.
+        if (instance_count > 0 || !warm_pool_instance_ids.is_empty() || desired_capacity > 0)
+            && !force_delete
+        {
             crate::state::audit(
                 ctx.parts(),
                 "DeleteAutoScalingGroup",
@@ -261,13 +276,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(DeleteAutoScalingGroupErrorModeled::ResourceInUseFault(
                 ResourceInUseFault {
                     // The sentence Amazon EC2 Auto Scaling states for this error class,
-                    // which has no variable part: it names neither the group nor any
-                    // instance of it.
-                    message: Some(
-                        "You cannot delete an AutoScalingGroup while there are instances or \
-                         pending Spot instance request(s) still in the group."
-                            .to_string(),
-                    ),
+                    // which names neither the group nor any instance of it — followed, for
+                    // a group whose warm pool is what is still holding instances, by the
+                    // sentence it states about that pool.
+                    message: Some(in_use_message(!warm_pool_instance_ids.is_empty())),
                 },
             )
             .into());
@@ -285,6 +297,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // that still holds instances was refused above, so there is nothing to
         // terminate on that path.)
         crate::state::ec2_instances::terminate(&*self.engine, &instance_ids);
+        // The warm pool goes with the group's record, so the instances it was holding are
+        // terminated where they live too.
+        crate::state::ec2_instances::terminate(&*self.engine, &warm_pool_instance_ids);
         let cause = format!(
             "a user request deleted the AutoScalingGroup, terminating {instance_count} \
              instance(s)."
@@ -341,3 +356,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 // `com.amazonaws.autoscaling#DeletionProtection` enum.
 const PREVENT_ALL_DELETION: &str = "prevent-all-deletion";
 const PREVENT_FORCE_DELETION: &str = "prevent-force-deletion";
+
+/// The sentence Amazon EC2 Auto Scaling states when a delete is refused because the group
+/// is still holding instances.
+///
+/// The first sentence is fixed text: it names neither the group nor any instance of it.
+/// `warm_pool_in_use` is whether the group's warm pool is holding instances too, which
+/// the service says in a sentence of its own after it — the only part of the message the
+/// state of the group decides.
+fn in_use_message(warm_pool_in_use: bool) -> String {
+    let mut message = "You cannot delete an AutoScalingGroup while there are instances or pending \
+                       Spot instance request(s) still in the group."
+        .to_string();
+    if warm_pool_in_use {
+        message.push_str(
+            " Also, you can\u{2019}t delete it while there are instances that are part of a warm \
+             pool.",
+        );
+    }
+    message
+}

@@ -15,6 +15,8 @@ DescribeWarmPool
 ## Description
 `DescribeWarmPool` is an unmodified scaffold stub, so it answers HTTP 501 and persists nothing. Implement it in `services/service-com-amazonaws-autoscaling-autoscaling-2011-01-01/src/ops/describe_warm_pool.rs`: replace the `Err(crate::scaffolded::Scaffolded::not_implemented(..))` with a real handler that reads and writes the service's state, then DELETE that file's `//! SCAFFOLDED, NOT IMPLEMENTED:` header line.
 
+> _Update: this operation was implemented as the read-back path of the `PutWarmPool` fix (`issues/things-that-now-work/20261104T042502Z-autoscaling-putwarmpool-stub.md`): the handler now reports the stored warm pool configuration and the pool's instances, and its `SCAFFOLDED, NOT IMPLEMENTED:` header line is gone. The description below therefore no longer matches the code; this record is kept here only until its own work item closes it._
+
 That header line is the stub census — the one record of which operations are still scaffolds. Deleting it without implementing the handler, or leaving it in place on a handler you did implement, corrupts that record rather than closing this issue. A stub's 501 is also CORRECT for a stub: this issue asks you to implement the operation, never to change the error it returns while unimplemented.
 
 1 recorded unit(s) fail on their `DescribeWarmPool` call, so each one unblocks only when `DescribeWarmPool` works: `autoscaling__cloudformation.deploy-asg-warmpool-poolstate-invalid-enum-rejected`.

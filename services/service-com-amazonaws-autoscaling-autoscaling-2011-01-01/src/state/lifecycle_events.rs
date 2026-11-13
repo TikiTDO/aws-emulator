@@ -464,6 +464,14 @@ fn group_due_instants(group: &StoredGroup) -> Vec<SystemTime> {
                 .iter()
                 .filter_map(|instance| instance.transition_due),
         )
+        .chain(
+            // The transient states of the instances the group's warm pool holds, which
+            // the same clock owes.
+            group
+                .warm_pool_instances()
+                .iter()
+                .filter_map(|instance| instance.transition_due),
+        )
         .collect()
 }
 

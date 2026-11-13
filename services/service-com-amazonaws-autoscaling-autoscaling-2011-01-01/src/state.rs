@@ -27,7 +27,11 @@
 //!   ([`INSTANCE_REFRESH_CANCELLATION`]);
 //! * a refresh a caller rolled back replaces its OWN replacements back, one per
 //!   [`INSTANCE_REFRESH_REPLACEMENT`], and is reported `RollbackSuccessful` once it
-//!   has replaced them all ([`AutoScalingState::roll_back_instance_refresh`]).
+//!   has replaced them all ([`AutoScalingState::roll_back_instance_refresh`]);
+//! * the warm pool of a group holds the instances it maintains, so the difference
+//!   between its size and that target is launched or taken out as the clock makes it
+//!   due, and an instance it just launched is reported `Warmed:Pending` before it
+//!   reaches the pool's own state ([`warm_pools`]).
 //!
 //! # The instances a group holds
 //!
@@ -42,7 +46,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::ops::types::{
     Activity, AvailabilityZoneDistribution, AvailabilityZoneImpairmentPolicy, BlockDeviceMapping,
-    CapacityReservationSpecification, DesiredConfiguration, InstanceLifecyclePolicy,
+    CapacityReservationSpecification, DesiredConfiguration, Instance, InstanceLifecyclePolicy,
     InstanceMaintenancePolicy, InstanceMetadataOptions, LaunchTemplateSpecification,
     MixedInstancesPolicy, Operator, RefreshPreferences, Tag, TrafficSourceIdentifier,
 };
@@ -81,6 +85,18 @@ pub use lifecycle_hooks::{
     LifecycleHookPut, LifecycleHookRefusal, LifecycleHooks, StoredLifecycleHook,
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_LIFECYCLE_ACTION_RESULT, LIFECYCLE_ACTION_RESULTS,
     MAX_LIFECYCLE_HOOKS_PER_GROUP,
+};
+
+/// The warm pool of a group: the pre-initialized instances `PutWarmPool` has the group
+/// maintain beside its own, which `DescribeWarmPool` projects from and the group's delete
+/// takes with the group.
+pub mod warm_pools;
+
+pub use warm_pools::{
+    too_large_warm_pool_message, warm_pool_change_cause, warmed_lifecycle_state, StoredWarmPool,
+    WarmPoolPut, DEFAULT_WARM_POOL_MIN_SIZE, DEFAULT_WARM_POOL_STATE,
+    MAX_GROUP_PREPARED_CAPACITY_UNSET, MAX_WARM_POOL_RECORDS, WARMED_PENDING,
+    WARMED_STATE_PREFIX, WARMED_TERMINATING,
 };
 
 /// The scaling policies of a group — what `PutScalingPolicy` creates and
@@ -421,6 +437,30 @@ pub struct StoredInstance {
     pub transition_due: Option<SystemTime>,
 }
 
+impl StoredInstance {
+    /// This instance as the API reports it — the `Instance` shape.
+    ///
+    /// THE ONE projection of a stored instance onto the wire shape, so the instances a
+    /// group reports and the instances of its warm pool are reported identically.
+    /// `AvailabilityZoneId` and `WeightedCapacity` are left unfilled: neither is part of
+    /// what this service stores for an instance.
+    pub fn to_instance(&self) -> Instance {
+        Instance {
+            instance_id: self.instance_id.clone(),
+            instance_type: self.instance_type.clone(),
+            availability_zone: self.availability_zone.clone(),
+            availability_zone_id: None,
+            lifecycle_state: self.lifecycle_state.clone(),
+            health_status: self.health_status.clone(),
+            launch_configuration_name: self.launch_configuration_name.clone(),
+            launch_template: self.launch_template.clone(),
+            image_id: self.image_id.clone(),
+            protected_from_scale_in: self.protected_from_scale_in,
+            weighted_capacity: None,
+        }
+    }
+}
+
 /// A capacity change deferred until the group's cooldown has elapsed, because the
 /// request asked for the cooldown to be honoured.
 #[derive(Debug, Clone)]
@@ -486,6 +526,10 @@ pub struct StoredGroup {
     /// collection every reader and writer of a configuration of this group reaches
     /// ([`notification_configurations`]), so deleting the group takes them with it.
     pub notification_configurations: NotificationConfigurations,
+    /// The group's warm pool, once `PutWarmPool` has created one: the ONE record every
+    /// reader and writer of this group's warm pool reaches ([`warm_pools`]), so deleting
+    /// the group takes its warm pool — and the instances it holds — with it.
+    pub warm_pool: Option<StoredWarmPool>,
 }
 
 impl StoredGroup {
@@ -514,9 +558,17 @@ impl StoredGroup {
     /// Counts the instances still `Terminating`: they remain stored until the
     /// clock retires them, so they occupy the ceiling too. Without that, a caller
     /// alternating the capacity faster than the transition comes due could stack
-    /// a fresh ceiling's worth of instances on top of the ones still leaving.
+    /// a fresh ceiling's worth of instances on top of the ones still leaving. Counts
+    /// the instances of the group's warm pool for the same reason: they are instances of
+    /// the group too — "in the warm pool or in any state except Terminated for the Auto
+    /// Scaling group" (`PutWarmPoolType$MaxGroupPreparedCapacity`) — so the ceiling
+    /// bounds the two together.
     pub fn launch_headroom(&self) -> i32 {
-        MAX_GROUP_CAPACITY.saturating_sub(i32::try_from(self.instances.len()).unwrap_or(i32::MAX))
+        let held = self
+            .instances
+            .len()
+            .saturating_add(self.warm_pool_instance_count());
+        MAX_GROUP_CAPACITY.saturating_sub(i32::try_from(held).unwrap_or(i32::MAX))
     }
 
     /// How many instances this group must launch to reach `desired_capacity`.
@@ -1090,8 +1142,8 @@ impl AutoScalingState {
 
     /// Materialise everything the clock has already made due at `now`: deferred
     /// capacity changes whose cooldown has elapsed, the replacements a running
-    /// instance refresh owes, instance lifecycle transitions, and activity
-    /// completions.
+    /// instance refresh owes, instance lifecycle transitions, activity
+    /// completions, and the size each group's warm pool maintains.
     ///
     /// Every handler calls this first — including the reporting ones, which may
     /// write exactly this much and nothing else, because each of these changes was
@@ -1150,6 +1202,10 @@ impl AutoScalingState {
                 .instances
                 .retain(|i| i.lifecycle_state != LIFECYCLE_TERMINATING || i.transition_due.is_some());
         }
+        // The warm pools the groups maintain: the transitions of their instances, and the
+        // difference between each pool's size and the size it maintains, which the clock
+        // owes exactly as it owes a group's own ([`warm_pools`]).
+        self.reconcile_warm_pools(engine, now);
 
         for activity in &mut self.activities {
             if activity.completes_at.is_some_and(|at| at <= now) {
@@ -1220,6 +1276,7 @@ impl AutoScalingState {
                 due,
                 // A capacity change launches from the group's own launch source.
                 desired_configuration: None,
+                destination: LaunchDestination::Group,
             },
         );
 
@@ -1396,7 +1453,9 @@ impl AutoScalingState {
         let vpc_zone_identifier = group.vpc_zone_identifier.clone();
         let tags = group.tags.clone();
         let protected = group.new_instances_protected_from_scale_in;
-        let placed = group.instances.len();
+        // Everything the group already holds, its warm pool included: the placement of a
+        // fresh instance follows how many the group has placed so far.
+        let placed = group.instances.len() + group.warm_pool_instance_count();
         let headroom = usize::try_from(group.launch_headroom()).unwrap_or(0);
         // What the instances run: the desired configuration of the instance refresh
         // that asked for them, when one did — its replacements run the new
@@ -1443,7 +1502,7 @@ impl AutoScalingState {
             .map(|instance| StoredInstance {
                 instance_id: instance.instance_id,
                 availability_zone: instance.availability_zone,
-                lifecycle_state: LIFECYCLE_PENDING.to_string(),
+                lifecycle_state: request.destination.pending_state().to_string(),
                 health_status: HEALTH_STATUS_HEALTHY.to_string(),
                 launch_configuration_name: launch_configuration_name.clone(),
                 launch_template: launch_template.clone(),
@@ -1459,8 +1518,27 @@ impl AutoScalingState {
             .iter()
             .map(|instance| instance.instance_id.clone())
             .collect();
-        if let Some(group) = self.groups.get_mut(request.group_name) {
-            group.instances.extend(launched);
+        // Where the launched instances are PLACED, which decides whether the group holds
+        // them at all: a destination the group cannot hold them in (a warm pool the group
+        // no longer has) leaves no record pointing at them, so the instances Amazon EC2
+        // minted are shut down there rather than left running for nobody.
+        let placed = match (request.destination, self.groups.get_mut(request.group_name)) {
+            (LaunchDestination::Group, Some(group)) => {
+                group.instances.extend(launched);
+                true
+            }
+            (LaunchDestination::WarmPool, Some(group)) => match group.warm_pool.as_mut() {
+                Some(pool) => {
+                    pool.instances.extend(launched);
+                    true
+                }
+                None => false,
+            },
+            (_, None) => false,
+        };
+        if !placed {
+            ec2_instances::terminate(engine, &launched_ids);
+            return (Vec::new(), request.count);
         }
         (launched_ids, unplaced)
     }
@@ -1753,6 +1831,7 @@ impl AutoScalingState {
                 count: 1,
                 due,
                 desired_configuration,
+                destination: LaunchDestination::Group,
             },
         );
         let replaced = if launched_ids.is_empty() {
@@ -1829,19 +1908,44 @@ impl AutoScalingState {
 }
 
 /// What a group is asked to launch: how many instances, when their transient state
-/// comes due, and the configuration they run when it is not the group's own.
+/// comes due, where they are placed, and the configuration they run when it is not the
+/// group's own.
 #[derive(Debug)]
 struct GroupLaunch<'a> {
     /// The group the instances belong to.
     group_name: &'a str,
     /// How many instances to launch.
     count: usize,
-    /// When the `Pending` state each launched instance is reported in comes due.
+    /// When the transient state each launched instance is reported in comes due.
     due: SystemTime,
     /// The desired configuration of the instance refresh that asked for the launch,
     /// when one did: its replacements run the new configuration before the group's
     /// own settings are updated to it.
     desired_configuration: Option<&'a DesiredConfiguration>,
+    /// Which of the group's two instance collections the launch places into.
+    destination: LaunchDestination,
+}
+
+/// Where a launch places what it launched: the group's own capacity, or the warm pool
+/// that sits beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchDestination {
+    /// The group's own instances, reported `Pending` until their span is due.
+    Group,
+    /// The group's warm pool, reported `Warmed:Pending` until it is
+    /// ([`warm_pools`]).
+    WarmPool,
+}
+
+impl LaunchDestination {
+    /// The `LifecycleState` an instance launched into this collection is reported in
+    /// until its transition comes due.
+    fn pending_state(self) -> &'static str {
+        match self {
+            Self::Group => LIFECYCLE_PENDING,
+            Self::WarmPool => WARMED_PENDING,
+        }
+    }
 }
 
 /// The values a `HealthCheckType` may name, from the model's own documentation
@@ -2325,6 +2429,16 @@ pub fn min_size_breach_message(desired_capacity: i32, min_size: i32, terminating
     }
 }
 
+/// The sentence Amazon EC2 Auto Scaling states for `InstanceRefreshInProgressFault`:
+/// the error class says that a refresh is already running on the group, not which one,
+/// so the sentence has NO variable part.
+///
+/// THE ONE COPY for this service: every operation the model declares that error for —
+/// starting a second refresh, and putting a warm pool while one is running — answers it
+/// with this, so one error class of one service has one sentence.
+pub const INSTANCE_REFRESH_IN_PROGRESS_MESSAGE: &str =
+    "An Instance Refresh is already in progress and blocks the execution of this Instance Refresh.";
+
 /// The absent-group refusal whose detail QUOTES the name it was asked for.
 pub fn absent_group_message_quoting_name(name: &str) -> String {
     format!("{ABSENT_GROUP_PREFIX}AutoScalingGroup '{name}' not found")
@@ -2334,6 +2448,16 @@ pub fn absent_group_message_quoting_name(name: &str) -> String {
 /// prose name for it.
 pub fn absent_group_message_in_prose(name: &str) -> String {
     format!("{ABSENT_GROUP_PREFIX}Auto Scaling group with name {name} not found")
+}
+
+/// The absent-group refusal whose detail states that no such group exists, the detail
+/// form `DescribeWarmPool` serves.
+///
+/// Separate from the forms above because the detail is each operation's own: the name is
+/// the only part taken from the request, and the rest of the sentence, punctuation
+/// included, is fixed text.
+pub fn absent_group_message_as_no_such_group(name: &str) -> String {
+    format!("{ABSENT_GROUP_PREFIX}No such Auto Scaling group: {name}")
 }
 
 /// The absent-group refusal whose detail field the operation leaves unfilled, so it
@@ -2503,17 +2627,41 @@ pub fn page_limit(max_records: Option<i32>) -> usize {
 /// ("The default value is 50 and the maximum value is 100"), for an operation to
 /// refuse: `None` when the request omits it or carries an acceptable value.
 pub fn max_records_out_of_range(max_records: Option<i32>) -> Option<i32> {
-    max_records.filter(|value| *value < 1 || usize::try_from(*value).unwrap_or(usize::MAX) > MAX_MAX_RECORDS)
+    max_records_out_of_range_within(
+        max_records,
+        i32::try_from(MAX_MAX_RECORDS).unwrap_or(i32::MAX),
+    )
+}
+
+/// The same test for a read whose own ceiling is not [`MAX_MAX_RECORDS`] — the
+/// name-ordered describes honour 100 and `DescribeWarmPool` honours 50 — so the bound
+/// checked and the bound stated ([`max_records_violation_message_within`]) cannot drift
+/// apart.
+pub fn max_records_out_of_range_within(max_records: Option<i32>, ceiling: i32) -> Option<i32> {
+    max_records.filter(|value| *value < MIN_MAX_RECORDS || *value > ceiling)
 }
 
 /// The message a paginated read refuses a `MaxRecords` outside that range with: the
 /// standard sentence the service states for a member value outside its bounds, naming
 /// the member as the wire names it and the bound the value missed.
 pub fn max_records_violation_message(max_records: i32) -> String {
+    max_records_violation_message_within(
+        max_records,
+        i32::try_from(MAX_MAX_RECORDS).unwrap_or(i32::MAX),
+    )
+}
+
+/// The same sentence for a read whose own ceiling is not [`MAX_MAX_RECORDS`]: the
+/// name-ordered describes honour 100 and `DescribeWarmPool` honours 50, so the ceiling
+/// the value missed is the caller's to name.
+///
+/// THE ONE COPY of that sentence for every paginated read of this service, whichever
+/// ceiling it holds its pages to.
+pub fn max_records_violation_message_within(max_records: i32, ceiling: i32) -> String {
     let constraint = if max_records < MIN_MAX_RECORDS {
         format!("Member must have value greater than or equal to {MIN_MAX_RECORDS}")
     } else {
-        format!("Member must have value less than or equal to {MAX_MAX_RECORDS}")
+        format!("Member must have value less than or equal to {ceiling}")
     };
     constraint_violation_message(max_records, "maxRecords", &constraint)
 }

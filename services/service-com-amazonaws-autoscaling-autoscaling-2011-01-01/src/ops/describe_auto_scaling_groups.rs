@@ -328,22 +328,13 @@ fn matches_filter(group: &crate::state::StoredGroup, filter: &Filter) -> bool {
 /// The `AutoScalingGroup` the service reports for a stored group.
 fn group_view(group: &crate::state::StoredGroup, include_instances: bool) -> AutoScalingGroup {
     let instances = include_instances.then(|| {
+        // The group's OWN instances, which are not the ones its warm pool holds: "to
+        // retrieve information about the instances in a warm pool, you must call the
+        // DescribeWarmPool API" (this operation's own documentation).
         group
             .instances
             .iter()
-            .map(|instance| Instance {
-                instance_id: instance.instance_id.clone(),
-                instance_type: instance.instance_type.clone(),
-                availability_zone: instance.availability_zone.clone(),
-                availability_zone_id: None,
-                lifecycle_state: instance.lifecycle_state.clone(),
-                health_status: instance.health_status.clone(),
-                launch_configuration_name: instance.launch_configuration_name.clone(),
-                launch_template: instance.launch_template.clone(),
-                image_id: instance.image_id.clone(),
-                protected_from_scale_in: instance.protected_from_scale_in,
-                weighted_capacity: None,
-            })
+            .map(crate::state::StoredInstance::to_instance)
             .collect()
     });
     AutoScalingGroup {
@@ -397,8 +388,13 @@ fn group_view(group: &crate::state::StoredGroup, include_instances: bool) -> Aut
         service_linked_role_arn: group.service_linked_role_arn.clone(),
         max_instance_lifetime: group.max_instance_lifetime,
         capacity_rebalance: group.capacity_rebalance,
-        warm_pool_configuration: None,
-        warm_pool_size: None,
+        // The warm pool the group maintains, once `PutWarmPool` has given it one: the
+        // configuration it was given, and "the current size of the warm pool"
+        // (`AutoScalingGroup$WarmPoolSize`) — both absent for a group that has none.
+        warm_pool_configuration: group
+            .warm_pool()
+            .map(crate::state::StoredWarmPool::to_configuration),
+        warm_pool_size: group.warm_pool_size(),
         context: group.context.clone(),
         desired_capacity_type: group.desired_capacity_type.clone(),
         default_instance_warmup: group.default_instance_warmup,

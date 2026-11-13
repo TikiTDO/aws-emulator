@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op PutWarmPool
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `PutWarmPool`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`PutWarmPool::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -168,18 +159,83 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `PutWarmPool` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(PutWarmPoolErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("PutWarmPool"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(PutWarmPoolErrorModeled::ResourceContentionFault(
+                ResourceContentionFault {
+                    message: Some(
+                        "the Auto Scaling store is not mounted on this engine".to_string(),
+                    ),
+                },
+            )
+            .into());
+        };
+
+        let group_name = input.auto_scaling_group_name;
+        let put = crate::state::WarmPoolPut {
+            min_size: input.min_size,
+            max_group_prepared_capacity: input.max_group_prepared_capacity,
+            pool_state: input.pool_state,
+            instance_reuse_policy: input.instance_reuse_policy,
+        };
+
+        // The pool state has to be one the model's own `WarmPoolState` enum publishes,
+        // which the boundary validator refuses outside before this handler runs, so every
+        // state reaching here is one the pool can transition its instances to.
+        let now = ::std::time::SystemTime::now();
+        let mut state = state.lock();
+        state.materialize_due(&*self.engine, now);
+
+        // A warm pool belongs to a group, so a name no group answers to is refused with
+        // the wording this service's group-scoped WRITE paths answer with: the detail
+        // field after the dash is left unfilled, so no part of the request appears in it.
+        // The group is resolved FIRST, before any member of the request is checked, so a
+        // name no group answers to is refused for that rather than for what the request
+        // carried.
+        if !state.groups.contains_key(&group_name) {
+            return Err(crate::scaffolded::Scaffolded::validation_error(
+                crate::state::ABSENT_GROUP_MESSAGE_WITHOUT_DETAIL,
+            ));
+        }
+        // The sizes a warm pool is bounded by are RELATIVE to the group's own capacity, so
+        // neither of them bounds the absolute size: every instance the pool maintains is a
+        // stored instance, and the service has a quota for exactly that reason. Refuse
+        // past the ceiling before any member is stored or any instance allocated.
+        if let Some(size) = crate::state::size_past_ceiling(&put.requested_sizes()) {
+            return Err(PutWarmPoolErrorModeled::LimitExceededFault(
+                LimitExceededFault {
+                    message: Some(crate::state::too_large_warm_pool_message(size)),
+                },
+            )
+            .into());
+        }
+        // "The request failed because an active instance refresh already exists for the
+        // specified Auto Scaling group" (`InstanceRefreshInProgressFault`): a warm pool
+        // changes what the group launches, so it cannot be put while a refresh is
+        // replacing the group's instances.
+        if state.active_instance_refresh(&group_name).is_some() {
+            return Err(PutWarmPoolErrorModeled::InstanceRefreshInProgressFault(
+                InstanceRefreshInProgressFault {
+                    message: Some(
+                        crate::state::INSTANCE_REFRESH_IN_PROGRESS_MESSAGE.to_string(),
+                    ),
+                },
+            )
+            .into());
+        }
+
+        if let Some(group) = state.groups.get_mut(&group_name) {
+            group.put_warm_pool(&put, now);
+        }
+        // The instances the pool now maintains are owed from THIS instant, so the launches
+        // start here rather than on whoever reads the pool next — and each is reported
+        // `Warmed:Pending` until its own transition comes due.
+        state.reconcile_warm_pools(&*self.engine, now);
+
+        crate::state::audit(ctx.parts(), "PutWarmPool", &group_name, "warm pool stored");
+        // The warm-pool transitions this call started settle on the clock, with no further
+        // call from anybody. The store's lock is released first: the pump takes it itself.
+        drop(state);
+        crate::state::drive_lifecycle_clock(ctx, &self.engine);
+        Ok(PutWarmPoolOutput {})
     }
 }

@@ -229,7 +229,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(
                 StartInstanceRefreshErrorModeled::InstanceRefreshInProgressFault(
                     InstanceRefreshInProgressFault {
-                        message: Some(IN_PROGRESS_MESSAGE.to_string()),
+                        message: Some(
+                            crate::state::INSTANCE_REFRESH_IN_PROGRESS_MESSAGE.to_string(),
+                        ),
                     },
                 )
                 .into(),
@@ -330,12 +332,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })
     }
 }
-
-/// The sentence Amazon EC2 Auto Scaling refuses a second instance refresh on one
-/// group with. It has NO variable part: the error class says that a refresh is
-/// already running, not which one.
-const IN_PROGRESS_MESSAGE: &str =
-    "An Instance Refresh is already in progress and blocks the execution of this Instance Refresh.";
 
 /// Refuse a set of preferences the service does not accept together.
 ///

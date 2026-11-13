@@ -250,6 +250,73 @@ pub fn launch<Eng: Send + Sync + 'static>(
     launched
 }
 
+/// Stop the instances `instance_ids` names in the account's Amazon EC2 store, or start
+/// them again — what a warm pool does to the instances it holds.
+///
+/// A warm pool keeps its instances in "the instance state to transition to after the
+/// lifecycle actions are complete" (`WarmPoolConfiguration$PoolState`), and only
+/// `Running` leaves them running: a `Stopped` or `Hibernated` pool holds instances
+/// Amazon EC2 reports `stopped`, which is the whole point of the pool — a pre-initialized
+/// instance that costs nothing to keep. So this is the same move Amazon EC2 makes for a
+/// stop or a start of its own: the instance is `stopping` and reaches `stopped` on EC2's
+/// own clock (or `pending` and then `running`), so a caller that reads it straight after
+/// the pool settled still sees it on its way. An instance already in (or on its way to)
+/// the asked-for state is left alone, one on its way to `terminated` is left alone too,
+/// and an id the store holds nothing for changes nothing.
+pub fn set_running<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    instance_ids: &[String],
+    running: bool,
+) {
+    if instance_ids.is_empty() {
+        return;
+    }
+    let Some(state) = ec2::service_state(engine) else {
+        return;
+    };
+    let mut store = state.lock();
+    let now = SystemTime::now();
+    for instance_id in instance_ids {
+        let Some(instance) = store.instances.get_mut(instance_id) else {
+            continue;
+        };
+        if instance.state.is_terminating() {
+            continue;
+        }
+        match (running, instance.state) {
+            (false, ec2::InstanceStateName::Pending | ec2::InstanceStateName::Running) => {
+                instance.state = ec2::InstanceStateName::Stopping;
+                instance.pending_transition = Some(ec2::PendingTransition::starting_now(
+                    ec2::InstanceStateName::Stopped,
+                ));
+                instance.state_transition_reason = Some(ec2::user_initiated_reason(now));
+                instance.state_reason = Some((
+                    ec2::INSTANCE_STATE_REASON_USER_INITIATED_SHUTDOWN.to_string(),
+                    ec2::INSTANCE_STATE_REASON_MESSAGE_USER_INITIATED_SHUTDOWN.to_string(),
+                ));
+            }
+            // An instance still on its way DOWN is brought back up from here too: the
+            // pool owns where its instances are, so it re-targets a move still in flight
+            // rather than waiting for it to land — otherwise a pool switched to `Running`
+            // while a stop was in progress would leave the instance stopped.
+            (true, ec2::InstanceStateName::Stopped | ec2::InstanceStateName::Stopping) => {
+                instance.state = ec2::InstanceStateName::Pending;
+                instance.pending_transition = Some(ec2::PendingTransition::starting_now(
+                    ec2::InstanceStateName::Running,
+                ));
+                // A stopped instance has no running operating system, so starting it
+                // brings the guest up again, exactly as Amazon EC2's own start does.
+                instance.boot_due = Some(now + ec2::TRANSITION_DELAY);
+                // The instance is on its way up again, so the reason recorded for the
+                // stop no longer describes its state.
+                instance.state_transition_reason = None;
+                instance.state_reason = None;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Terminate the instances `instance_ids` names in the account's Amazon EC2 store.
 ///
 /// What Amazon EC2 does for a termination: the instance is `shutting-down` and reaches

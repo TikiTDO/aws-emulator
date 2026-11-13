@@ -260,8 +260,9 @@ fn refresh_view(refresh: &crate::state::StoredInstanceRefresh) -> InstanceRefres
         instances_to_update: Some(refresh.instances_to_update),
         // "Additional progress details for an Auto Scaling group that has a warm pool"
         // (smithy_query(query="doc",shape="InstanceRefresh",member="ProgressDetails")).
-        // No group holds a warm pool: `PutWarmPool` is still scaffolded, so there is no
-        // warm-pool progress to report beside the group's own.
+        // A refresh of this service replaces the group's OWN instances
+        // ([`crate::state::AutoScalingState::advance_instance_refreshes`]), so it has no
+        // warm-pool progress to report beside the group's.
         progress_details: None,
         preferences: refresh.preferences.clone(),
         desired_configuration: refresh.desired_configuration.clone(),
@@ -272,8 +273,9 @@ fn refresh_view(refresh: &crate::state::StoredInstanceRefresh) -> InstanceRefres
             rollback_start_time: Some(crate::state::to_date_time(rollback.start_time)),
             percentage_complete_on_rollback: Some(rollback.percentage_complete_on_rollback),
             instances_to_update_on_rollback: Some(rollback.instances_to_update_on_rollback),
-            // Warm-pool progress, like `ProgressDetails` above: no group holds a warm
-            // pool, so there is none to report beside the group's own.
+            // Warm-pool progress, like `ProgressDetails` above: a rollback replaces back
+            // what the refresh replaced, which is the group's own instances, so there is
+            // none to report beside the group's.
             progress_details_on_rollback: None,
         }),
         strategy: Some(refresh.strategy.clone()),

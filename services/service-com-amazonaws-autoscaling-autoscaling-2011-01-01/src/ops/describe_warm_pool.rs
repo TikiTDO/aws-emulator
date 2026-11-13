@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeWarmPool
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeWarmPool`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeWarmPool::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -157,18 +148,92 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeWarmPool` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeWarmPoolErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeWarmPool"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(DescribeWarmPoolErrorModeled::ResourceContentionFault(
+                ResourceContentionFault {
+                    message: Some(
+                        "the Auto Scaling store is not mounted on this engine".to_string(),
+                    ),
+                },
+            )
+            .into());
+        };
+
+        let group_name = input.auto_scaling_group_name;
+        // The page this read resumes at, from the token a previous one issued: a token
+        // this service never issued names no page, which is the operation's own modelled
+        // `InvalidNextToken`.
+        let (offset, token) = match input.next_token.clone() {
+            None => (0, None),
+            Some(token) => match crate::state::decode_next_token(&token) {
+                Some(offset) => (offset, Some(token)),
+                None => {
+                    return Err(DescribeWarmPoolErrorModeled::InvalidNextToken(
+                        InvalidNextToken {
+                            message: Some(crate::state::invalid_next_token_message(&token)),
+                        },
+                    )
+                    .into());
+                }
+            },
+        };
+        // "The maximum number of instances to return with this call. The maximum value is
+        // 50" (`DescribeWarmPoolType$MaxRecords`): the ceiling is this operation's own,
+        // and the member carries no modelled range, so the handler checks it and states
+        // the bound the value missed.
+        if let Some(max_records) = crate::state::max_records_out_of_range_within(
+            input.max_records,
+            crate::state::MAX_WARM_POOL_RECORDS,
+        ) {
+            return Err(crate::scaffolded::Scaffolded::validation_error(
+                crate::state::max_records_violation_message_within(
+                    max_records,
+                    crate::state::MAX_WARM_POOL_RECORDS,
+                ),
+            ));
+        }
+
+        let mut state = state.lock();
+        state.materialize_due(&*self.engine, ::std::time::SystemTime::now());
+
+        // A group-scoped READ of this service names the group it could not find, which is
+        // what tells a caller the warm pool is missing because the group is — in the
+        // detail form THIS operation serves.
+        let Some(group) = state.groups.get(&group_name) else {
+            return Err(crate::scaffolded::Scaffolded::validation_error(
+                crate::state::absent_group_message_as_no_such_group(&group_name),
+            ));
+        };
+
+        // A group with no warm pool holds no configuration and no instance to report,
+        // which is an answer with neither member rather than a refusal: the group exists.
+        let instances: Vec<Instance> = group
+            .warm_pool_instances()
+            .iter()
+            .map(crate::state::StoredInstance::to_instance)
+            .collect();
+        let warm_pool_configuration = group
+            .warm_pool()
+            .map(crate::state::StoredWarmPool::to_configuration);
+        let (page, next_token) = crate::state::page(&instances, offset, input.max_records);
+        // A token that names a page past the instances the pool holds is not a page this
+        // read can resume from.
+        if page.is_empty() && offset > 0 {
+            if let Some(token) = token {
+                return Err(DescribeWarmPoolErrorModeled::InvalidNextToken(
+                    InvalidNextToken {
+                        message: Some(crate::state::invalid_next_token_message(&token)),
+                    },
+                )
+                .into());
+            }
+        }
+
+        crate::state::audit(ctx.parts(), "DescribeWarmPool", &group_name, "warm pool read");
+        Ok(DescribeWarmPoolOutput {
+            warm_pool_configuration,
+            instances: Some(page),
+            next_token,
+        })
     }
 }

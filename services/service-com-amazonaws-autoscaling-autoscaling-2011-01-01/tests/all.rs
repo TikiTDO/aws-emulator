@@ -79,3 +79,5 @@ mod support;
 mod terminate_instance_in_auto_scaling_group;
 #[path = "all/vpc_zone_identifier_zones.rs"]
 mod vpc_zone_identifier_zones;
+#[path = "all/warm_pools.rs"]
+mod warm_pools;
