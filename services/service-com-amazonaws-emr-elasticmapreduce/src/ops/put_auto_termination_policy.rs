@@ -6,8 +6,9 @@
 //! before, so `GetAutoTerminationPolicy` reads it back. What the request CARRIED is what
 //! is attached: a policy structure the request sent is attached as sent — including an
 //! empty one, which is an attached policy with no `IdleTimeout` rather than no policy —
-//! and a request carrying no policy member at all leaves the cluster with none. A cluster
-//! the service holds no record for is refused (400 `ValidationException`) and nothing is
+//! and a request carrying no policy member at all leaves the cluster with none. An
+//! `IdleTimeout` outside the window that member documents, and a cluster the service
+//! holds no record for, are both refused (400 `ValidationException`) and nothing is
 //! stored.
 //!
 //! ## Shape of an operation
@@ -156,14 +157,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // This operation models no client error, so a request it must refuse is answered
         // with the 400 `ValidationException` channel rather than a 501 or an empty 200.
-        // The MUTATING policy calls reach a cluster as a job flow and answer that
-        // surface's constant sentence, which names no id; only the reporting
-        // `GetAutoTerminationPolicy` words the refusal as a cluster id.
+        // The whole auto-termination-policy surface reaches a cluster as a CLUSTER, so
+        // each of its operations words an id it holds no cluster for the same way
+        // `GetAutoTerminationPolicy` does — the cluster-id sentence, quoting what the
+        // request sent — and the sentence is rendered in the one place that builds it.
         let Some(cluster) = store.clusters.get_mut(&input.cluster_id) else {
             return Err(crate::scaffolded::Scaffolded::validation(
-                crate::state::unknown_job_flow_message(),
+                crate::state::unknown_cluster_message(&input.cluster_id),
             ));
         };
+
+        // The cluster is resolved first (that is the order Amazon EMR checks a
+        // cluster-scoped request in), and only then is the policy itself held to the
+        // window `AutoTerminationPolicy$IdleTimeout` documents. A refused call attaches
+        // nothing, so the cluster keeps whatever policy it already carried.
+        if let Some(policy) = input.auto_termination_policy.as_ref() {
+            if let Err(message) = crate::state::validate_auto_termination_policy(policy) {
+                return Err(crate::scaffolded::Scaffolded::validation(message));
+            }
+        }
 
         // "Creates or updates an auto-termination policy" (PutAutoTerminationPolicy
         // doc): the submitted member replaces whatever was attached before, as submitted.

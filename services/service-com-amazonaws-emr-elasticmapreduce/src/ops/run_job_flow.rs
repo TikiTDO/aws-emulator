@@ -568,6 +568,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // A policy attached at creation (`RunJobFlowInput$AutoTerminationPolicy`, which
+        // the model gives no prose of its own) is the same attachment
+        // `PutAutoTerminationPolicy` makes, so its `IdleTimeout` is held to the same
+        // documented window and an out-of-range one launches no cluster.
+        if let Some(policy) = input.auto_termination_policy.as_ref() {
+            if let Err(message) = crate::state::validate_auto_termination_policy(policy) {
+                return Err(refuse(message));
+            }
+        }
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             crate::state::audit(
                 Self::NAME,

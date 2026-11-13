@@ -146,11 +146,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // This operation models no client error, so an unknown cluster is refused with
         // the 400 `ValidationException` channel rather than a 501 or an empty 200. Like
-        // `PutAutoTerminationPolicy`, this mutator reaches a cluster as a job flow and
-        // answers that surface's constant sentence, which names no id.
+        // the rest of the auto-termination-policy surface, this mutator reaches a cluster
+        // as a CLUSTER, so it words that refusal as the cluster-id sentence quoting the
+        // id the request sent — rendered in the one place that builds it.
         let Some(cluster) = store.clusters.get_mut(&input.cluster_id) else {
             return Err(crate::scaffolded::Scaffolded::validation(
-                crate::state::unknown_job_flow_message(),
+                crate::state::unknown_cluster_message(&input.cluster_id),
             ));
         };
 

@@ -7,7 +7,9 @@
 //! all once `RemoveAutoTerminationPolicy` has taken it off or where nothing ever attached
 //! one. The ATTACHMENT and the members of the attached policy are separate facts, so an
 //! attached policy that carries no `IdleTimeout` is reported as the empty structure it
-//! was attached as and stays distinguishable from no policy at all.
+//! was attached as and stays distinguishable from no policy at all. An `IdleTimeout`
+//! outside the window its member documents is attached by NO path: it is refused, and the
+//! cluster keeps what it carried.
 //!
 //! Every case drives the real HTTP path — `POST /` with
 //! `X-Amz-Target: ElasticMapReduce.<Op>` and an `awsJson1_1` body — through the router's
@@ -281,9 +283,8 @@ async fn get_is_a_read_and_clusters_are_independent() {
 
 /// Every auto-termination-policy operation REFUSES a cluster the service holds no record
 /// for, with HTTP 400 `ValidationException` — never a 501, and never an empty success —
-/// and each one answers the sentence its own surface words: the reporting operation
-/// reports the cluster id it was given, while the two mutators answer the legacy job-flow
-/// surface's constant sentence, which names no id.
+/// and the whole family words that refusal the one way: the cluster surface's sentence,
+/// quoting the `ClusterId` the request carried.
 #[tokio::test]
 async fn unknown_clusters_are_refused_by_every_operation() {
     let emr = Emr::new();
@@ -299,12 +300,11 @@ async fn unknown_clusters_are_refused_by_every_operation() {
     ];
 
     for (label, cluster_id) in unknown {
-        let job_flow_sentence = "Specified job flow ID not valid.".to_string();
+        let sentence = format!("Cluster id '{cluster_id}' is not valid.");
         let requests = [
             (
                 "GetAutoTerminationPolicy",
                 json!({ "ClusterId": cluster_id }),
-                format!("Cluster id '{cluster_id}' is not valid."),
             ),
             (
                 "PutAutoTerminationPolicy",
@@ -312,15 +312,13 @@ async fn unknown_clusters_are_refused_by_every_operation() {
                     "ClusterId": cluster_id,
                     "AutoTerminationPolicy": { "IdleTimeout": IDLE_TIMEOUT_BOUNDS[0] },
                 }),
-                job_flow_sentence.clone(),
             ),
             (
                 "RemoveAutoTerminationPolicy",
                 json!({ "ClusterId": cluster_id }),
-                job_flow_sentence,
             ),
         ];
-        for (operation, body, expected) in requests {
+        for (operation, body) in requests {
             let case = format!("{operation} with {label}");
             let (status, payload) = emr.call(operation, body).await;
             assert_eq!(
@@ -338,8 +336,8 @@ async fn unknown_clusters_are_refused_by_every_operation() {
             );
             assert_eq!(
                 error_message(&payload),
-                expected,
-                "case {case:?}: expected {expected:?}, got {payload}"
+                sentence,
+                "case {case:?}: expected {sentence:?}, got {payload}"
             );
         }
     }
@@ -378,6 +376,152 @@ async fn a_cluster_id_in_no_cluster_form_is_refused_on_its_shape() {
             error_message(&payload),
             format!("clusterId '{cluster_id}' is not valid."),
             "case {case:?}: expected the member-shaped refusal, got {payload}"
+        );
+    }
+}
+
+/// The refusal sentence an `IdleTimeout` outside the documented window is answered with:
+/// fixed text naming the member and the two documented bounds, and nothing of the request
+/// — the rejected value is no part of it.
+fn out_of_range_sentence() -> String {
+    format!(
+        "Auto-termination policy IdleTimeout must be within a minimum of {} seconds, and a \
+         maximum of {} seconds.",
+        IDLE_TIMEOUT_BOUNDS[0], IDLE_TIMEOUT_BOUNDS[1]
+    )
+}
+
+/// `IdleTimeout` values spanning the window the member documents: each published bound,
+/// one step inside it, one step PAST each bound, and values far outside on both sides —
+/// including the zero and the negative a `Long` can carry. `true` is an accepted value.
+fn idle_timeout_table() -> Vec<(&'static str, i64, bool)> {
+    vec![
+        ("far below the minimum", -1, false),
+        ("zero idle time", 0, false),
+        ("well below the minimum", 10, false),
+        ("one second below the minimum", IDLE_TIMEOUT_BOUNDS[0] - 1, false),
+        ("the documented minimum", IDLE_TIMEOUT_BOUNDS[0], true),
+        ("one second inside the minimum", IDLE_TIMEOUT_BOUNDS[0] + 1, true),
+        ("well inside the window", 3_600, true),
+        ("one second inside the maximum", IDLE_TIMEOUT_BOUNDS[1] - 1, true),
+        ("the documented maximum", IDLE_TIMEOUT_BOUNDS[1], true),
+        ("one second past the maximum", IDLE_TIMEOUT_BOUNDS[1] + 1, false),
+        ("far past the maximum", 31_536_000, false),
+    ]
+}
+
+/// `PutAutoTerminationPolicy` holds `IdleTimeout` to the window its member documents: a
+/// value inside it is attached and read back unchanged, and a value outside it is refused
+/// with HTTP 400 `ValidationException` and attaches nothing — the cluster keeps whatever
+/// it carried before.
+#[tokio::test]
+async fn an_idle_timeout_outside_the_documented_window_is_refused() {
+    let emr = Emr::new();
+    let sentence = out_of_range_sentence();
+    let kept = json!({ "IdleTimeout": 3_600 });
+
+    for (label, idle_timeout, accepted) in idle_timeout_table() {
+        let cluster = emr.run_job_flow(minimal_request("bounded idle time")).await;
+        // The cluster starts out carrying a policy inside the window, so a refusal is
+        // visible as the EARLIER policy still being attached rather than as absence.
+        put(&emr, label, &cluster, &kept).await;
+
+        let case = format!("PutAutoTerminationPolicy with {label}");
+        let (status, payload) = emr
+            .call(
+                "PutAutoTerminationPolicy",
+                json!({
+                    "ClusterId": cluster,
+                    "AutoTerminationPolicy": { "IdleTimeout": idle_timeout },
+                }),
+            )
+            .await;
+
+        if accepted {
+            assert_eq!(
+                status, 200,
+                "case {case:?}: expected HTTP 200, got {status} with {payload}"
+            );
+            let got = policy(&emr, &case, &cluster).await;
+            assert_eq!(
+                got,
+                json!({ "IdleTimeout": idle_timeout }),
+                "case {case:?}: the attached policy must be the one submitted, got {got}"
+            );
+            continue;
+        }
+
+        assert_eq!(
+            status, 400,
+            "case {case:?}: expected HTTP 400, got {status} with {payload}"
+        );
+        let code = payload
+            .get("__type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            code.contains("ValidationException"),
+            "case {case:?}: expected error code ValidationException, got {code:?} in {payload}"
+        );
+        assert_eq!(
+            error_message(&payload),
+            sentence,
+            "case {case:?}: expected {sentence:?}, got {payload}"
+        );
+        let got = policy(&emr, &case, &cluster).await;
+        assert_eq!(
+            got, kept,
+            "case {case:?}: a refused Put must leave the attached policy alone, got {got}"
+        );
+    }
+}
+
+/// A policy attached at CREATION is the same attachment, so `RunJobFlow` holds its
+/// `IdleTimeout` to the same window: an out-of-range one is refused with the same sentence
+/// and launches no cluster, while every in-range one launches one that reports it.
+#[tokio::test]
+async fn run_job_flow_holds_the_policy_to_the_same_window() {
+    let emr = Emr::new();
+    let sentence = out_of_range_sentence();
+
+    for (label, idle_timeout, accepted) in idle_timeout_table() {
+        let case = format!("RunJobFlow with {label}");
+        let mut request = minimal_request("created with a bounded policy");
+        request["AutoTerminationPolicy"] = json!({ "IdleTimeout": idle_timeout });
+        let (status, payload) = emr.call("RunJobFlow", request).await;
+
+        if accepted {
+            assert_eq!(
+                status, 200,
+                "case {case:?}: expected HTTP 200, got {status} with {payload}"
+            );
+            let cluster = payload
+                .get("JobFlowId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let got = policy(&emr, &case, &cluster).await;
+            assert_eq!(
+                got,
+                json!({ "IdleTimeout": idle_timeout }),
+                "case {case:?}: the new cluster must report the policy it launched with, \
+                 got {got}"
+            );
+            continue;
+        }
+
+        assert_eq!(
+            status, 400,
+            "case {case:?}: expected HTTP 400, got {status} with {payload}"
+        );
+        assert_eq!(
+            error_message(&payload),
+            sentence,
+            "case {case:?}: expected {sentence:?}, got {payload}"
+        );
+        assert!(
+            payload.get("JobFlowId").is_none(),
+            "case {case:?}: a refused launch must mint no cluster, got {payload}"
         );
     }
 }

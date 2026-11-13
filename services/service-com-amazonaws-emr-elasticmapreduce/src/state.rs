@@ -876,6 +876,56 @@ pub fn validate_managed_scaling_policy(policy: &ManagedScalingPolicy) -> Result<
     Ok(())
 }
 
+/// The smallest idle time an auto-termination policy may name, in seconds: "You can
+/// specify a minimum of 60 seconds and a maximum of 604800 seconds (seven days)"
+/// (`AutoTerminationPolicy$IdleTimeout` doc, Smithy model —
+/// `smithy_query(query="doc", shape="AutoTerminationPolicy", member="IdleTimeout")`).
+pub const MIN_AUTO_TERMINATION_IDLE_TIMEOUT: i64 = 60;
+
+/// The largest idle time an auto-termination policy may name, in seconds, from the same
+/// sentence of the same member's documentation ([`MIN_AUTO_TERMINATION_IDLE_TIMEOUT`]).
+pub const MAX_AUTO_TERMINATION_IDLE_TIMEOUT: i64 = 604_800;
+
+/// How an auto-termination-policy attachment refuses an `IdleTimeout` outside the window
+/// that member documents.
+///
+/// Recorded behavior for the text: Amazon EMR states the member and the two bounds it
+/// holds the member to, and nothing of the request — the rejected value is NOT part of
+/// the sentence — so the sentence is the same for every out-of-range value. The numbers
+/// are the documented bounds themselves
+/// ([`MIN_AUTO_TERMINATION_IDLE_TIMEOUT`], [`MAX_AUTO_TERMINATION_IDLE_TIMEOUT`]), so the
+/// window the service enforces and the window it states can never drift apart.
+pub fn invalid_idle_timeout_message() -> String {
+    format!(
+        "Auto-termination policy IdleTimeout must be within a minimum of \
+         {MIN_AUTO_TERMINATION_IDLE_TIMEOUT} seconds, and a maximum of \
+         {MAX_AUTO_TERMINATION_IDLE_TIMEOUT} seconds."
+    )
+}
+
+/// Refuse an `AutoTerminationPolicy` whose `IdleTimeout` falls outside the documented
+/// window, inclusive of both bounds.
+///
+/// "Specifies the amount of idle time in seconds after which the cluster automatically
+/// terminates. You can specify a minimum of 60 seconds and a maximum of 604800 seconds
+/// (seven days)." (`AutoTerminationPolicy$IdleTimeout` doc.) The model bounds the member
+/// by its type alone (a `Long`, with no `@range`), so the service is what holds it to that
+/// window. The member is optional, so a policy carrying none names no idle time to hold —
+/// that is an attached policy rather than an out-of-range one.
+///
+/// Every path that persists an `AutoTerminationPolicy` calls this before storing it, so a
+/// policy outside the window is never attached, whichever call attached it.
+pub fn validate_auto_termination_policy(policy: &AutoTerminationPolicy) -> Result<(), String> {
+    if let Some(idle_timeout) = policy.idle_timeout {
+        if !(MIN_AUTO_TERMINATION_IDLE_TIMEOUT..=MAX_AUTO_TERMINATION_IDLE_TIMEOUT)
+            .contains(&idle_timeout)
+        {
+            return Err(invalid_idle_timeout_message());
+        }
+    }
+    Ok(())
+}
+
 /// How an instance-group modification refuses an Amazon EC2 instance id that names no
 /// instance of the group.
 ///
