@@ -61,7 +61,7 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use crate::instance_state_view::{assert_state_mirrors_status, listed_pages};
 use crate::listed_instance_projection_matches_describe::assert_one_projection;
-use crate::ssoadmin_permission_sets::{router_over, with_store};
+use crate::ssoadmin_permission_sets::{drawn_seeds, router_over, with_store};
 
 /// The seeds the populations are drawn from — one population per seed, so the case count
 /// is bounded and every run draws the SAME sixteen populations: a failure is reproduced by
@@ -91,14 +91,10 @@ const SEEDS: [u64; 16] = [
 const SEED_OVERRIDE: &str = "SSOADMIN_DRAWN_ACCOUNT_SEED";
 
 /// The seeds this run draws its populations from: the fixed set, or the single seed
-/// [`SEED_OVERRIDE`] names.
+/// [`SEED_OVERRIDE`] names — read by the shared reader every drawn suite of this crate
+/// uses.
 fn seeds() -> Vec<u64> {
-    match ::std::env::var(SEED_OVERRIDE) {
-        Ok(named) => vec![named.trim().parse::<u64>().unwrap_or_else(|error| {
-            panic!("{SEED_OVERRIDE}={named:?} is not a u64 seed: {error}")
-        })],
-        Err(_) => SEEDS.to_vec(),
-    }
+    drawn_seeds(SEED_OVERRIDE, &SEEDS)
 }
 
 /// The largest account a population is drawn for: the published maximum of the output list

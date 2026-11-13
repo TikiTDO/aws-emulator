@@ -15,8 +15,8 @@
 //!    same parameters answers with the ARN the first call minted and creates nothing, and
 //!    the same token with any different parameter is refused `ConflictException`;
 //! 3. `CreateApplicationAssignment` grants ONE direct assignment per (application,
-//!    principal type, principal id) tuple — granting one the application already holds is
-//!    refused `ConflictException` and stores no second row — and
+//!    principal type, principal id) tuple — a grant of one the application already holds
+//!    CONVERGES on it, answering the modelled empty 200 and storing no second row — and
 //!    `DescribeApplicationAssignment` reports exactly that tuple;
 //! 4. an `ApplicationArn` no create minted is refused `ResourceNotFoundException` by
 //!    every operation of the slice, and a principal that holds no DIRECT assignment to an
@@ -34,7 +34,7 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::ssoadmin_permission_sets::{
-    assert_refused, call, call_in_region, create_application_assignment as create_assignment,
+    call, call_in_region, create_application_assignment as create_assignment,
     describe_application_assignment as describe_assignment, error_code, hold_deletion, router,
     router_over, seeded_instance_arn, with_store, TEST_REGION,
 };
@@ -737,11 +737,14 @@ async fn every_granted_assignment_reads_back_and_granting_it_twice_grants_it_onc
                  {described}"
             );
 
-            // Rule 3: the same grant again is the conflict with the write that granted it
-            // — refused, and no second row.
+            // Rule 3: the same grant again converges on the assignment that write made —
+            // served, and no second row.
             let (status, body) =
                 create_assignment(&router, application_arn, principal_type, principal_id).await;
-            assert_refused(&case, "a repeated grant", "ConflictException", status, &body);
+            assert_eq!(
+                status, 200,
+                "case {case:?}: a repeated grant must answer 200, got {status} {body}"
+            );
             assert_eq!(
                 with_store(&engine, |store| store.application_assignments.len()),
                 expected_rows,

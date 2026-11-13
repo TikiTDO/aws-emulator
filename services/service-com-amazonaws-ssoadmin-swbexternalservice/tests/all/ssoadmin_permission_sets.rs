@@ -32,6 +32,22 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
+/// The seeds a PROPERTY-based suite of this crate draws its populations from: the fixed
+/// set the suite owns, so the case count is bounded and every run draws the same
+/// populations, or the single seed `override_var` names for an exploratory run.
+///
+/// Shared by the drawn suites (`listed_instance_state_generated_accounts.rs`,
+/// `application_assignment_repeat_grant.rs`), so one reading of a seed override serves
+/// every one of them.
+pub(crate) fn drawn_seeds(override_var: &str, fixed: &[u64]) -> Vec<u64> {
+    match ::std::env::var(override_var) {
+        Ok(named) => vec![named.trim().parse::<u64>().unwrap_or_else(|error| {
+            panic!("{override_var}={named:?} is not a u64 seed: {error}")
+        })],
+        Err(_) => fixed.to_vec(),
+    }
+}
+
 /// A pattern-valid `InstanceArn` for an instance that was never created, used to pin
 /// the not-found rule. Shaped by the model's `InstanceArn` pattern
 /// `^arn:aws(-[a-z]{1,5}){0,3}:sso:::instance/(sso)?ins-[a-zA-Z0-9-.]{16}$`.

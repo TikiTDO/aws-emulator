@@ -47,6 +47,8 @@ mod application_assignment_conflict;
 mod application_assignment_delete;
 #[path = "all/application_assignment_describe.rs"]
 mod application_assignment_describe;
+#[path = "all/application_assignment_repeat_grant.rs"]
+mod application_assignment_repeat_grant;
 #[path = "all/application_assignments.rs"]
 mod application_assignments;
 #[path = "all/application_assignments_for_principal.rs"]

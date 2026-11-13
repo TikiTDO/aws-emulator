@@ -6,12 +6,16 @@
 //! `DescribeApplicationAssignment` reads the same grant back. This is the ONLY file to
 //! touch for this operation.
 //!
-//! The assignment's identity is the tuple (application, principal type, principal id):
-//! granting one the application already holds is refused with the modelled
-//! `ConflictException` and stores no second row, so only the grant that DID create the
-//! access answers with the empty output the model declares. An `ApplicationArn` this
-//! account holds no application for is refused with the modelled
+//! The assignment's identity is the tuple (application, principal type, principal id), so
+//! the grant CONVERGES on the one assignment that tuple names: a request for a tuple the
+//! application already holds answers with the same empty output the first grant did and
+//! stores no second row, which is what lets a client retry a grant it is not sure landed.
+//! An `ApplicationArn` this account holds no application for is refused with the modelled
 //! `ResourceNotFoundException`.
+//!
+//! The modelled `ConflictException` is therefore unreachable from this handler: it reports
+//! a write the serving host has not seen yet, and every write of this store is serialized
+//! under the one state lock, so no caller here can observe that window.
 //!
 //! ## Shape of an operation
 //!
@@ -195,12 +199,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
-        // A GRANT, not a PUT: the model marks this operation NOT `@idempotent` and
-        // declares `ConflictException` for "a conflict with a previous successful write".
         // (application, principal type, principal id) is the assignment's identity, so a
-        // request naming one the application already holds is that conflict — refused, and
-        // the stored assignments are left as they were rather than reporting success for a
-        // write that would add nothing.
+        // grant of a tuple the application already holds has nothing further to grant: it
+        // CONVERGES on the one stored row — no second row, and the same empty output the
+        // grant that did create the access answered with, exactly as re-creating an account
+        // assignment answers from the grant that made it. The modelled
+        // `ConflictException` is for "a conflict with a previous successful write … A retry
+        // (with appropriate backoff logic) is the recommended response", i.e. a write this
+        // host has not seen yet — never the steady-state fact that the grant is in place,
+        // which is precisely what a retry is meant to converge on.
         if store
             .application_assignment_position(
                 &input.application_arn,
@@ -209,16 +216,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .is_some()
         {
-            return Err(
-                CreateApplicationAssignmentErrorModeled::ConflictException(ConflictException {
-                    message: Some(crate::state::application_assignment_already_granted_message(
-                        &input.application_arn,
-                        &input.principal_type,
-                        &input.principal_id,
-                    )),
-                })
-                .into(),
-            );
+            return Ok(CreateApplicationAssignmentOutput {});
         }
 
         // The emulator's own memory ceiling: this store grows one row per distinct

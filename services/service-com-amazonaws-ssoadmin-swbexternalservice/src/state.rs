@@ -396,25 +396,6 @@ pub fn application_not_found_message(application_arn: &str) -> String {
 /// condition and keeps its own message ([`application_not_found_message`]).
 pub const APPLICATION_ASSIGNMENT_NOT_FOUND_MESSAGE: Option<&str> = None;
 
-/// The refusal a GRANT of a direct application assignment the application ALREADY holds
-/// earns, as the message of the modelled `ConflictException` (HTTP 409) — "a conflict with
-/// a previous successful write".
-///
-/// Built from the request, like [`account_assignment_not_found_message`]: an assignment's
-/// identity is the whole (application, principal type, principal id) tuple, so the refusal
-/// names every part of it rather than one resource of the call, and a client reading it can
-/// tell which grant is the one that already exists.
-pub fn application_assignment_already_granted_message(
-    application_arn: &str,
-    principal_type: &str,
-    principal_id: &str,
-) -> String {
-    format!(
-        "An assignment of application {application_arn} to {principal_type} {principal_id} \
-         already exists."
-    )
-}
-
 /// The refusal a delete of an account assignment that is not granted earns, as the
 /// message of the modelled `ResourceNotFoundException`.
 ///
