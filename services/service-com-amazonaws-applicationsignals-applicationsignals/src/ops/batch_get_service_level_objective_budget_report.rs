@@ -112,12 +112,13 @@ impl From<BatchGetServiceLevelObjectiveBudgetReportErrorModeled> for BatchGetSer
 ///
 /// `ServiceLevelObjectiveBudgetReportErrorCode` is an unconstrained string in the model
 /// (`smithy_query(shape="ServiceLevelObjectiveBudgetReportErrorCode")` — a `string` with no
-/// enum), so the code reported is the NAME of the modelled exception a single-SLO read of
-/// the same id is refused with. That is the token a client already branches on when it
-/// reads an error envelope, and the convention this service's other per-item error lists
-/// follow (`BATCH_DELETE_ERROR_CODE_VALUES`, the value set the model does spell out for a
-/// per-item code, names its codes exactly that way).
-const NOT_FOUND_ERROR_CODE: &str = "ResourceNotFoundException";
+/// enum), and this operation states a per-item code as the HTTP STATUS of the failure class
+/// rather than as the name of an exception: an item the CALLER got wrong carries the
+/// client-error status `400`. That is the token a client branches on to tell a mistake of its
+/// own from a failure of the service. The per-item lists whose codes the model does spell out
+/// as a value set (`BATCH_DELETE_ERROR_CODE_VALUES`) are named by that set instead, which is
+/// why this one is not an exception name.
+const CALLER_ERROR_CODE: &str = "400";
 
 // The modelled `ServiceLevelObjectiveBudgetStatus` values, the `Attainment` of a window
 // nothing was observed in breach of, the evaluation interval an instant falls in and the
@@ -281,6 +282,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     /// a success: `Reports` carries no modelled minimum, so a response that reports nothing
     /// and errs on everything is one the model admits — and it states each failure where the
     /// caller can read all of them.
+    ///
+    /// A failed item is stated as the identity it was ASKED about (`Arn`) beside the
+    /// client-error code ([`CALLER_ERROR_CODE`]) and the sentence a single-SLO read of the
+    /// same id is refused with; it carries no `Name`, since an id that resolves to nothing
+    /// names no record to read one off.
     async fn handle(
         &self,
         input: Self::Input,
@@ -334,13 +340,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             match store.resolve(id) {
                 Some(slo) => reports.push(budget_report(slo, &input.timestamp, &now)),
                 None => {
-                    // The SLO is identified exactly as the not-found exception identifies
-                    // it: by the name the id denotes and the ARN it would carry in this
-                    // region, since there is no stored record to read an ARN off.
+                    // The item is identified by the ARN it was asked about — the identity the
+                    // not-found exception of a single-SLO read names too — and by nothing
+                    // else: there is no stored record to read a name off.
                     errors.push(ServiceLevelObjectiveBudgetReportError {
-                        name: crate::state::slo_name_in_id(id).to_string(),
                         arn: crate::state::slo_arn_of(&region, id),
-                        error_code: NOT_FOUND_ERROR_CODE.to_string(),
+                        error_code: CALLER_ERROR_CODE.to_string(),
                         error_message: crate::state::slo_not_found(&region, id).message,
                     });
                 }

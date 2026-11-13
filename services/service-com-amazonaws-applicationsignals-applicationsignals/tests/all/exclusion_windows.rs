@@ -241,7 +241,7 @@ pub(crate) async fn paged(
 }
 
 /// The ARN of the SLO called `name` in this account and region.
-fn slo_arn(name: &str) -> String {
+pub(crate) fn slo_arn(name: &str) -> String {
     format!("arn:aws:application-signals:{REGION}:{ACCOUNT}:slo/{name}")
 }
 
@@ -259,7 +259,7 @@ pub(crate) async fn create_slo(router: &MultiServiceRouter, name: &str) {
 }
 
 /// The `SloIds` a batch response reports, in order.
-fn applied_ids(response: &Value) -> Vec<String> {
+pub(crate) fn applied_ids(response: &Value) -> Vec<String> {
     response["SloIds"]
         .as_array()
         .map(|ids| {
@@ -274,7 +274,7 @@ fn applied_ids(response: &Value) -> Vec<String> {
 /// `DurationUnit`, the `Duration` range minimum of 1 and larger counts, a stated and an
 /// omitted `StartTime`, a cron and a rate `RecurrenceRule` and none at all, and a stated and
 /// an omitted `Reason`.
-fn window_table() -> Vec<(&'static str, Value)> {
+pub(crate) fn window_table() -> Vec<(&'static str, Value)> {
     vec![
         (
             "minute, duration 1, no optional member",
@@ -560,31 +560,9 @@ async fn a_batch_that_applies_to_nothing_is_refused_with_the_modelled_exception(
         );
     }
 
-    // A removal that matches no stored window is refused the same way, and leaves the SLO's
-    // own set exactly as it was.
-    let (status, updated) = batch(&router, &[stored.to_string()], &sent, &[]).await;
-    assert_eq!(
-        status, 200,
-        "case unmatched-setup: expected the setup add to succeed, got {status} with {updated}"
-    );
-    for (label, unmatched) in window_table().into_iter().skip(1) {
-        let (status, error) = batch(&router, &[stored.to_string()], &[], &[unmatched]).await;
-        assert_eq!(
-            status, 400,
-            "case {label:?}: expected HTTP 400 for a removal matching no stored window, got {status} with {error}"
-        );
-        assert_eq!(
-            error["message"].as_str(),
-            Some(
-                "1 validation error detected: Value at 'removeExclusionWindows' failed to \
-                 satisfy constraint: Each window configuration must match an existing exclusion \
-                 window of the SLO"
-            ),
-            "case {label:?}: expected the refusal to name the member and the requirement, got {error}"
-        );
-        let (_, page) = list(&router, stored, "").await;
-        assert_stored(label, &keys_of(&page), &sent);
-    }
+    // A removal that matches no stored window is a successful no-op rather than a refusal of
+    // the batch; that rule, and the set it leaves behind, is pinned by the
+    // `exclusion_window_removal` suite.
 }
 
 /// An SLO holds at most ten exclusion windows: an addition that would take it past the limit

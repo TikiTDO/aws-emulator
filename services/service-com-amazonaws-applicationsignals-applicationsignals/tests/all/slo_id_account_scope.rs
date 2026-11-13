@@ -31,7 +31,7 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::audit_findings::{audit, target};
-use crate::budget_reports::{budget_report, now_seconds, NOT_FOUND_ERROR_CODE};
+use crate::budget_reports::{budget_report, now_seconds, CALLER_ERROR_CODE};
 use crate::exclusion_windows::{batch, window};
 use crate::refusal_wording::assert_work_item_wording;
 use crate::resource_tags::{list_tags_raw, SLO_RESOURCE_TYPE};
@@ -258,12 +258,11 @@ async fn every_batch_entry_is_resolved_against_this_account() {
                 "case {case:?}: expected ONE Errors entry for another account's ARN, got \
                  {answer:?}"
             );
-            // The failure identifies the SLO the way every other refusal about an absent one
-            // does: by the name the id spells and the ARN the request supplied.
-            assert_eq!(
-                errors[0]["Name"].as_str(),
-                Some(SLO_NAME),
-                "case {case:?}: expected the entry to name the SLO the id spells, got {errors:?}"
+            // The failure identifies the SLO by the ARN the request supplied, and by nothing
+            // else: an id that resolves to no record names no name to report.
+            assert!(
+                errors[0]["Name"].is_null(),
+                "case {case:?}: expected no Name member on the entry, got {errors:?}"
             );
             assert_eq!(
                 errors[0]["Arn"].as_str(),
@@ -272,8 +271,8 @@ async fn every_batch_entry_is_resolved_against_this_account() {
             );
             assert_eq!(
                 errors[0]["ErrorCode"].as_str(),
-                Some(NOT_FOUND_ERROR_CODE),
-                "case {case:?}: expected ErrorCode {NOT_FOUND_ERROR_CODE:?}, got {errors:?}"
+                Some(CALLER_ERROR_CODE),
+                "case {case:?}: expected ErrorCode {CALLER_ERROR_CODE:?}, got {errors:?}"
             );
             assert_eq!(
                 errors[0]["ErrorMessage"].as_str(),

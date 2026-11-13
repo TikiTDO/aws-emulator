@@ -17,6 +17,8 @@ mod account_scoped_reads;
 mod audit_findings;
 #[path = "all/batch_instrumentation_configuration_deletion.rs"]
 mod batch_instrumentation_configuration_deletion;
+#[path = "all/budget_report_error_entries.rs"]
+mod budget_report_error_entries;
 #[path = "all/budget_reports.rs"]
 mod budget_reports;
 #[path = "all/budget_status_agreement.rs"]
@@ -45,6 +47,8 @@ mod error_identity;
 mod exclusion_window_page_stability;
 #[path = "all/exclusion_window_reads.rs"]
 mod exclusion_window_reads;
+#[path = "all/exclusion_window_removal.rs"]
+mod exclusion_window_removal;
 #[path = "all/exclusion_window_start_time.rs"]
 mod exclusion_window_start_time;
 #[path = "all/exclusion_windows.rs"]
@@ -79,6 +83,8 @@ mod instrumentation_configurations;
 mod instrumentation_status_minute;
 #[path = "all/instrumentation_status_transitions.rs"]
 mod instrumentation_status_transitions;
+#[path = "all/instrumentation_status_wire_spelling.rs"]
+mod instrumentation_status_wire_spelling;
 #[path = "all/issued_key_boundary.rs"]
 mod issued_key_boundary;
 #[path = "all/issued_page_position.rs"]

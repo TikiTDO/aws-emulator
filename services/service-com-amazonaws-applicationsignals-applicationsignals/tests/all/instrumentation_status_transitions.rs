@@ -40,7 +40,7 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use crate::instrumentation_configuration_status::{
     create_configuration, create_request, events_of, get_status, nearest_minute, report,
-    report_entry, router, status_request, Query, BREAKPOINT, PROBE, STATUSES,
+    report_entry, router, status_request, status_wire_token, Query, BREAKPOINT, PROBE, STATUSES,
 };
 use crate::status_event_default_window::{
     clock, clock_past_the_half_minute, second_of_the_minute,
@@ -247,8 +247,8 @@ async fn read_without_a_window(
     );
     assert_eq!(
         body["Status"].as_str(),
-        Some(status.unwrap_or(DEFAULT_STATUS)),
-        "case {case:?}: expected the status queried to be echoed, got {body}"
+        Some(status_wire_token(status.unwrap_or(DEFAULT_STATUS))),
+        "case {case:?}: expected the status queried to be echoed in its wire spelling, got {body}"
     );
     events_of(&body)
 }

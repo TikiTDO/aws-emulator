@@ -25,7 +25,7 @@
 use serde_json::Value;
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::budget_reports::{budget_report, now_seconds};
+use crate::budget_reports::{budget_report, now_seconds, CALLER_ERROR_CODE};
 use crate::exclusion_windows::{batch, create_slo, keys_of, list, window, DURATION_UNITS};
 use crate::slo_lifecycle::{router, ACCOUNT, REGION};
 
@@ -43,8 +43,7 @@ const REPORTED_PATTERN: &str = "[0-9A-Za-z][-._0-9A-Za-z ]{0,126}[0-9A-Za-z]$|\
 const NAME_LENGTH_MIN: usize = 2;
 const NAME_LENGTH_MAX: usize = 128;
 
-/// The `ErrorCode` and exception a well-formed id naming no stored SLO earns, which is what a
-/// request whose every id names no SLO is refused with.
+/// The exception a request whose every id names no stored SLO is refused with.
 const NOT_FOUND: &str = "ResourceNotFoundException";
 
 /// A name of exactly `length` characters, alphanumeric at both ends, which the pattern
@@ -323,8 +322,8 @@ async fn every_id_form_the_pattern_admits_is_resolved() {
         );
         assert_eq!(
             answer["Errors"][0]["ErrorCode"].as_str(),
-            Some(NOT_FOUND),
-            "case {label:?}: expected the per-item error to report {NOT_FOUND}, got {answer}"
+            Some(CALLER_ERROR_CODE),
+            "case {label:?}: expected the per-item error to report {CALLER_ERROR_CODE}, got {answer}"
         );
     }
 }

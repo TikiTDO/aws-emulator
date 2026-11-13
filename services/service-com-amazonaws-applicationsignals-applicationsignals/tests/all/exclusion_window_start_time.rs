@@ -195,19 +195,20 @@ async fn the_defaulted_start_time_is_what_a_removal_names_the_window_by() {
         );
 
         // The configuration as SENT no longer names a stored window: it states no start time,
-        // and every stored window has one.
-        let (status, error) =
+        // and every stored window has one. Naming no window takes nothing away, so the call
+        // succeeds and the set is still the one the read reported.
+        let (status, answer) =
             batch(&router, std::slice::from_ref(&name), &[], std::slice::from_ref(&sent)).await;
         assert_eq!(
-            status, 400,
-            "case {label:?}: expected a removal that omits StartTime to match no stored window, \
-             got {status} with {error}"
+            status, 200,
+            "case {label:?}: expected a removal that omits StartTime to be a no-op, \
+             got {status} with {answer}"
         );
         let (_, page) = list(&router, &name, "").await;
         assert_eq!(
             keys_of(&page),
             keys_of(&json_page(&stored)),
-            "case {label:?}: expected the refused removal to leave the set as it was, got {page}"
+            "case {label:?}: expected the unmatched removal to leave the set as it was, got {page}"
         );
 
         // The configuration the READ reports does name it, so the window is addressable.

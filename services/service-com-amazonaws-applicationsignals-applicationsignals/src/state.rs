@@ -2663,8 +2663,6 @@ const FIRST_EXCLUSION_WINDOW_ORDINAL: u64 = 1;
 pub enum ExclusionWindowFailure {
     /// The id names no stored SLO.
     NoSuchSlo,
-    /// A window in `RemoveExclusionWindows` matches no exclusion window this SLO holds.
-    UnmatchedRemoval,
     /// The additions would take this SLO past [`MAX_EXCLUSION_WINDOWS_PER_SLO`] windows.
     TooManyWindows,
 }
@@ -2681,7 +2679,7 @@ impl ExclusionWindowFailure {
     pub fn error_code(self) -> &'static str {
         match self {
             Self::NoSuchSlo => "ResourceNotFoundException",
-            Self::UnmatchedRemoval | Self::TooManyWindows => "ValidationException",
+            Self::TooManyWindows => "ValidationException",
         }
     }
 
@@ -2694,10 +2692,6 @@ impl ExclusionWindowFailure {
     pub fn error_message(self, region: &str, id: &str) -> String {
         match self {
             Self::NoSuchSlo => slo_not_found(region, id).message,
-            Self::UnmatchedRemoval => validation_envelope(&[constraint_clause(
-                "removeExclusionWindows",
-                "Each window configuration must match an existing exclusion window of the SLO",
-            )]),
             Self::TooManyWindows => validation_envelope(&[constraint_clause(
                 "addExclusionWindows",
                 &format!(
@@ -2780,11 +2774,14 @@ impl ComAmazonawsApplicationsignalsApplicationsignalsState {
     /// [`MAX_EXCLUSION_WINDOWS_PER_SLO`].
     ///
     /// A window is named by its configuration, which is the identity a removal uses, so the
-    /// set holds each configuration once: adding a configuration the SLO already holds
-    /// changes nothing (and consumes no slot), and removing one it does not hold is the
-    /// failure [`ExclusionWindowFailure::UnmatchedRemoval`] rather than a silent no-op, since
-    /// `RemoveExclusionWindows` requires that "the window configuration must match an
-    /// existing exclusion window".
+    /// set holds each configuration once and each half of the update is a SET operation on
+    /// that set: adding a configuration the SLO already holds changes nothing (and consumes no
+    /// slot), and removing one it does not hold takes nothing away. Neither is a failure of
+    /// the id — the sentence `RemoveExclusionWindows` carries ("The window configuration must
+    /// match an existing exclusion window") says WHICH window an entry names, not that naming
+    /// none refuses the call — so a reconciling caller that states its desired add/remove set
+    /// converges: the SLO ends up holding the additions and not the removals, whatever it held
+    /// before.
     ///
     /// The whole update is applied to a COPY of the set and stored only once every window has
     /// been applied, so an SLO that earns a failure is left exactly as it was.
@@ -2809,12 +2806,15 @@ impl ComAmazonawsApplicationsignalsApplicationsignalsState {
 
         let mut windows = self.exclusion_windows.get(name).cloned().unwrap_or_default();
         for window in remove {
+            // A removal entry that matches no stored window takes nothing away, and is not a
+            // failure of this id: the set simply does not hold that configuration, which is
+            // the state the caller asked for.
             let Some(at) = windows
                 .iter()
                 .find(|(_, stored)| same_exclusion_window(stored, window))
                 .map(|(ordinal, _)| *ordinal)
             else {
-                return Err(ExclusionWindowFailure::UnmatchedRemoval);
+                continue;
             };
             windows.remove(&at);
         }
@@ -2866,22 +2866,65 @@ fn next_exclusion_window_ordinal(windows: &BTreeMap<u64, ExclusionWindow>) -> u6
 /// stored window — and so every later read of it — reports when the exclusion begins, and the
 /// period it excludes is anchored at that instant.
 ///
-/// The defaulted instant is the whole SECOND the call was served in, which is the resolution
-/// `StartTime` crosses the wire at (a `Timestamp` the JSON protocols carry as epoch seconds)
-/// and finer than any `Window.DurationUnit` the model admits. That keeps the set a
-/// `ListServiceLevelObjectiveExclusionWindows` reports a set a `RemoveExclusionWindows` can
-/// name back member for member, which is the identity rule [`same_exclusion_window`] applies.
+/// The defaulted instant keeps its SUB-SECOND part, settled at the resolution an AWS
+/// `Timestamp` crosses the wire at: epoch seconds carrying milliseconds
+/// ([`wire_instant`]). An instant the service picks is reported at the resolution
+/// the protocol can carry it at, so the window a read reports begins where the exclusion
+/// begins rather than at the top of the second it began in.
+///
+/// Settling it at the wire's own resolution — rather than keeping the clock's nanoseconds —
+/// is also what keeps the set a `ListServiceLevelObjectiveExclusionWindows` reports a set a
+/// `RemoveExclusionWindows` can name back member for member ([`same_exclusion_window`]): the
+/// stored instant is one a response renders in full.
+///
 /// A STATED `StartTime` is stored exactly as sent — the default settles an omission, it never
 /// re-times an instant the caller chose.
 pub fn stored_exclusion_window(window: &ExclusionWindow, served_at: DateTime) -> ExclusionWindow {
     ExclusionWindow {
-        start_time: Some(
-            window
-                .start_time
-                .unwrap_or_else(|| DateTime::from_secs(served_at.secs())),
-        ),
+        start_time: Some(window.start_time.unwrap_or(wire_instant(served_at))),
         ..window.clone()
     }
+}
+
+/// Nanoseconds in one millisecond, which is the resolution an instant this service settles
+/// itself is stated and compared at.
+///
+/// A `Timestamp` on this service's protocols is epoch seconds with a fractional part, and AWS
+/// renders that fraction to the millisecond, which is also the resolution the recorded
+/// responses of this service carry. It is finer than any `Window.DurationUnit` the model
+/// admits, so nothing a caller states is lost by it, and it is the finest resolution a value
+/// survives the wire at: an epoch-seconds `Timestamp` is a JSON NUMBER, so the sub-millisecond
+/// digits of an instant do not come back from a client unchanged.
+pub const NANOS_PER_MILLISECOND: u32 = 1_000_000;
+
+/// The millisecond `at` falls in, nearest-rounded: the key two `Timestamp` values are the same
+/// instant by once one of them has crossed the wire.
+///
+/// NEAREST, because the comparison's job is to recognise one instant on both sides of a
+/// round trip: a millisecond this service rendered comes back from a client as the nearest
+/// `f64` to it, whose sub-millisecond digits fall on either side of the value sent. The
+/// MINTING of an instant truncates instead, for the reason [`wire_instant`] gives, and the two
+/// agree on every instant this service stores: a truncated instant is already whole to the
+/// millisecond, so it rounds to itself.
+fn instant_millis(at: &DateTime) -> i64 {
+    at.secs().saturating_mul(1_000).saturating_add(i64::from(
+        (at.subsec_nanos().saturating_add(NANOS_PER_MILLISECOND / 2)) / NANOS_PER_MILLISECOND,
+    ))
+}
+
+/// `at` stated to the millisecond ([`NANOS_PER_MILLISECOND`]), which is the form every instant
+/// this service MINTS is stored and reported in.
+///
+/// The sub-millisecond part is DROPPED rather than rounded to the nearest millisecond (which
+/// is what [`instant_millis`] does for its comparison): an instant the service settles from
+/// its own clock is the instant the call was served at, and rounding up would state one that
+/// had not arrived yet.
+pub fn wire_instant(at: DateTime) -> DateTime {
+    DateTime::from_millis(
+        at.secs()
+            .saturating_mul(1_000)
+            .saturating_add(i64::from(at.subsec_nanos() / NANOS_PER_MILLISECOND)),
+    )
 }
 
 /// Whether two exclusion windows are the same window: the configuration a removal names one
@@ -2895,14 +2938,17 @@ pub fn stored_exclusion_window(window: &ExclusionWindow, served_at: DateTime) ->
 /// is the set a `RemoveExclusionWindows` can address — and since every stored window carries
 /// the `StartTime` it was added at ([`stored_exclusion_window`]), a removal names the window
 /// it means by the start time the read reported for it. `Window` and `RecurrenceRule` carry no
-/// `PartialEq`, so those members are compared out, as [`same_dependency`] is; `StartTime` uses
-/// `DateTime`'s own, which compares the seconds and the sub-second fields \u2014 exactly "the same
-/// instant at the resolution a `Timestamp` carries", and never the float seconds, where two
-/// different instants could round together.
+/// `PartialEq`, so those members are compared out, as [`same_dependency`] is; `StartTime` is
+/// compared at the resolution the wire carries it at ([`instant_millis`]), because that is the
+/// resolution a caller can name an instant AT: the value a read reports is a JSON number, and
+/// the instant it re-parses to on the way back in is the same instant only to the millisecond,
+/// so comparing the nanosecond fields instead would make a reported window one no client could
+/// remove.
 pub fn same_exclusion_window(left: &ExclusionWindow, right: &ExclusionWindow) -> bool {
     left.window.duration_unit == right.window.duration_unit
         && left.window.duration == right.window.duration
-        && left.start_time == right.start_time
+        && left.start_time.as_ref().map(instant_millis)
+            == right.start_time.as_ref().map(instant_millis)
         && left
             .recurrence_rule
             .as_ref()

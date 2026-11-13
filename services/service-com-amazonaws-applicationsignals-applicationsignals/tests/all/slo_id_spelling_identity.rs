@@ -18,7 +18,7 @@
 
 use serde_json::{json, Value};
 
-use crate::budget_reports::{budget_report, now_seconds, NOT_FOUND_ERROR_CODE};
+use crate::budget_reports::{budget_report, now_seconds, CALLER_ERROR_CODE};
 use crate::exclusion_windows::{batch, window};
 use crate::resource_tags::SLO_RESOURCE_TYPE;
 use crate::slo_lifecycle::{create, router, sli_config, ACCOUNT, REGION};
@@ -171,12 +171,10 @@ async fn one_missing_slo_named_by_many_spellings_fails_once() {
             case.label,
             response["Errors"]
         );
-        assert_eq!(
-            errors[0]["Name"].as_str(),
-            Some(case.name),
-            "case {:?}: expected Name {:?}, got {:?}",
+        assert!(
+            errors[0]["Name"].is_null(),
+            "case {:?}: expected no Name member on the entry, got {:?}",
             case.label,
-            case.name,
             errors[0]
         );
         assert_eq!(
@@ -188,8 +186,8 @@ async fn one_missing_slo_named_by_many_spellings_fails_once() {
         );
         assert_eq!(
             errors[0]["ErrorCode"].as_str(),
-            Some(NOT_FOUND_ERROR_CODE),
-            "case {:?}: expected ErrorCode {NOT_FOUND_ERROR_CODE:?}, got {:?}",
+            Some(CALLER_ERROR_CODE),
+            "case {:?}: expected ErrorCode {CALLER_ERROR_CODE:?}, got {:?}",
             case.label,
             errors[0]
         );

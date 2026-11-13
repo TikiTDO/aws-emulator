@@ -66,6 +66,21 @@ pub(crate) const PROBE: &str = "PROBE";
 /// "ERROR", "ACTIVE", "DISABLED"]`).
 pub(crate) const STATUSES: [&str; 4] = ["READY", "ERROR", "ACTIVE", "DISABLED"];
 
+/// The WIRE spelling of one `InstrumentationConfigurationStatus`: the token a response states
+/// a status with, where a request names it by the modelled name in [`STATUSES`].
+///
+/// One row per modelled value, each the name capitalised — the spelling the recorded
+/// responses of `GetInstrumentationConfigurationStatus` carry.
+pub(crate) fn status_wire_token(status: &str) -> &'static str {
+    match status {
+        "READY" => "Ready",
+        "ERROR" => "Error",
+        "ACTIVE" => "Active",
+        "DISABLED" => "Disabled",
+        other => panic!("case {other:?}: not a modelled InstrumentationConfigurationStatus"),
+    }
+}
+
 /// The whole modelled `InstrumentationErrorCause` catalogue
 /// (`smithy_query(query="shape",shape="InstrumentationErrorCause")` -> `["FILE_NOT_FOUND",
 /// "METHOD_NOT_FOUND", "LINE_NOT_EXECUTABLE", "OVERLOADED_METHODS", "LANGUAGE_MISMATCH",
@@ -412,8 +427,8 @@ async fn a_reported_event_is_read_back_for_every_status_and_error_cause() {
                     );
                     assert_eq!(
                         body["Status"].as_str(),
-                        Some(status),
-                        "case {label:?} by {form} attempt {attempt}: expected the queried status, got {body}"
+                        Some(status_wire_token(status)),
+                        "case {label:?} by {form} attempt {attempt}: expected the queried status in its wire spelling, got {body}"
                     );
                     assert_eq!(
                         body["SignalType"].as_str(),
@@ -868,7 +883,7 @@ async fn a_read_reports_the_events_of_its_window_most_recent_first() {
         // `Status` defaults to ACTIVE, which is what every event above was reported with.
         assert_eq!(
             body["Status"].as_str(),
-            Some("ACTIVE"),
+            Some(status_wire_token("ACTIVE")),
             "case {label:?}: expected the default status, got {body}"
         );
         assert_eq!(

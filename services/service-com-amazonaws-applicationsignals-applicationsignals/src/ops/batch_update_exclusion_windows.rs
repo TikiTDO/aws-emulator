@@ -148,6 +148,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     /// "defaults to current time if not specified", so a window added without one starts at
     /// the instant this call is served and a later read reports that instant.
     ///
+    /// Both lists are SET operations on the window set of each id: an addition the SLO already
+    /// holds changes nothing, and a removal naming a configuration it does not hold takes
+    /// nothing away. Neither is a per-item failure, so a caller reconciling a desired window
+    /// set by stating its additions and removals is answered with the ids it was applied to
+    /// and converges on a repeat.
+    ///
     /// An entry of `SloIds` that is no `ServiceLevelObjectiveId` at all refuses the WHOLE
     /// request with the modelled `ValidationException`, rather than earning a per-item entry
     /// ([`crate::ops::batch_get_service_level_objective_budget_report::slo_ids_violation`],

@@ -177,6 +177,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     /// which the CLOCK owed at that instant whether or not anybody called — see
     /// [`crate::state::ComAmazonawsApplicationsignalsApplicationsignalsState::expire_instrumentation_configurations`].
     ///
+    /// The status the response STATES is that status in the wire spelling this service serves
+    /// a status with ([`crate::state::status_wire_token`]), which is not the modelled name the
+    /// request and the stored events spell it with.
+    ///
     /// The events are those of ONE status (the requested one, else `ACTIVE`) that fall in the
     /// requested window (else the last hour), most recent first. Each one is reported at the
     /// minute it was recorded for — `InstrumentationStatusEvent.Time` is "the time when the
@@ -325,7 +329,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             environment: input.environment,
             signal_type: input.signal_type,
             location,
-            status,
+            // The queried status, in the spelling a response states a status with — the
+            // chronology above is selected by the modelled name the request carried.
+            status: crate::state::status_wire_token(&status),
             events,
             next_token: next_token
                 .map(|cursor| crate::state::encode_cursor(&token_tag, &cursor.encode())),

@@ -43,10 +43,24 @@ pub struct ServiceLevelObjectiveBudgetReport {
     pub goal: Option<Goal>,
 }
 
-#[smithy_macros::smithy(shape = "com.amazonaws.applicationsignals#ServiceLevelObjectiveBudgetReportError")]
+/// `ServiceLevelObjectiveBudgetReportError` as this operation puts a per-item failure on the
+/// wire: `Arn`, `ErrorCode` and `ErrorMessage`.
+///
+/// `Name` is declared unsupported, so it is absent from this shape's schema and from the body
+/// the framework writes. The only per-item failure this operation reports is an `SloIds` entry
+/// that resolves to no stored objective, and the NAME of an objective is a property of the
+/// record: there is none to state for an id that names nothing, so the entry identifies the
+/// item by the `Arn` it was asked about alone rather than by a name parsed back out of the
+/// request. The model marks the member `@required`, which leaves a `@required` member
+/// non-`Option` and therefore always written, so declaring it unsupported is the only way to
+/// keep it off the wire — the same mechanism `instrumentation_not_found_types` keeps the
+/// identity members of its refusal body off it with.
+#[smithy_macros::smithy(
+    shape = "com.amazonaws.applicationsignals#ServiceLevelObjectiveBudgetReportError",
+    unsupported = ["Name"]
+)]
 #[derive(Debug, Clone, Default)]
 pub struct ServiceLevelObjectiveBudgetReportError {
-    pub name: String,
     pub arn: String,
     pub error_code: String,
     pub error_message: String,

@@ -120,6 +120,26 @@ pub const STATUS_EVENT_DEFAULT_WINDOW: Duration = Duration::from_secs(60 * 60);
 /// -> `["READY", "ERROR", "ACTIVE", "DISABLED"]`).
 pub const DEFAULT_STATUS_EVENT_STATUS: &str = "ACTIVE";
 
+/// The WIRE token one `InstrumentationConfigurationStatus` is stated with in a response.
+///
+/// The modelled enum carries the value set `["READY", "ERROR", "ACTIVE", "DISABLED"]` and no
+/// entry of it declares a `value` distinct from its name
+/// (`smithy_query(query="shape",shape="InstrumentationConfigurationStatus")`), while this
+/// service states a status on the wire CAPITALISED: the status whose modelled name is
+/// `ACTIVE` is served as `Active`. The token is therefore the name with its first letter
+/// upper-case and the rest lower-case — every value of the enum is one word, so that is the
+/// whole rule — and a status is compared, stored and filtered by under its modelled name, so
+/// only what a response STATES is rendered here.
+pub fn status_wire_token(status: &str) -> String {
+    let mut characters = status.chars();
+    match characters.next() {
+        None => String::new(),
+        Some(first) => {
+            first.to_uppercase().collect::<String>() + &characters.as_str().to_lowercase()
+        }
+    }
+}
+
 /// The `UnprocessedStatusEventFailureReason` a reported status event earns when it names an
 /// identity this service holds no configuration for
 /// (`smithy_query(query="shape",shape="UnprocessedStatusEventFailureReason")` ->

@@ -25,9 +25,9 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use crate::slo_lifecycle::{call, create, name_path_segment, router, sli_config, ACCOUNT, REGION};
 
-/// The `ErrorCode` an id that names no stored SLO earns: the name of the exception a
-/// single-SLO read of the same id is refused with.
-pub(crate) const NOT_FOUND_ERROR_CODE: &str = "ResourceNotFoundException";
+/// The `ErrorCode` an id that names no stored SLO earns: the HTTP status of the failure
+/// class, as a string, since the caller is what got the item wrong.
+pub(crate) const CALLER_ERROR_CODE: &str = "400";
 
 /// The modelled `ServiceLevelObjectiveBudgetStatus` values this emulator can report
 /// (`smithy_query(shape="ServiceLevelObjectiveBudgetStatus")` -> `["OK", "WARNING",
@@ -539,8 +539,9 @@ async fn calendar_interval_reaching_the_present_reports_the_current_tile() {
     );
 }
 
-/// An id that names no stored SLO earns one `Errors` entry identifying it, for every id form
-/// the modelled `ServiceLevelObjectiveId` admits.
+/// An id that names no stored SLO earns one `Errors` entry identifying it by the `Arn` it was
+/// asked about — and by nothing else — for every id form the modelled
+/// `ServiceLevelObjectiveId` admits.
 ///
 /// The rows differ along the id's form and the identity it names: a bare name, this
 /// account's ARN of the same name, an ARN of another Region and an ARN of another account —
@@ -550,7 +551,6 @@ async fn budget_report_identifies_each_id_that_names_no_slo() {
     struct Case {
         label: &'static str,
         id: String,
-        name: &'static str,
         arn: String,
     }
 
@@ -558,7 +558,6 @@ async fn budget_report_identifies_each_id_that_names_no_slo() {
         Case {
             label: "a bare name",
             id: "no-such-slo".to_string(),
-            name: "no-such-slo",
             // No record to read an ARN off, so the ARN is the one the name would carry in
             // the region the request is signed for.
             arn: slo_arn("no-such-slo"),
@@ -566,14 +565,12 @@ async fn budget_report_identifies_each_id_that_names_no_slo() {
         Case {
             label: "an ARN of this account",
             id: slo_arn("absent-by-arn"),
-            name: "absent-by-arn",
             arn: slo_arn("absent-by-arn"),
         },
         Case {
             label: "an ARN of another Region",
             id: "arn:aws:application-signals:us-west-2:000000000000:slo/absent-elsewhere"
                 .to_string(),
-            name: "absent-elsewhere",
             arn: "arn:aws:application-signals:us-west-2:000000000000:slo/absent-elsewhere"
                 .to_string(),
         },
@@ -581,7 +578,6 @@ async fn budget_report_identifies_each_id_that_names_no_slo() {
             label: "an ARN of another account",
             id: "arn:aws:application-signals:eu-west-2:999999999999:slo/absent-other-account"
                 .to_string(),
-            name: "absent-other-account",
             arn: "arn:aws:application-signals:eu-west-2:999999999999:slo/absent-other-account"
                 .to_string(),
         },
@@ -609,12 +605,11 @@ async fn budget_report_identifies_each_id_that_names_no_slo() {
         response["Errors"]
     );
     for (case, error) in cases.iter().zip(errors.iter()) {
-        assert_eq!(
-            error["Name"].as_str(),
-            Some(case.name),
-            "case {:?}: expected Name {:?}, got {:?}",
+        assert!(
+            error["Name"].is_null(),
+            "case {:?}: expected no Name member on an entry for an id that names nothing, \
+             got {:?}",
             case.label,
-            case.name,
             error["Name"]
         );
         assert_eq!(
@@ -627,8 +622,8 @@ async fn budget_report_identifies_each_id_that_names_no_slo() {
         );
         assert_eq!(
             error["ErrorCode"].as_str(),
-            Some(NOT_FOUND_ERROR_CODE),
-            "case {:?}: expected ErrorCode {NOT_FOUND_ERROR_CODE:?}, got {:?}",
+            Some(CALLER_ERROR_CODE),
+            "case {:?}: expected ErrorCode {CALLER_ERROR_CODE:?}, got {:?}",
             case.label,
             error["ErrorCode"]
         );
@@ -697,14 +692,19 @@ async fn budget_report_resolves_each_id_independently() {
     );
 
     let errors = response["Errors"].as_array().cloned().unwrap_or_default();
+    // An entry names its item by the `Arn` alone, so the ids that erred are read off that
+    // member rather than off a name no entry carries.
     let mut erred: Vec<String> = errors
         .iter()
-        .map(|error| error["Name"].as_str().unwrap_or_default().to_string())
+        .map(|error| error["Arn"].as_str().unwrap_or_default().to_string())
         .collect();
     erred.sort();
     assert_eq!(
         erred,
-        vec!["ghost-elsewhere".to_string(), "ghost-slo".to_string()],
+        vec![
+            slo_arn("ghost-slo"),
+            "arn:aws:application-signals:us-west-2:000000000000:slo/ghost-elsewhere".to_string(),
+        ],
         "expected exactly the ids naming no SLO to err, got {:?}",
         response["Errors"]
     );
