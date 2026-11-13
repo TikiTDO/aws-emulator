@@ -999,3 +999,48 @@ async fn file_admission_matches_boot_and_reserves_temporary_publication_names() 
         b"ack"
     );
 }
+
+// Exercise the native binding/Row::get boundary used by the durable catalog. This
+// enables checked conversions, not a claim that SQLite can store every u64.
+#[test]
+fn native_catalog_unsigned_sql_boundaries_are_checked() {
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    for value in [0_u64, i64::MAX as u64] {
+        let actual: u64 = connection
+            .query_row("SELECT ?1", [value], |row| row.get(0))
+            .unwrap();
+        assert_eq!(actual, value);
+    }
+    let usize_boundary = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
+    for value in [0_usize, usize_boundary] {
+        let actual: usize = connection
+            .query_row("SELECT ?1", [value], |row| row.get(0))
+            .unwrap();
+        assert_eq!(actual, value);
+    }
+    for negative in [-1_i64, i64::MIN] {
+        let unsigned = connection.query_row("SELECT ?1", [negative], |row| row.get::<_, u64>(0));
+        assert!(
+            matches!(unsigned, Err(rusqlite::Error::IntegralValueOutOfRange(0, value)) if value == negative)
+        );
+        let size = connection.query_row("SELECT ?1", [negative], |row| row.get::<_, usize>(0));
+        assert!(
+            matches!(size, Err(rusqlite::Error::IntegralValueOutOfRange(0, value)) if value == negative)
+        );
+    }
+    for too_large in [i64::MAX as u64 + 1, u64::MAX] {
+        let unsigned = connection.query_row("SELECT ?1", [too_large], |row| row.get::<_, i64>(0));
+        assert!(matches!(
+            unsigned,
+            Err(rusqlite::Error::ToSqlConversionFailure(_))
+        ));
+        // On 32-bit targets no usize lies beyond SQLite's signed upper boundary.
+        if let Ok(size) = usize::try_from(too_large) {
+            let result = connection.query_row("SELECT ?1", [size], |row| row.get::<_, i64>(0));
+            assert!(matches!(
+                result,
+                Err(rusqlite::Error::ToSqlConversionFailure(_))
+            ));
+        }
+    }
+}
