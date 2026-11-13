@@ -26,6 +26,11 @@ hex = { workspace = true }
 # Digest of the listing a nextToken cursor was minted by, so the token is a resume
 # point for that listing alone and stays a fixed size however it was scoped.
 sha2 = { workspace = true }
+# The Amazon Connect instance gate both ConnectCampaigns API versions apply — whether the
+# account's Connect registry holds the `connectInstanceId` a request names, and the
+# distinction between an id it does not hold and a registry that could not be read at all:
+# the tree's one statement of that rule.
+service-common = { path = "../common" }
 # Amazon Connect's instance registry: an instance id is minted by Connect's
 # `CreateInstance` and by nothing else, so the instance-existence gate on onboarding
 # reads that store through the shared engine rather than keeping a second registry here.

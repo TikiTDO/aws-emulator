@@ -2067,65 +2067,38 @@ pub fn service_linked_role_arn() -> String {
 /// cannot disagree about a request they both refuse. The operations that address the
 /// instance's configuration itself answer
 /// [`instance_config_not_found_message`] instead.
+///
+/// The sentence itself is the shared gate's
+/// ([`::service_common::connect_instance_registry::INSTANCE_NOT_USABLE_MESSAGE`]), stated
+/// once for both ConnectCampaigns API versions, and named here because this service's own
+/// `ResourceNotFoundException` (HTTP 404) is what carries it.
 pub const INSTANCE_NOT_FOUND_MESSAGE: &str =
-    "Connect Instance does not exist or is not enabled to use Campaigns.";
-
-/// Whether the caller's Amazon Connect account holds an instance with
-/// `connect_instance_id`.
-///
-/// Amazon Connect owns the instance registry — `CreateInstance` is the only call that
-/// mints an instance id and `DeleteInstance` the only one that drops it — so the answer
-/// is read from THAT service's own store through the one shared engine rather than kept
-/// a second time here: an instance created or deleted over the Connect API is
-/// onboardable, or not, with no propagation step. It resolves by instance id alone,
-/// which is how every Connect operation that takes an `InstanceId` resolves one.
-///
-/// `None` when that store is unreachable (the engine is not the shared in-memory one),
-/// which a caller answers with a modelled server error exactly as it answers this
-/// service's own store being unavailable — never by treating the instance as absent.
-///
-/// LOCK ORDER: this takes the Connect store's lock, holds no other while it does, and
-/// hands back an owned value rather than a guard — so it is called with NO guard of
-/// this service's store held. Keeping the cross-service read one-directional and
-/// guard-free is what makes a lock cycle between the two stores unreachable.
-pub fn connect_instance_exists<Eng: Send + Sync + 'static>(
-    engine: &Eng,
-    connect_instance_id: &str,
-) -> Option<bool> {
-    let state =
-        ::service_com_amazonaws_connect_amazonconnectservice::state::service_state(engine)?;
-    let store = state.lock();
-    Some(store.instances.contains_key(connect_instance_id))
-}
+    ::service_common::connect_instance_registry::INSTANCE_NOT_USABLE_MESSAGE;
 
 /// What a request's Connect instance being unusable on REGISTRY grounds is, for the
 /// operations that merely require a usable instance (see
-/// [`INSTANCE_NOT_FOUND_MESSAGE`]).
-///
-/// Two outcomes, because they are answered differently: an id the account's registry
-/// does not hold is a request fault, while a registry this emulator cannot read at all
-/// is a server fault and never a reason to treat the instance as absent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstanceRegistryRefusal {
-    /// The account's Amazon Connect registry holds no instance under the id the
-    /// request names, so there is no usable campaign target: the modelled
-    /// `ResourceNotFoundException` carrying [`INSTANCE_NOT_FOUND_MESSAGE`].
-    NoSuchInstance,
-    /// The registry could not be read, so the existence question has no answer here:
-    /// the modelled server error carrying
-    /// [`INSTANCE_REGISTRY_UNAVAILABLE_MESSAGE`].
-    Unavailable,
-}
+/// [`INSTANCE_NOT_FOUND_MESSAGE`]): the shared gate's two outcomes
+/// ([`::service_common::connect_instance_registry`]), which both ConnectCampaigns API
+/// versions read the registry for and each answers with the error ITS own model names.
+pub use ::service_common::connect_instance_registry::ConnectInstanceRefusal;
 
 /// What this service answers when the Amazon Connect instance registry — another
 /// service's store, reached through the shared engine — cannot be read at all, so the
 /// one text is shared by every operation that resolves an instance against it.
 pub const INSTANCE_REGISTRY_UNAVAILABLE_MESSAGE: &str =
-    "the Amazon Connect instance registry is unavailable";
+    ::service_common::connect_instance_registry::REGISTRY_UNAVAILABLE_MESSAGE;
 
 /// The registry half of the usability class [`INSTANCE_NOT_FOUND_MESSAGE`] describes:
 /// `None` when `connect_instance_id` names an instance the account holds, and
 /// otherwise which refusal the caller owes.
+///
+/// The shared gate ([`::service_common::connect_instance_registry`]) over the registry
+/// owner's own read: Amazon Connect mints and drops every instance id — `CreateInstance`
+/// is the only call that mints one and `DeleteInstance` the only one that drops it — so
+/// the answer comes from THAT service's store through the one shared engine
+/// (`::service_com_amazonaws_connect_amazonconnectservice::state::registry_holds_instance`)
+/// rather than being kept a second time here: an instance created or deleted over the
+/// Connect API is onboardable, or not, with no propagation step.
 ///
 /// The one place that half is decided, so the operations that merely require a usable
 /// instance cannot disagree about a request they all refuse. The other half — whether
@@ -2134,18 +2107,20 @@ pub const INSTANCE_REGISTRY_UNAVAILABLE_MESSAGE: &str =
 /// ([`ComAmazonawsConnectcampaignsv2Amazonconnectcampaignservicev2State::is_onboarded`]),
 /// and both refuse with the same text.
 ///
-/// LOCK ORDER: this reads the Connect store (see [`connect_instance_exists`]), so it is
-/// called with NO guard of this service's store held — which is why a handler asks it
-/// BEFORE locking its own store.
+/// LOCK ORDER: the registry read takes the Connect store's lock, holds no other while it
+/// does, and hands back an owned value rather than a guard — so this is called with NO
+/// guard of this service's store held, which is why a handler asks it BEFORE locking its
+/// own store.
 pub fn connect_instance_registry_refusal<Eng: Send + Sync + 'static>(
     engine: &Eng,
     connect_instance_id: &str,
-) -> Option<InstanceRegistryRefusal> {
-    match connect_instance_exists(engine, connect_instance_id) {
-        Some(true) => None,
-        Some(false) => Some(InstanceRegistryRefusal::NoSuchInstance),
-        None => Some(InstanceRegistryRefusal::Unavailable),
-    }
+) -> Option<ConnectInstanceRefusal> {
+    ::service_common::connect_instance_registry::connect_instance_refusal(
+        ::service_com_amazonaws_connect_amazonconnectservice::state::registry_holds_instance(
+            engine,
+            connect_instance_id,
+        ),
+    )
 }
 
 /// The `InstanceOnboardingJobFailureCode` an onboarding job started with

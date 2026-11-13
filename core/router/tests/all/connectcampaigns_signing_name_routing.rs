@@ -23,7 +23,6 @@
 //! a stub — and a path neither version models is refused only because nobody claims it.
 
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use bytes::Bytes;
 use serde_json::Value;
@@ -91,26 +90,14 @@ fn build_router() -> MultiServiceRouter {
 /// `StartInstanceOnboardingJob` resolves a `connectInstanceId` against.
 ///
 /// Written into Connect's store rather than created over `CreateInstance`, because that
-/// call mints the id it stores while these route rows name a fixed one; it is the
-/// record that call writes, already past its clock-owed activation instant.
+/// call mints the id it stores while these route rows name a fixed one. The write is the
+/// registration seam the Connect crate exposes, the one statement of the record a
+/// registration writes — the record that call writes, already past its clock-owed
+/// activation instant.
 fn register_connect_instance(engine: &engine::InMemoryEngine, instance: &str) {
-    let state = connect_state::service_state(engine)
-        .expect("the shared in-memory engine carries Amazon Connect's store");
-    let now = SystemTime::now();
-    state.lock().instances.insert(
-        instance.to_string(),
-        // The record Connect's own `CreateInstance` writes, built through the
-        // constructor that crate exposes, so a member added to that record reaches this
-        // fixture with it.
-        connect_state::InstanceRecord::new(
-            "us-east-1",
-            instance,
-            "CONNECT_MANAGED",
-            Some(instance.to_string()),
-            now,
-            // Already past its clock-owed activation instant.
-            now,
-        ),
+    assert!(
+        connect_state::register_instance(engine, "us-east-1", instance),
+        "instance {instance:?}: Amazon Connect's registry took no record"
     );
 }
 

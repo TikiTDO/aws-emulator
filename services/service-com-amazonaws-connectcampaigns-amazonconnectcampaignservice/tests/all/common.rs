@@ -198,31 +198,15 @@ pub async fn call(
 /// is the record that call writes, already past the clock-owed activation instant so the
 /// instance is active. Registering an id the registry already holds leaves the stored
 /// record alone, so the step is cheap to repeat.
+///
+/// The write itself is the registration seam the Connect crate exposes
+/// (`connect_state::register_instance`), the one statement of the record a registration
+/// writes — so this suite and every other that registers an instance cannot drift on its
+/// shape.
 pub fn register_connect_instance(engine: &engine::InMemoryEngine, region: &str, instance: &str) {
-    let state = connect_state::service_state(engine)
-        .expect("the shared in-memory engine carries Amazon Connect's store");
-    let mut store = state.lock();
-    if store.instances.contains_key(instance) {
-        return;
-    }
-    let now = SystemTime::now();
-    store.instances.insert(
-        instance.to_string(),
-        // The record Connect's own `CreateInstance` writes, built through the
-        // constructor that crate exposes, so a member added to that record reaches this
-        // fixture with it.
-        connect_state::InstanceRecord::new(
-            region,
-            instance,
-            // `DirectoryType`'s catalog in the Connect crate opens with the type an
-            // instance Connect manages itself carries.
-            "CONNECT_MANAGED",
-            Some(instance.to_string()),
-            now,
-            // Already past the clock-owed activation instant, so the instance is
-            // active.
-            now,
-        ),
+    assert!(
+        connect_state::register_instance(engine, region, instance),
+        "instance {instance:?} in {region}: Amazon Connect's registry took no record"
     );
 }
 
@@ -231,8 +215,5 @@ pub fn register_connect_instance(engine: &engine::InMemoryEngine, region: &str, 
 /// campaign create is gated on, which is how a case reaches an id the account no longer
 /// holds.
 pub fn deregister_connect_instance(engine: &engine::InMemoryEngine, instance: &str) -> bool {
-    let state = connect_state::service_state(engine)
-        .expect("the shared in-memory engine carries Amazon Connect's store");
-    let mut store = state.lock();
-    store.instances.remove(instance).is_some()
+    connect_state::deregister_instance(engine, instance)
 }

@@ -283,7 +283,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &input.connect_instance_id,
         ) {
             None => {}
-            Some(crate::state::InstanceRegistryRefusal::NoSuchInstance) => {
+            Some(crate::state::ConnectInstanceRefusal::NoSuchInstance) => {
                 return Err(CreateCampaignErrorModeled::ResourceNotFoundException(
                     ResourceNotFoundException {
                         message: crate::state::INSTANCE_NOT_FOUND_MESSAGE.to_string(),
@@ -292,7 +292,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
                 .into())
             }
-            Some(crate::state::InstanceRegistryRefusal::Unavailable) => {
+            Some(crate::state::ConnectInstanceRefusal::RegistryUnavailable) => {
                 return Err(CreateCampaignErrorModeled::InternalServerException(
                     InternalServerException {
                         message: crate::state::INSTANCE_REGISTRY_UNAVAILABLE_MESSAGE.to_string(),

@@ -11503,6 +11503,7 @@ dependencies = [
  "serde_json",
  "service-com-amazonaws-connect-amazonconnectservice",
  "service-com-amazonaws-kms-trentservice",
+ "service-common",
  "sha2 0.10.9",
  "tokio",
  "tracing",

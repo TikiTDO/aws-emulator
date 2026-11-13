@@ -338,6 +338,12 @@ pub mod api_gateway_access_logs;
 /// every service whose API takes one and then writes into the group it names — so two
 /// services asked whether CloudWatch Logs could hold a name cannot answer differently.
 pub mod cloudwatch_logs;
+/// The ONE gate on whether the account's Amazon Connect instance registry holds the
+/// instance id a request names — and the ONE distinction between an id the account does not
+/// hold (a request fault) and a registry that could not be read at all (a server fault) —
+/// for every service whose operations require a usable Connect instance, so two of them
+/// cannot disagree about a request they both refuse.
+pub mod connect_instance_registry;
 pub mod db_data_sources;
 /// The ONE rendering of a DynamoDB STREAM RECORD as the envelope a consumer of that stream
 /// is handed one in, for every service that reads a table's stream and passes its records on

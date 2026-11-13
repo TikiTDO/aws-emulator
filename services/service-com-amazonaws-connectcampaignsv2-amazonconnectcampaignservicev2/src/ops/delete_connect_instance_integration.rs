@@ -240,7 +240,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &input.connect_instance_id,
         ) {
             None => {}
-            Some(crate::state::InstanceRegistryRefusal::NoSuchInstance) => {
+            Some(crate::state::ConnectInstanceRefusal::NoSuchInstance) => {
                 crate::state::audit_onboarding_change(
                     ctx.parts(),
                     Self::NAME,
@@ -257,7 +257,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .into(),
                 );
             }
-            Some(crate::state::InstanceRegistryRefusal::Unavailable) => {
+            Some(crate::state::ConnectInstanceRefusal::RegistryUnavailable) => {
                 return Err(
                     DeleteConnectInstanceIntegrationErrorModeled::InternalServerException(
                         crate::state::instance_server_fault(

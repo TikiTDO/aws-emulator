@@ -226,7 +226,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `CreateCampaign` answers a bad request.
         match crate::state::connect_instance_refusal(&*self.engine, &input.connect_instance_id) {
             None => {}
-            Some(crate::state::InstanceRefusal::NotUsable) => {
+            Some(crate::state::ConnectInstanceRefusal::NoSuchInstance) => {
                 audit("ResourceNotFoundException");
                 return Err(StartInstanceOnboardingJobErrorModeled::ResourceNotFoundException(
                     ResourceNotFoundException {
@@ -238,7 +238,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
                 .into());
             }
-            Some(crate::state::InstanceRefusal::RegistryUnavailable) => {
+            Some(crate::state::ConnectInstanceRefusal::RegistryUnavailable) => {
                 audit("InternalServerException");
                 return Err(StartInstanceOnboardingJobErrorModeled::InternalServerException(
                     InternalServerException {

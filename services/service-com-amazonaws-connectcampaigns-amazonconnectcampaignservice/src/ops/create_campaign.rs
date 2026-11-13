@@ -190,14 +190,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // which is a server error and never an absent instance.
         match crate::state::connect_instance_refusal(&*self.engine, &input.connect_instance_id) {
             None => {}
-            Some(crate::state::InstanceRefusal::NotUsable) => {
+            Some(crate::state::ConnectInstanceRefusal::NoSuchInstance) => {
                 return Err(CreateCampaignErrorModeled::ValidationException(ValidationException {
                     message: crate::state::INSTANCE_NOT_USABLE_MESSAGE.to_string(),
                     x_amz_error_type: None,
                 })
                 .into())
             }
-            Some(crate::state::InstanceRefusal::RegistryUnavailable) => {
+            Some(crate::state::ConnectInstanceRefusal::RegistryUnavailable) => {
                 return Err(CreateCampaignErrorModeled::InternalServerException(
                     InternalServerException {
                         message: crate::state::INSTANCE_REGISTRY_UNAVAILABLE_MESSAGE.to_string(),

@@ -143,35 +143,15 @@ impl Harness {
 /// clock-owed activation instant so the instance is ACTIVE. Registering an id the
 /// registry already holds leaves the stored record alone, so the step is cheap to
 /// repeat.
-pub fn register_connect_instance(
-    engine: &engine::InMemoryEngine,
-    region: &str,
-    instance: &str,
-) {
-    let state = connect_state::service_state(engine)
-        .expect("the shared in-memory engine carries Amazon Connect's store");
-    let mut store = state.lock();
-    if store.instances.contains_key(instance) {
-        return;
-    }
-    let now = SystemTime::now();
-    store.instances.insert(
-        instance.to_string(),
-        // The record Connect's own `CreateInstance` writes, built through the
-        // constructor that crate exposes, so a member added to that record reaches this
-        // fixture with it.
-        connect_state::InstanceRecord::new(
-            region,
-            instance,
-            // `DirectoryType`'s catalog (DIRECTORY_TYPE_VALUES in the Connect crate's
-            // `ops::types`) opens with the type an instance Connect manages itself
-            // carries.
-            "CONNECT_MANAGED",
-            Some(instance.to_string()),
-            now,
-            // Already past the clock-owed activation instant, so the instance is ACTIVE.
-            now,
-        ),
+///
+/// The write itself is the registration seam the Connect crate exposes
+/// (`connect_state::register_instance`), the one statement of the record a registration
+/// writes — so this suite and every other that registers an instance cannot drift on its
+/// shape.
+pub fn register_connect_instance(engine: &engine::InMemoryEngine, region: &str, instance: &str) {
+    assert!(
+        connect_state::register_instance(engine, region, instance),
+        "instance {instance:?} in {region}: Amazon Connect's registry took no record"
     );
 }
 
@@ -183,10 +163,7 @@ pub fn register_connect_instance(
 /// The registry is keyed by instance id, as every Connect operation that takes an
 /// `InstanceId` resolves one, so no region is needed.
 pub fn deregister_connect_instance(engine: &engine::InMemoryEngine, instance: &str) -> bool {
-    let state = connect_state::service_state(engine)
-        .expect("the shared in-memory engine carries Amazon Connect's store");
-    let mut store = state.lock();
-    store.instances.remove(instance).is_some()
+    connect_state::deregister_instance(engine, instance)
 }
 
 /// Drive one request and return its status and parsed JSON body (`Value::Null` for

@@ -182,7 +182,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &input.connect_instance_id,
         ) {
             None => {}
-            Some(crate::state::InstanceRegistryRefusal::NoSuchInstance) => {
+            Some(crate::state::ConnectInstanceRefusal::NoSuchInstance) => {
                 return Err(
                     ListConnectInstanceIntegrationsErrorModeled::ResourceNotFoundException(
                         ResourceNotFoundException {
@@ -193,7 +193,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .into(),
                 );
             }
-            Some(crate::state::InstanceRegistryRefusal::Unavailable) => {
+            Some(crate::state::ConnectInstanceRefusal::RegistryUnavailable) => {
                 return Err(
                     ListConnectInstanceIntegrationsErrorModeled::InternalServerException(
                         InternalServerException {

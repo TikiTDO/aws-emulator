@@ -1149,67 +1149,59 @@ pub fn campaign_ids_over_cap_message(campaign_ids: &[String]) -> String {
     ::aws_smithy_schema_server::envelope(&[violation]).unwrap_or_default()
 }
 
+/// Why the Amazon Connect instance a request names is not a campaign target, as
+/// [`connect_instance_refusal`] reports it: the shared gate's two outcomes
+/// ([`::service_common::connect_instance_registry`]), which both ConnectCampaigns API
+/// versions read the registry for and each answers with the error ITS own model names.
+pub use ::service_common::connect_instance_registry::ConnectInstanceRefusal;
+
 /// What this service answers when the Amazon Connect instance a request names is not one
 /// Campaigns can be used with: the account holds no instance under that id, or the
 /// instance it holds is not enabled for Campaigns.
 ///
 /// A FIXED service string — it names no instance and carries nothing from the request —
-/// so every refusal of this class reads the same and the response is deterministic.
+/// so every refusal of this class reads the same and the response is deterministic. The
+/// sentence itself is the shared gate's
+/// ([`::service_common::connect_instance_registry::INSTANCE_NOT_USABLE_MESSAGE`]), stated
+/// once for both API versions, and named here because this service's own
+/// `ValidationException` (HTTP 400) is what carries it.
 pub const INSTANCE_NOT_USABLE_MESSAGE: &str =
-    "Connect Instance does not exist or is not enabled to use Campaigns.";
+    ::service_common::connect_instance_registry::INSTANCE_NOT_USABLE_MESSAGE;
 
 /// What this service answers when the Amazon Connect instance registry — another
 /// service's store, reached through the shared engine — cannot be read at all, so the
-/// instance question has no answer here.
+/// instance question has no answer here. The shared gate's sentence for that outcome.
 pub const INSTANCE_REGISTRY_UNAVAILABLE_MESSAGE: &str =
-    "the Amazon Connect instance registry is unavailable";
-
-/// Why the Amazon Connect instance a request names is not a campaign target, as
-/// [`connect_instance_refusal`] reports it.
-///
-/// Two outcomes, because they are answered differently: an id the account's registry
-/// does not hold is a request fault, while a registry this emulator cannot read at all
-/// is a server fault and never a reason to treat the instance as absent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstanceRefusal {
-    /// The account holds no Connect instance under the id the request names, so there
-    /// is nothing Campaigns could be used with: the modelled `ValidationException`
-    /// (HTTP 400) carrying [`INSTANCE_NOT_USABLE_MESSAGE`].
-    NotUsable,
-    /// The registry could not be read, so the existence question has no answer: the
-    /// modelled server error carrying [`INSTANCE_REGISTRY_UNAVAILABLE_MESSAGE`].
-    RegistryUnavailable,
-}
+    ::service_common::connect_instance_registry::REGISTRY_UNAVAILABLE_MESSAGE;
 
 /// Whether the Connect instance `connect_instance_id` names is one this service's
 /// operations may be used with: `None` when it is, and otherwise which refusal the
 /// caller owes.
 ///
-/// Amazon Connect owns the instance registry — its `CreateInstance` is the only call
-/// that mints an instance id and its `DeleteInstance` the only one that drops it — so
-/// the answer is read from THAT service's own store through the one shared engine rather
-/// than kept a second time here: an instance created or deleted over the Connect API is
-/// a campaign target, or not, with no propagation step. It resolves by instance id
-/// alone, which is how every Connect operation that takes an instance id resolves one.
+/// The shared gate ([`::service_common::connect_instance_registry`]) over the registry
+/// owner's own read: Amazon Connect mints and drops every instance id, so the answer comes
+/// from THAT service's store through the one shared engine
+/// (`::service_com_amazonaws_connect_amazonconnectservice::state::registry_holds_instance`)
+/// rather than being kept a second time here — an instance created or deleted over the
+/// Connect API is a campaign target, or not, with no propagation step.
 ///
-/// The one place this gate is decided, so the operations that require a usable instance
-/// cannot disagree about a request they all refuse.
+/// The one place this service decides that gate, so the operations that require a usable
+/// instance cannot disagree about a request they all refuse.
 ///
-/// LOCK ORDER: this takes the Connect store's lock, holds no other while it does, and
-/// hands back an owned value rather than a guard — so it is called with NO guard of this
-/// service's own store held. Keeping the cross-service read one-directional and
-/// guard-free is what makes a lock cycle between the two stores unreachable.
+/// LOCK ORDER: the registry read takes the Connect store's lock, holds no other while it
+/// does, and hands back an owned value rather than a guard — so this is called with NO
+/// guard of this service's own store held. Keeping the cross-service read one-directional
+/// and guard-free is what makes a lock cycle between the two stores unreachable.
 pub fn connect_instance_refusal<Eng: Send + Sync + 'static>(
     engine: &Eng,
     connect_instance_id: &str,
-) -> Option<InstanceRefusal> {
-    let Some(state) =
-        ::service_com_amazonaws_connect_amazonconnectservice::state::service_state(engine)
-    else {
-        return Some(InstanceRefusal::RegistryUnavailable);
-    };
-    let held = state.lock().instances.contains_key(connect_instance_id);
-    (!held).then_some(InstanceRefusal::NotUsable)
+) -> Option<ConnectInstanceRefusal> {
+    ::service_common::connect_instance_registry::connect_instance_refusal(
+        ::service_com_amazonaws_connect_amazonconnectservice::state::registry_holds_instance(
+            engine,
+            connect_instance_id,
+        ),
+    )
 }
 
 /// This service's store in the shared engine: call it with a handler's `&*self.engine`.

@@ -125,6 +125,8 @@ mod profile_outbound_requests;
 mod profile_request_event_trigger_context;
 #[path = "all/region_scoping.rs"]
 mod region_scoping;
+#[path = "all/shared_connect_instance_gate.rs"]
+mod shared_connect_instance_gate;
 #[path = "all/signing_name_path_claim.rs"]
 mod signing_name_path_claim;
 #[path = "all/state_roundtrip.rs"]

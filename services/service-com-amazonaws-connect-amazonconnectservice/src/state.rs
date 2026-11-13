@@ -1658,6 +1658,100 @@ pub fn paginate<T>(
     (items, next_token)
 }
 
+/// Whether the account's instance registry holds an instance under
+/// `connect_instance_id`: the ONE read of this registry by a crate other than this one.
+///
+/// Amazon Connect owns the instance registry — `CreateInstance` is the only call that
+/// mints an instance id and `DeleteInstance` the only one that drops it — so a service
+/// whose operations require a usable instance resolves the id HERE rather than keeping a
+/// registry of its own. It resolves by instance id alone, which is how every operation
+/// that takes an `InstanceId` resolves one, and reading it changes nothing a later caller
+/// sees.
+///
+/// `None` when this store cannot be reached at all (the engine is not the shared in-memory
+/// one), which a caller answers with a modelled server error exactly as it answers its own
+/// store being unavailable — never by treating the instance as absent.
+///
+/// LOCK ORDER: this takes THIS store's lock, holds no other while it does, and hands back
+/// an owned value rather than a guard — so a caller asks it with NO guard of its own store
+/// held, which keeps the cross-service read one-directional and a lock cycle between the
+/// two stores unreachable.
+pub fn registry_holds_instance<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    connect_instance_id: &str,
+) -> Option<bool> {
+    let state = service_state(engine)?;
+    let holds = state.lock().instances.contains_key(connect_instance_id);
+    Some(holds)
+}
+
+/// The modelled `DirectoryType` an instance [`register_instance`] writes carries: the
+/// value for an instance Amazon Connect manages itself, from the catalog
+/// `crate::ops::types::DIRECTORY_TYPE_VALUES` declares.
+pub const REGISTERED_INSTANCE_DIRECTORY_TYPE: &str = "CONNECT_MANAGED";
+
+/// Give the account an instance with id `connect_instance_id` in `region`, reporting
+/// whether the registry holds that instance once this returns.
+///
+/// The WRITE seam of [`registry_holds_instance`], and the companion of
+/// [`InstanceRecord::new`]: a crate other than this one that needs the account to hold an
+/// instance under an id IT chose — rather than the id `CreateInstance` mints — registers it
+/// through this one function, so the record such a registration writes is stated once and
+/// grows with the record itself. The record is the one `CreateInstance` writes: aliased by
+/// its own id, with [`REGISTERED_INSTANCE_DIRECTORY_TYPE`], and already past the clock-owed
+/// activation instant ([`INSTANCE_ACTIVATION_DELAY`]), so the instance is `ACTIVE`.
+///
+/// Idempotent: an id the registry already holds keeps the record it holds and this answers
+/// `true`. It answers `false` only when this store cannot be reached, or when the registry
+/// is already at [`INSTANCE_QUOTA`] — the bound every writer of this map keeps.
+///
+/// LOCK ORDER: as [`registry_holds_instance`].
+pub fn register_instance<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    region: &str,
+    connect_instance_id: &str,
+) -> bool {
+    let Some(state) = service_state(engine) else {
+        return false;
+    };
+    let mut store = state.lock();
+    if store.instances.contains_key(connect_instance_id) {
+        return true;
+    }
+    if store.instances.len() >= INSTANCE_QUOTA {
+        return false;
+    }
+    let now = SystemTime::now();
+    store.instances.insert(
+        connect_instance_id.to_string(),
+        InstanceRecord::new(
+            region,
+            connect_instance_id,
+            REGISTERED_INSTANCE_DIRECTORY_TYPE,
+            Some(connect_instance_id.to_string()),
+            now,
+            now,
+        ),
+    );
+    true
+}
+
+/// Take the account's instance `connect_instance_id` back out of the registry, reporting
+/// whether a record was removed — the effect `DeleteInstance` has on it, for a crate other
+/// than this one that needs an id the account no longer holds.
+///
+/// LOCK ORDER: as [`registry_holds_instance`].
+pub fn deregister_instance<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    connect_instance_id: &str,
+) -> bool {
+    let Some(state) = service_state(engine) else {
+        return false;
+    };
+    let mut store = state.lock();
+    store.instances.remove(connect_instance_id).is_some()
+}
+
 /// This service's store in the shared engine: call it with a handler's `&*self.engine`.
 ///
 /// Answer `None` with a modelled server error, never with a fresh engine.
