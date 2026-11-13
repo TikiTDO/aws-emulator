@@ -11,7 +11,9 @@
 //!
 //! The runtime is the Docker Engine API, spoken over HTTP/1.1 on its Unix socket
 //! ([`SOCKET_VARIABLE`], default [`DEFAULT_SOCKET`]). Every container this emulator starts is
-//! attached to ONE network ([`NETWORK_VARIABLE`], default [`DEFAULT_NETWORK`]) and carries the
+//! attached to ONE network ([`NETWORK_VARIABLE`], default [`DEFAULT_NETWORK`]) on ONE subnet
+//! ([`SUBNET_VARIABLE`], default [`DEFAULT_SUBNET`], gateway its first address — the address the
+//! emulator binds so containers reach it, and the sandbox DNS answers on) and carries the
 //! label [`MANAGED_LABEL`], so a restarted emulator can find what it started and nothing it did
 //! not start is ever touched.
 //!
@@ -34,6 +36,11 @@ pub const DEFAULT_SOCKET: &str = "/var/run/docker.sock";
 pub const NETWORK_VARIABLE: &str = "EMULATOR_HOST_NETWORK";
 /// The network every started container joins when the variable is unset.
 pub const DEFAULT_NETWORK: &str = "aws-emulator";
+/// The environment variable naming the network's IPv4 subnet, as a CIDR.
+pub const SUBNET_VARIABLE: &str = "EMULATOR_HOST_SUBNET";
+/// The subnet when the variable is unset: its gateway, 172.25.0.1, is the emulator's bind address
+/// and the sandbox DNS server's.
+pub const DEFAULT_SUBNET: &str = "172.25.0.0/16";
 /// The label every container this emulator starts carries.
 pub const MANAGED_LABEL: &str = "aws-emulator.managed";
 /// The Docker Engine API version spoken.
@@ -107,6 +114,7 @@ pub struct ContainerStatus {
 pub struct HostRuntime {
     socket: PathBuf,
     network: String,
+    subnet: String,
 }
 
 impl Default for HostRuntime {
@@ -116,6 +124,7 @@ impl Default for HostRuntime {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from(DEFAULT_SOCKET)),
             network: std::env::var(NETWORK_VARIABLE).unwrap_or_else(|_| DEFAULT_NETWORK.to_string()),
+            subnet: std::env::var(SUBNET_VARIABLE).unwrap_or_else(|_| DEFAULT_SUBNET.to_string()),
         }
     }
 }
@@ -260,19 +269,17 @@ impl HostRuntime {
         }
     }
 
+    /// Make sure the network exists on the configured subnet. A network of that name on another
+    /// subnet is refused rather than joined: the emulator's address would not be on it.
     async fn ensure_network(&self) -> Result<(), RuntimeError> {
         let network = self.network.clone();
         match self
             .call("GET", &format!("/networks/{}", query_escaped(&network)), None, CALL_TIMEOUT)
             .await
         {
-            Ok(_) => Ok(()),
+            Ok((_, existing)) => check_subnet(&existing, &network, &self.subnet),
             Err(RuntimeError { status: Some(404), .. }) => {
-                let body = json!({
-                    "Name": network,
-                    "Driver": "bridge",
-                    "Labels": { MANAGED_LABEL: "true" },
-                });
+                let body = network_body(&network, &self.subnet)?;
                 match self.call("POST", "/networks/create", Some(body), CALL_TIMEOUT).await {
                     // 409: created concurrently by another service.
                     Ok(_) | Err(RuntimeError { status: Some(409), .. }) => Ok(()),
@@ -348,6 +355,45 @@ impl HostRuntime {
                     .unwrap_or_else(|| String::from_utf8_lossy(&bytes).trim().to_string()),
             })
         }
+    }
+}
+
+/// The gateway of an IPv4 `subnet` CIDR: its first address.
+fn gateway_of(subnet: &str) -> Result<std::net::Ipv4Addr, RuntimeError> {
+    let invalid = || unreachable(format!("{SUBNET_VARIABLE}={subnet:?} is not an IPv4 CIDR"));
+    let (address, prefix) = subnet.split_once('/').ok_or_else(invalid)?;
+    let address: std::net::Ipv4Addr = address.parse().map_err(|_| invalid())?;
+    let prefix: u32 = prefix.parse().ok().filter(|prefix| *prefix <= 30).ok_or_else(invalid)?;
+    let mask = u32::MAX.checked_shl(32 - prefix).unwrap_or(0);
+    Ok(std::net::Ipv4Addr::from((u32::from(address) & mask) + 1))
+}
+
+/// The body of `POST /networks/create` for `network` on `subnet`.
+fn network_body(network: &str, subnet: &str) -> Result<Value, RuntimeError> {
+    let gateway = gateway_of(subnet)?;
+    Ok(json!({
+        "Name": network,
+        "Driver": "bridge",
+        "Labels": { MANAGED_LABEL: "true" },
+        "IPAM": { "Config": [{ "Subnet": subnet, "Gateway": gateway.to_string() }] },
+    }))
+}
+
+/// Whether an existing network (`GET /networks/{name}`) is on `subnet`.
+fn check_subnet(existing: &Value, network: &str, subnet: &str) -> Result<(), RuntimeError> {
+    let subnets: Vec<&str> = existing["IPAM"]["Config"]
+        .as_array()
+        .map(|configs| configs.iter().filter_map(|config| config["Subnet"].as_str()).collect())
+        .unwrap_or_default();
+    if subnets.contains(&subnet) {
+        Ok(())
+    } else {
+        Err(RuntimeError {
+            status: Some(409),
+            message: format!(
+                "network {network} exists on {subnets:?}, not {subnet}; remove it or set {SUBNET_VARIABLE}"
+            ),
+        })
     }
 }
 
@@ -480,5 +526,25 @@ mod tests {
     #[test]
     fn a_label_filter_is_query_escaped() {
         assert_eq!(query_escaped("a=b c"), "a%3Db%20c");
+    }
+
+    #[test]
+    fn the_network_is_created_on_the_subnet_with_its_first_address_as_gateway() {
+        let body = network_body("net", "172.25.0.0/16").unwrap();
+        assert_eq!(body["IPAM"]["Config"][0]["Subnet"], "172.25.0.0/16");
+        assert_eq!(body["IPAM"]["Config"][0]["Gateway"], "172.25.0.1");
+        assert_eq!(gateway_of("10.9.8.7/24").unwrap().to_string(), "10.9.8.1");
+        assert!(gateway_of("172.25.0.0").is_err());
+        assert!(gateway_of("not-an-address/16").is_err());
+    }
+
+    #[test]
+    fn an_existing_network_on_another_subnet_is_refused() {
+        let on = json!({ "IPAM": { "Config": [{ "Subnet": "172.25.0.0/16" }] } });
+        let off = json!({ "IPAM": { "Config": [{ "Subnet": "172.18.0.0/16" }] } });
+        assert!(check_subnet(&on, "net", "172.25.0.0/16").is_ok());
+        let error = check_subnet(&off, "net", "172.25.0.0/16").unwrap_err();
+        assert_eq!(error.status, Some(409));
+        assert!(error.message.contains("172.18.0.0/16"));
     }
 }
