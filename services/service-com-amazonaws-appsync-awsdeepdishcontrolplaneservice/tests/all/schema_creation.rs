@@ -51,6 +51,14 @@ use crate::source_api_association::{call, create_api, router, Answer, ACCOUNT, R
 /// instant.
 pub(crate) const PAST_THE_CREATION: Duration = Duration::from_millis(250);
 
+/// How long a wait for a scheduled creation keeps looking before it gives up: the
+/// service's own span (`state::SCHEMA_CREATION_SPAN`) with room for a machine far slower
+/// than this one, so nothing that waits depends on how fast the host runs.
+pub(crate) const CREATION_DEADLINE: Duration = Duration::from_secs(60);
+
+/// How long such a wait leaves between two looks at the creation's status.
+pub(crate) const POLL_SPACING: Duration = Duration::from_millis(25);
+
 /// Every value of the `SchemaStatus` enum — the whole set the `status` member of either
 /// schema operation can take.
 ///
@@ -92,6 +100,27 @@ pub(crate) async fn start_creation(
 /// Read the schema creation status of `api_id`.
 pub(crate) async fn creation_status(router: &MultiServiceRouter, api_id: &str) -> Answer {
     call(router, "GET", &schema_path(api_id), None).await
+}
+
+/// Wait until the schema creation `api_id` has pending has been performed.
+///
+/// A wait on the CONDITION rather than on a fixed time: the transition is one the clock
+/// owes, so the status is read again until it reports it or [`CREATION_DEADLINE`] passes,
+/// and a loaded machine and a fast one reach the same assertion. Shared by every suite
+/// that has to observe the far side of a creation.
+pub(crate) async fn await_creation(router: &MultiServiceRouter, api_id: &str, case: &str) {
+    let deadline = tokio::time::Instant::now() + CREATION_DEADLINE;
+    loop {
+        let settled = creation_status(router, api_id).await;
+        if settled.body["status"].as_str() == Some(state::SCHEMA_SUCCESS) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "case {case}: expected the schema creation to have been performed, got {settled:?}"
+        );
+        tokio::time::sleep(POLL_SPACING).await;
+    }
 }
 
 /// Read the type `type_name` of `api_id` back, in `format`.
@@ -372,8 +401,11 @@ async fn a_created_schema_is_the_types_its_document_declares() {
         apis.push(api.id);
     }
 
-    // Nothing is called in between: the transitions below are owed by the clock.
-    tokio::time::sleep(state::SCHEMA_CREATION_SPAN + PAST_THE_CREATION).await;
+    // No creation is started or changed in between: the transitions below are the ones
+    // the clock owes, and the wait looks again for them rather than for a fixed time.
+    for (row, api_id) in rows.iter().zip(&apis) {
+        await_creation(&router, api_id, row.label).await;
+    }
 
     for (row, api_id) in rows.iter().zip(&apis) {
         let settled = creation_status(&router, api_id).await;
@@ -434,12 +466,12 @@ async fn a_created_schema_is_the_types_its_document_declares() {
                 declared.name,
                 r#type["arn"]
             );
-            // The SDL reported is the document's own text for that one type, so it
+            // The SDL reported is the service's rendering of that one type, so it
             // declares the name the type is addressed by.
             let sdl = r#type["definition"].as_str().unwrap_or_default();
             assert!(
                 sdl.contains(declared.name),
-                "case {:?} type {:?}: expected the document's own definition text, got {sdl:?}",
+                "case {:?} type {:?}: expected the type's own definition text, got {sdl:?}",
                 row.label,
                 declared.name
             );

@@ -7,9 +7,10 @@
 //! format" (`CreateTypeRequest$definition`), so a stored type keeps the SDL text the
 //! caller wrote together with the definition that text parses to. The
 //! `TypeDefinitionFormat` a call names then chooses the REPRESENTATION the reported
-//! `Type$definition` carries — the SDL the type was defined with, or the type's
-//! introspection JSON — and that JSON is computed from the definitions the API holds,
-//! never from the request.
+//! `Type$definition` carries — the type's SDL, or its introspection JSON — and both are
+//! computed from the definitions the API holds, never from the request: a READ answers
+//! the service's own SDL rendering of the parsed type (`super::type_sdl`), while the call
+//! that STATED a definition answers that definition as it was written.
 //!
 //! The parse is a real GraphQL parse (`apollo-parser`), so what the service accepts is
 //! what GraphQL's SDL grammar accepts, and a definition it cannot parse is refused
@@ -90,21 +91,21 @@ pub const BUILT_IN_SCALARS: &[&str] = &[
 ];
 
 /// The directive a field or enum value is marked deprecated with.
-const DEPRECATED_DIRECTIVE: &str = "deprecated";
+pub(crate) const DEPRECATED_DIRECTIVE: &str = "deprecated";
 
 /// The argument [`DEPRECATED_DIRECTIVE`] states its reason in.
-const DEPRECATED_REASON_ARGUMENT: &str = "reason";
+pub(crate) const DEPRECATED_REASON_ARGUMENT: &str = "reason";
 
 /// The reason introspection reports for a deprecation whose directive names none:
 /// `@deprecated`'s `reason` argument has exactly this default in GraphQL's own
 /// definition of the directive.
-const DEFAULT_DEPRECATION_REASON: &str = "No longer supported";
+pub(crate) const DEFAULT_DEPRECATION_REASON: &str = "No longer supported";
 
 /// One stored GraphQL type of a `GraphqlApiRecord`.
 ///
 /// Keeps the definition as the caller wrote it AND the definition it parses to: the
-/// first is what an SDL report answers with, the second is what a JSON report is
-/// rendered from, so the two representations of one type cannot disagree.
+/// first is what the call that stated it answers with, the second is what every REPORT of
+/// the type is rendered from, so no two representations of one type can disagree.
 #[derive(Debug, Clone)]
 pub struct TypeRecord {
     /// Creation order, used to keep a listing (and its `nextToken` cursor) stable
@@ -119,30 +120,70 @@ pub struct TypeRecord {
 }
 
 impl TypeRecord {
-    /// This record as the modelled `Type` shape, with its definition in `format`.
+    /// This record as the modelled `Type` shape a READ of the type answers with, with its
+    /// definition in `format`.
     ///
-    /// The single projection every operation that reports a type answers with, so a
-    /// create and the reads after it cannot disagree about one type. `api_types` is the
-    /// set of types the type's own API holds, which the JSON rendering resolves type
-    /// references against.
+    /// The single projection every operation that REPORTS a stored type answers with, so
+    /// a type read on its own and the same type read in a listing carry the same body.
+    /// Both representations are rendered from the parsed definition — the type's
+    /// introspection JSON, or the service's own SDL printing of it
+    /// ([`TypeDefinition::render_sdl`]) — so one type is reported with one document
+    /// however it got into the API, and never with the text a request supplied.
+    /// `api_types` is the set of types the type's own API holds, which the JSON rendering
+    /// resolves type references against.
     pub fn to_type(&self, format: &str, api_types: &BTreeMap<String, TypeRecord>) -> Type {
+        self.projected(format, self.rendered_definition(format, api_types))
+    }
+
+    /// This record as the modelled `Type` shape the call that STATED its definition —
+    /// the create, or the update that carried one — answers with.
+    ///
+    /// Recorded behaviour: such a call reports the definition back as the request wrote
+    /// it, while every later read reports the service's own rendering of the stored type
+    /// ([`Self::to_type`]).
+    pub fn to_stated_type(&self, format: &str, api_types: &BTreeMap<String, TypeRecord>) -> Type {
+        self.projected(format, self.stated_definition(format, api_types))
+    }
+
+    /// This record as the modelled `Type` shape carrying `definition`: every other member
+    /// comes from the stored record whichever call is answering.
+    fn projected(&self, format: &str, definition: String) -> Type {
         Type {
             name: Some(self.parsed.name.clone()),
             description: self.parsed.description.clone(),
             arn: Some(self.arn.clone()),
-            definition: Some(self.definition_in(format, api_types)),
+            definition: Some(definition),
             format: Some(format.to_string()),
         }
     }
 
-    /// This type's definition in `format`: the stored SDL, or the type's introspection
-    /// JSON rendered from the stored definitions.
-    fn definition_in(&self, format: &str, api_types: &BTreeMap<String, TypeRecord>) -> String {
+    /// This type's definition in `format` as a READ reports it: the type's introspection
+    /// JSON, or the SDL rendering of the parsed definition.
+    fn rendered_definition(
+        &self,
+        format: &str,
+        api_types: &BTreeMap<String, TypeRecord>,
+    ) -> String {
         if format == JSON_FORMAT {
-            serde_json::to_string_pretty(&self.introspection(api_types)).unwrap_or_default()
+            self.introspection_json(api_types)
+        } else {
+            self.parsed.render_sdl()
+        }
+    }
+
+    /// This type's definition in `format` as the call that stated it reports it: the
+    /// type's introspection JSON, or the SDL text that request carried.
+    fn stated_definition(&self, format: &str, api_types: &BTreeMap<String, TypeRecord>) -> String {
+        if format == JSON_FORMAT {
+            self.introspection_json(api_types)
         } else {
             self.definition.clone()
         }
+    }
+
+    /// This type's introspection JSON, as the text a `JSON` report carries.
+    fn introspection_json(&self, api_types: &BTreeMap<String, TypeRecord>) -> String {
+        self.parsed.render_json(api_types)
     }
 
     /// This type as a GraphQL introspection `__Type`: the JSON representation of a
@@ -294,6 +335,14 @@ pub enum TypeRef {
     Named(String),
     List(Box<TypeRef>),
     NonNull(Box<TypeRef>),
+}
+
+/// One wrapper a type reference nests another reference in, as GraphQL's type system
+/// defines the two: a list (`[T]`) and a non-null (`T!`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeWrapper {
+    List,
+    NonNull,
 }
 
 /// Why a caller-supplied type definition is not one type definition this service can
@@ -1134,12 +1183,36 @@ impl TypeDefinition {
 }
 
 impl TypeRef {
+    /// This reference flattened: the wrappers it nests, outermost first, and the NAME at
+    /// its root.
+    ///
+    /// The chain is walked ITERATIVELY, so reading a reference costs one step per wrapper
+    /// and no stack frame per wrapper however deeply the definition it was parsed from
+    /// nested it — and every reader of a reference goes through here rather than
+    /// recursing itself. How deep one can get is bounded on the way IN, by the parse
+    /// ([`DEFINITION_RECURSION_LIMIT`]), which refuses a definition that nests past it
+    /// instead of storing one.
+    pub(crate) fn flattened(&self) -> (Vec<TypeWrapper>, &str) {
+        let mut wrappers: Vec<TypeWrapper> = Vec::new();
+        let mut reference = self;
+        loop {
+            match reference {
+                Self::Named(name) => return (wrappers, name.as_str()),
+                Self::List(inner) => {
+                    wrappers.push(TypeWrapper::List);
+                    reference = inner;
+                }
+                Self::NonNull(inner) => {
+                    wrappers.push(TypeWrapper::NonNull);
+                    reference = inner;
+                }
+            }
+        }
+    }
+
     /// The name at the root of this reference, unwrapping every list and non-null
     /// around it.
     fn root_name(&self) -> String {
-        match self {
-            Self::Named(name) => name.clone(),
-            Self::List(inner) | Self::NonNull(inner) => inner.root_name(),
-        }
+        self.flattened().1.to_string()
     }
 }

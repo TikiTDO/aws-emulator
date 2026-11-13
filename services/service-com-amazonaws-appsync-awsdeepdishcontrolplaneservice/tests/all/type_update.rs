@@ -37,8 +37,6 @@
 //! catalog `rows()` and the projection assertion) is the `graphql_types` suite's, reused
 //! rather than copied.
 
-use std::time::Duration;
-
 use base64::Engine as _;
 use serde_json::{json, Value};
 use service_com_amazonaws_appsync_awsdeepdishcontrolplaneservice::state;
@@ -46,13 +44,10 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use super::graphql_api_lifecycle::router;
 use super::graphql_types::{
-    assert_projects, call, create_api, create_type, get_type, rows, Answer, Row, FORMATS,
+    assert_projects, assert_states, call, create_api, create_type, get_type, rendered_sdl, rows,
+    Answer, Row, FORMATS,
 };
-
-/// How long a case that must observe the far side of a scheduled schema creation waits:
-/// the service's own span plus slack. Only the TEST waits — the handler stores the due
-/// instant.
-const PAST_THE_CREATION: Duration = Duration::from_millis(250);
+use super::schema_creation::await_creation;
 
 /// The text a `BadRequestException` carries for a definition the service cannot read as
 /// one type definition: a fixed sentence with no variable part. Pinned here rather than
@@ -353,7 +348,7 @@ async fn an_update_replaces_the_definition_of_the_addressed_type() {
                 updated.status, 200,
                 "case {case}: expected UpdateType 200, got {updated:?}"
             );
-            assert_projects(
+            assert_states(
                 &change.updated,
                 &api_id,
                 format,
@@ -399,7 +394,7 @@ async fn an_update_without_a_definition_leaves_the_type_as_it_is() {
                 answer.status, 200,
                 "case {case}: expected UpdateType 200, got {answer:?}"
             );
-            assert_projects(&row, &api_id, format, &answer.body["type"], &case);
+            assert_states(&row, &api_id, format, &answer.body["type"], &case);
             assert_reads_back(&router, &api_id, &row, &case).await;
         }
     }
@@ -618,7 +613,7 @@ async fn an_update_that_addresses_no_type_is_refused_and_creates_nothing() {
     );
     assert_eq!(
         read.body["type"]["definition"].as_str(),
-        Some(definition),
+        Some(rendered_sdl(definition).as_str()),
         "case after the refusals: expected the other API's definition to be unchanged, got {read:?}"
     );
 }
@@ -676,8 +671,9 @@ async fn an_update_during_a_schema_creation_is_refused_then_allowed() {
         );
     }
 
-    // The refusals left the creation where it was, so the clock still performs it.
-    tokio::time::sleep(state::SCHEMA_CREATION_SPAN + PAST_THE_CREATION).await;
+    // The refusals left the creation where it was, so the clock still performs it: the
+    // wait looks again for that rather than for a fixed time.
+    await_creation(&router, &api_id, "the creation the refusals left alone").await;
 
     for row in &declared {
         let case = format!("update the installed {:?} ({})", row.name, row.kind);
@@ -715,7 +711,7 @@ async fn an_update_during_a_schema_creation_is_refused_then_allowed() {
             "case {case}: expected GetType 200 after the update, got {read:?}"
         );
         assert_eq!(
-            read.body["type"]["definition"], json!(replacement),
+            read.body["type"]["definition"], json!(rendered_sdl(&replacement)),
             "case {case}: expected the read to answer the new definition, got {read:?}"
         );
     }

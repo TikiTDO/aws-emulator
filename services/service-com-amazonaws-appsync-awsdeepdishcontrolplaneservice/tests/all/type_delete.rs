@@ -42,7 +42,8 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use super::graphql_api_lifecycle::router;
 use super::graphql_types::{
-    assert_projects, call, create_api, create_type, get_type, rows, Answer, Row, FORMATS,
+    assert_projects, assert_states, call, create_api, create_type, get_type, rows, Answer, Row,
+    FORMATS,
 };
 
 /// How long a case that must observe the far side of a scheduled schema creation waits:
@@ -237,7 +238,7 @@ async fn a_deleted_name_can_be_created_again() {
             recreated.status, 200,
             "case {case}: expected the freed name to be creatable again, got {recreated:?}"
         );
-        assert_projects(
+        assert_states(
             &row,
             &api_id,
             state::SDL_FORMAT,

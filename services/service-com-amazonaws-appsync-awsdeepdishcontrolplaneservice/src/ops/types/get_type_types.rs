@@ -13,12 +13,12 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-appsync-awsdeepdishcont
 
 // `skip_validation = ["format"]`: `GetType`'s `format` is a `TypeDefinitionFormat`, whose
 // value set the recorded service does NOT hold this operation's callers to — a read asked
-// in a format outside that set is SERVED, with the stored SDL as the definition and the
+// in a format outside that set is SERVED, with the type's SDL as the definition and the
 // requested value echoed in `Type$format`. The model is stricter than the service here,
 // so the recording governs: the member stays `@required` (the route resolves only with it
 // present), and what the value SELECTS is the representation the handler reports
 // (`crate::state::TypeRecord::to_type` renders the introspection JSON for `JSON` and the
-// stored SDL otherwise). The enumerated value set is still enforced where the service
+// type's SDL otherwise). The enumerated value set is still enforced where the service
 // does enforce it — `GetIntrospectionSchema`'s `format`, whose refusal `crate::service`
 // words.
 #[smithy_macros::smithy(

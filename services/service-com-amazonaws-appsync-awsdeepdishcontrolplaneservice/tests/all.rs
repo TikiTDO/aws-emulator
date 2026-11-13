@@ -149,8 +149,12 @@ mod tag_resource;
 mod tagging_arn_vendor_refusal;
 #[path = "all/type_delete.rs"]
 mod type_delete;
+#[path = "all/type_json_rendering.rs"]
+mod type_json_rendering;
 #[path = "all/type_listing.rs"]
 mod type_listing;
+#[path = "all/type_sdl_rendering.rs"]
+mod type_sdl_rendering;
 #[path = "all/type_update.rs"]
 mod type_update;
 #[path = "all/untag_resource.rs"]

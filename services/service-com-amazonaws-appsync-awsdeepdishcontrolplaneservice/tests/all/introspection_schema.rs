@@ -48,6 +48,7 @@ use serde_json::{json, Value};
 use service_com_amazonaws_appsync_awsdeepdishcontrolplaneservice::state;
 use smithy_server_runtime::MultiServiceRouter;
 
+use crate::schema_creation::await_creation;
 use crate::source_api_association::{call, create_api, router, associate_path, ACCOUNT, REGION};
 
 /// How long a case that must observe the far side of the scheduled creation waits: the
@@ -856,15 +857,14 @@ async fn a_format_outside_the_value_set_is_refused_naming_the_value() {
     }
 }
 
-/// A type READ reports the stored definition in the representation the `format` it is
-/// asked in selects, and echoes that value — whatever the value is.
+/// A type READ reports the stored type in the representation the `format` it is asked in
+/// selects, and echoes that value — whatever the value is.
 ///
 /// The value set `TypeDefinitionFormat` declares is not a bound this operation holds its
 /// callers to (recorded behaviour: a read asked in a format outside the set is served,
-/// with the stored SDL and the requested value echoed), so the rows span the whole class:
+/// with the type's SDL and the requested value echoed), so the rows span the whole class:
 /// both declared values and values outside the set. `JSON` is the one value that selects
-/// the type's introspection JSON; every other value reports the SDL the type was defined
-/// with.
+/// the type's introspection JSON; every other value reports the type's SDL.
 #[tokio::test]
 async fn a_type_is_reported_in_the_format_the_read_asks_for() {
     let router = router();
@@ -875,7 +875,9 @@ async fn a_type_is_reported_in_the_format_the_read_asks_for() {
         started, 200,
         "case seed the schema: expected StartSchemaCreation 200, got {started}"
     );
-    tokio::time::sleep(state::SCHEMA_CREATION_SPAN + PAST_THE_CREATION).await;
+    // The creation is one the clock owes, so the wait looks again for it rather than for
+    // a fixed time.
+    await_creation(&router, &api.id, "seed the schema").await;
 
     // The declared values, then values outside the declared set: a format name the
     // service does not render in, and the right value in the wrong case.
@@ -898,7 +900,7 @@ async fn a_type_is_reported_in_the_format_the_read_asks_for() {
         );
 
         // `JSON` is what selects the introspection JSON; every other value reports the
-        // SDL the type is defined with, which is what the type declares.
+        // type's SDL, which is what the type declares.
         let reported = answer.body["type"]["definition"]
             .as_str()
             .unwrap_or_default();
@@ -915,7 +917,7 @@ async fn a_type_is_reported_in_the_format_the_read_asks_for() {
             for declared in ["type Query", "hello: String"] {
                 assert!(
                     reported.contains(declared),
-                    "case GetType format {value:?}: expected the stored SDL to carry \
+                    "case GetType format {value:?}: expected the reported SDL to carry \
                      {declared:?}, got {reported:?}"
                 );
             }
@@ -923,12 +925,12 @@ async fn a_type_is_reported_in_the_format_the_read_asks_for() {
         }
     }
 
-    // Every value that is not `JSON` reports the SAME stored SDL, so a value outside the
+    // Every value that is not `JSON` reports the SAME SDL, so a value outside the
     // declared set selects no representation of its own.
     for (value, reported) in &sdl_reports {
         assert_eq!(
             reported, &sdl_reports[0].1,
-            "case GetType format {value:?}: expected the same stored SDL the {:?} read \
+            "case GetType format {value:?}: expected the same SDL the {:?} read \
              reported, got {reported:?}",
             sdl_reports[0].0
         );

@@ -27,6 +27,14 @@ pub mod graphql_data_plane;
 mod schema_types;
 pub use schema_types::*;
 
+/// How one stored type is written back as GraphQL SDL: the rendering every READ of a type
+/// answers with, whichever way that type got into its API.
+mod type_sdl;
+
+/// How one stored type is written back as JSON: the type's own introspection document,
+/// which is the other representation a read can ask for.
+mod type_json;
+
 /// The schema a GraphQL API holds, and the asynchronous creation that installs one.
 mod schema_creation;
 pub use schema_creation::*;

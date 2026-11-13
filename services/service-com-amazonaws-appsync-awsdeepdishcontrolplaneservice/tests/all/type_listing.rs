@@ -34,7 +34,7 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use super::graphql_api_lifecycle::router;
 use super::graphql_types::{
-    assert_projects, call, create_api, create_type, get_type, rows, Answer, FORMATS,
+    assert_projects, call, create_api, create_type, get_type, rendered_sdl, rows, Answer, FORMATS,
 };
 use super::source_api_association::{associate_path, create_pair};
 
@@ -249,7 +249,7 @@ async fn an_update_replaces_a_listed_definition_without_moving_it() {
             .unwrap_or_else(|| panic!("case {case}: expected {:?} in the listing", row.name));
         assert_eq!(
             reported["definition"],
-            json!(replacement),
+            json!(rendered_sdl(&replacement)),
             "case {case}: expected the listing to answer the new definition, got {reported:?}"
         );
     }

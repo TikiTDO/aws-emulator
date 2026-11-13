@@ -12,13 +12,16 @@
 //!    the API's own path — and `GetType` answers the same type. Asserted over a table
 //!    holding every kind of type definition GraphQL's SDL grammar declares;
 //! 2. the `format` a call names chooses the REPRESENTATION the reported definition
-//!    carries — the SDL the type was defined with, or the type's introspection JSON —
-//!    so either representation of a stored type is readable whichever format created
-//!    it;
-//! 3. that JSON is computed from the definitions the API holds when it is READ: a type
-//!    reference resolves to the kind of the stored type it names (or to `SCALAR` for a
-//!    scalar every schema holds), an interface reports the object types that implement
-//!    it, and a reference nothing defines carries no kind;
+//!    carries — the type's SDL, or its introspection JSON — so either representation of
+//!    a stored type is readable whichever format created it; a READ answers the service's
+//!    own rendering of the stored definition (the layout itself is pinned in
+//!    `type_sdl_rendering.rs`), while the create answers the definition the request
+//!    stated;
+//! 3. that JSON is the type's own introspection document, stating what the definition
+//!    states: each type reference by the name it names, or by the wrapper it writes
+//!    around one, with every member a type has no value for left OUT of the document —
+//!    and, for an interface, the object types the API holds that implement it when it is
+//!    READ;
 //! 4. a definition GraphQL cannot parse, or one that declares no type or several, is a
 //!    400 `BadRequestException` and persists nothing;
 //! 5. the declared name identifies the type within its API: a second create under the
@@ -234,7 +237,22 @@ pub(crate) fn rows() -> Vec<Row> {
     ]
 }
 
-/// Assert `reported` is the type `row` declares, reported in `format` under `api_id`.
+/// The SDL a READ of a type defined by `definition` answers with: the service's own
+/// rendering of the definition it parsed.
+///
+/// A read reports the stored type rather than the text a request supplied, so the
+/// expectation here is derived from the definition the type was defined with rather than
+/// taken from the request. The LAYOUT that rendering has is pinned byte for byte, over a
+/// table of definitions, in `type_sdl_rendering.rs`; what these suites assert with it is
+/// that a read reports the right DEFINITION.
+pub(crate) fn rendered_sdl(definition: &str) -> String {
+    state::parse_type_definition(definition)
+        .unwrap_or_else(|_| panic!("the definition {definition:?} under test parses"))
+        .render_sdl()
+}
+
+/// Assert `reported` is the type `row` declares as a READ of it reports it, in `format`
+/// under `api_id`.
 pub(crate) fn assert_projects(
     row: &Row,
     api_id: &str,
@@ -242,6 +260,55 @@ pub(crate) fn assert_projects(
     reported: &Value,
     source: &str,
 ) {
+    assert_members(row, api_id, format, reported, source);
+    let definition = definition_text(row, format, reported, source);
+    if format == state::JSON_FORMAT {
+        assert_json_definition(row, &definition, format, source);
+        return;
+    }
+    // The SDL a read answers with is the service's rendering of the stored definition.
+    let expected = rendered_sdl(row.definition);
+    assert_eq!(
+        definition, expected,
+        "case {row:?} ({source}, {format}): expected the rendered SDL {expected:?}, got \
+         {definition:?}"
+    );
+}
+
+/// Assert `reported` is the type `row` declares as the call that STATED its definition
+/// reports it, in `format` under `api_id`.
+pub(crate) fn assert_states(
+    row: &Row,
+    api_id: &str,
+    format: &str,
+    reported: &Value,
+    source: &str,
+) {
+    assert_members(row, api_id, format, reported, source);
+    let definition = definition_text(row, format, reported, source);
+    if format == state::JSON_FORMAT {
+        assert_json_definition(row, &definition, format, source);
+        return;
+    }
+    // The SDL such a call answers with is the definition the request wrote.
+    assert_eq!(
+        definition, row.definition,
+        "case {row:?} ({source}, {format}): expected the stated SDL {:?}, got {definition:?}",
+        row.definition
+    );
+}
+
+/// The definition `reported` carries.
+fn definition_text(row: &Row, format: &str, reported: &Value, source: &str) -> String {
+    reported["definition"]
+        .as_str()
+        .unwrap_or_else(|| panic!("case {row:?} ({source}, {format}): expected a definition"))
+        .to_string()
+}
+
+/// Assert every member of `reported` other than the definition is the type `row`
+/// declares: those are the same whichever call answered.
+fn assert_members(row: &Row, api_id: &str, format: &str, reported: &Value, source: &str) {
     assert_eq!(
         reported["name"],
         json!(row.name),
@@ -279,19 +346,6 @@ pub(crate) fn assert_projects(
             "case {row:?} ({source}, {format}): expected no description, got {:?}",
             reported["description"]
         ),
-    }
-    let definition = reported["definition"]
-        .as_str()
-        .unwrap_or_else(|| panic!("case {row:?} ({source}, {format}): expected a definition"));
-    if format == state::JSON_FORMAT {
-        assert_json_definition(row, definition, format, source);
-    } else {
-        // The SDL a report answers with is the SDL the type was defined with.
-        assert_eq!(
-            definition, row.definition,
-            "case {row:?} ({source}, {format}): expected the stored SDL {:?}, got {definition:?}",
-            row.definition
-        );
     }
 }
 
@@ -352,7 +406,7 @@ async fn create_persists_every_kind_of_type_definition_and_get_reads_it_back() {
                 "case {row:?} ({format}): expected CreateType 200, got {} {:?}",
                 created.status, created.body
             );
-            assert_projects(&row, &api_id, format, &created.body["type"], "create");
+            assert_states(&row, &api_id, format, &created.body["type"], "create");
 
             // ... and the stored type is readable in EITHER representation, whichever
             // format created it.
@@ -366,14 +420,18 @@ async fn create_persists_every_kind_of_type_definition_and_get_reads_it_back() {
                 assert_projects(&row, &api_id, read_format, &read.body["type"], "get");
             }
 
-            // The read in the creating format answers the SAME body the create did,
-            // member for member.
+            // The read in the creating format answers the same type the create did,
+            // member for member — the definition apart, which a read RENDERS and the
+            // create answered as the request stated it.
             let read = get_type(&router, &api_id, row.name, format).await;
-            assert_eq!(
-                read.body["type"], created.body["type"],
-                "case {row:?} ({format}): expected GetType to answer the created type {:?}, got {:?}",
-                created.body["type"], read.body["type"]
-            );
+            for member in ["name", "arn", "description", "format"] {
+                assert_eq!(
+                    read.body["type"][member], created.body["type"][member],
+                    "case {row:?} ({format}): expected GetType to answer the created {member} \
+                     {:?}, got {:?}",
+                    created.body["type"][member], read.body["type"][member]
+                );
+            }
         }
     }
 }
@@ -396,13 +454,14 @@ async fn rendered_json(router: &MultiServiceRouter, api_id: &str, type_name: &st
 }
 
 #[tokio::test]
-async fn the_json_rendering_is_computed_from_the_types_the_api_holds() {
+async fn the_json_rendering_states_what_the_definition_says() {
     let router = router();
     let api_id = create_api(&router, "type-json-rendering").await;
 
     let node = "interface Node {\n  id: ID!\n}\n";
     let post = "type Post implements Node {\n  id: ID!\n  author: Author\n  tags: [String!]\n}\n";
     let author = "type Author {\n  name: String\n}\n";
+    let comment = "type Comment implements Node {\n  id: ID!\n}\n";
 
     for definition in [node, post] {
         let created = create_type(&router, &api_id, definition, state::SDL_FORMAT).await;
@@ -426,85 +485,70 @@ async fn the_json_rendering_is_computed_from_the_types_the_api_holds() {
             .unwrap_or_else(|| panic!("case Post.{name}: expected the field, got {fields:?}"))
     };
 
-    // A built-in scalar resolves to a scalar even though no create defined it, under
-    // the non-null wrapper the definition wrote.
+    // A reference carries only what the reference itself states: the wrapper's kind
+    // around what it wraps, and nothing of the type it names beyond that name.
     assert_eq!(
         field("id")["type"],
-        json!({
-            "kind": state::NON_NULL_KIND,
-            "name": Value::Null,
-            "ofType": {"kind": state::SCALAR_KIND, "name": "ID", "ofType": Value::Null},
-        }),
-        "case Post.id: expected a non-null built-in scalar, got {:?}",
+        json!({"kind": state::NON_NULL_KIND, "ofType": {"name": "ID"}}),
+        "case Post.id: expected a non-null reference, got {:?}",
         field("id")["type"]
     );
-    // A list of non-null built-in scalars keeps both wrappers, outermost first.
+    // A list of non-null references keeps both wrappers, outermost first.
     assert_eq!(
         field("tags")["type"],
         json!({
             "kind": state::LIST_KIND,
-            "name": Value::Null,
-            "ofType": {
-                "kind": state::NON_NULL_KIND,
-                "name": Value::Null,
-                "ofType": {"kind": state::SCALAR_KIND, "name": "String", "ofType": Value::Null},
-            },
+            "ofType": {"kind": state::NON_NULL_KIND, "ofType": {"name": "String"}},
         }),
-        "case Post.tags: expected a list of non-null scalars, got {:?}",
+        "case Post.tags: expected a list of non-null references, got {:?}",
         field("tags")["type"]
     );
-    // Nothing defines `Author` yet, so the reference carries its name and no kind.
+    // A reference to a type the API holds states the same thing: its name.
     assert_eq!(
         field("author")["type"],
-        json!({"kind": Value::Null, "name": "Author", "ofType": Value::Null}),
-        "case Post.author before Author exists: expected no kind, got {:?}",
+        json!({"name": "Author"}),
+        "case Post.author: expected the referenced name, got {:?}",
         field("author")["type"]
     );
-    // The interface the definition implements resolves to the stored interface.
+    // The interfaces the definition implements are named the same way.
     assert_eq!(
         rendered["interfaces"],
-        json!([{"kind": state::INTERFACE_KIND, "name": "Node", "ofType": Value::Null}]),
+        json!([{"name": "Node"}]),
         "case Post: expected the implemented interface, got {:?}",
         rendered["interfaces"]
     );
+    // An object type has no description, no input fields, no enum values and no possible
+    // types, and the document leaves every member a type has no value for OUT.
+    for member in ["description", "inputFields", "enumValues", "possibleTypes"] {
+        assert!(
+            rendered.get(member).is_none(),
+            "case Post: expected no {member} member at all, got {:?}",
+            rendered.get(member)
+        );
+    }
 
     // The interface reports the object types that implement it — the state at the time
     // of the READ, so what implements it is never frozen at create time.
-    let implementors = json!([{"kind": state::OBJECT_KIND, "name": "Post", "ofType": Value::Null}]);
     assert_eq!(
         rendered_json(&router, &api_id, "Node").await["possibleTypes"],
-        implementors,
+        json!([{"name": "Post"}]),
         "case Node with one implementor: expected Post among its possible types"
     );
 
-    let created = create_type(&router, &api_id, author, state::SDL_FORMAT).await;
-    assert_eq!(
-        created.status, 200,
-        "case {author:?}: expected CreateType 200, got {} {:?}",
-        created.status, created.body
-    );
-    // `Author` is defined now, so the reference that carried no kind carries one.
-    let rendered = rendered_json(&router, &api_id, "Post").await;
-    let author_field = rendered["fields"]
-        .as_array()
-        .and_then(|fields| {
-            fields
-                .iter()
-                .find(|field| field["name"] == json!("author"))
-                .cloned()
-        })
-        .unwrap_or_else(|| panic!("case Post.author: expected the field, got {rendered:?}"));
-    assert_eq!(
-        author_field["type"],
-        json!({"kind": state::OBJECT_KIND, "name": "Author", "ofType": Value::Null}),
-        "case Post.author after Author exists: expected an object kind, got {:?}",
-        author_field["type"]
-    );
-    // `Author` implements nothing, so the interface's possible types are unchanged.
+    for definition in [author, comment] {
+        let created = create_type(&router, &api_id, definition, state::SDL_FORMAT).await;
+        assert_eq!(
+            created.status, 200,
+            "case {definition:?}: expected CreateType 200, got {} {:?}",
+            created.status, created.body
+        );
+    }
+    // The type that implements the interface joins its possible types; the one that
+    // implements nothing does not.
     assert_eq!(
         rendered_json(&router, &api_id, "Node").await["possibleTypes"],
-        implementors,
-        "case Node after an unrelated type: expected only Post among its possible types"
+        json!([{"name": "Comment"}, {"name": "Post"}]),
+        "case Node after another implementor: expected both implementors"
     );
 }
 
@@ -643,7 +687,7 @@ async fn a_type_belongs_to_the_api_it_was_created_under() {
             "case {row:?}: expected the same name under another API to be created, got {} {:?}",
             twin.status, twin.body
         );
-        assert_projects(
+        assert_states(
             &row,
             &second,
             state::SDL_FORMAT,
@@ -698,22 +742,12 @@ async fn the_json_rendering_reports_arguments_defaults_and_deprecations() {
     };
 
     // An argument reports its type and the default the definition wrote, as GraphQL
-    // writes it; an argument with no default reports none.
+    // writes it; an argument with no default reports none at all.
     assert_eq!(
         field("comments")["args"],
         json!([
-            {
-                "name": "limit",
-                "description": Value::Null,
-                "type": {"kind": state::SCALAR_KIND, "name": "Int", "ofType": Value::Null},
-                "defaultValue": "10",
-            },
-            {
-                "name": "after",
-                "description": Value::Null,
-                "type": {"kind": state::SCALAR_KIND, "name": "String", "ofType": Value::Null},
-                "defaultValue": Value::Null,
-            },
+            {"name": "limit", "type": {"name": "Int"}, "defaultValue": "10"},
+            {"name": "after", "type": {"name": "String"}},
         ]),
         "case Post.comments: expected its two arguments, got {:?}",
         field("comments")["args"]
@@ -748,29 +782,13 @@ async fn the_json_rendering_reports_arguments_defaults_and_deprecations() {
         json!([
             {
                 "name": "title",
-                "description": Value::Null,
-                "type": {
-                    "kind": state::NON_NULL_KIND,
-                    "name": Value::Null,
-                    "ofType": {
-                        "kind": state::SCALAR_KIND, "name": "String", "ofType": Value::Null,
-                    },
-                },
-                "defaultValue": Value::Null,
+                "type": {"kind": state::NON_NULL_KIND, "ofType": {"name": "String"}},
             },
             {
                 "name": "tags",
-                "description": Value::Null,
                 "type": {
                     "kind": state::LIST_KIND,
-                    "name": Value::Null,
-                    "ofType": {
-                        "kind": state::NON_NULL_KIND,
-                        "name": Value::Null,
-                        "ofType": {
-                            "kind": state::SCALAR_KIND, "name": "String", "ofType": Value::Null,
-                        },
-                    },
+                    "ofType": {"kind": state::NON_NULL_KIND, "ofType": {"name": "String"}},
                 },
                 "defaultValue": "[]",
             },
@@ -783,15 +801,10 @@ async fn the_json_rendering_reports_arguments_defaults_and_deprecations() {
     assert_eq!(
         rendered_json(&router, &api_id, "PostOrder").await["enumValues"],
         json!([
-            {
-                "name": "NEWEST",
-                "description": Value::Null,
-                "isDeprecated": false,
-                "deprecationReason": Value::Null,
-            },
+            {"name": "NEWEST", "directives": [], "isDeprecated": false},
             {
                 "name": "OLDEST",
-                "description": Value::Null,
+                "directives": [],
                 "isDeprecated": true,
                 "deprecationReason": "unordered",
             },

@@ -22,6 +22,10 @@ aws-smithy-types = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "sync", "time"] }
 bytes = { workspace = true }
 http = { workspace = true }
+# Writes the type JSON document a type read answers with: the members a `Type$definition`
+# in `JSON` format carries, in the order the document writes them and with the ones a type
+# has no value for left out (`src/state/type_json.rs`).
+serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 # Parses the OIDC `issuer`, which AppSync requires to be a valid URL.

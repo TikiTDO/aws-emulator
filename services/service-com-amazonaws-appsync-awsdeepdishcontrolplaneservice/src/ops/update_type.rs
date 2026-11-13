@@ -6,7 +6,8 @@
 //! refusing one GraphQL cannot read, one that declares no single type, and one that
 //! declares a type other than the addressed one. The type keeps its identity (its name,
 //! its ARN and its place among the API's types); the `format` the request names chooses
-//! how the answer reports the stored definition (`crate::state::TypeRecord::to_type`).
+//! how the answer reports the definition the request stated
+//! (`crate::state::TypeRecord::to_stated_type`).
 //! This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
@@ -268,12 +269,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         api.types.insert(input.type_name.clone(), record);
 
         // Answer from the STORED record, with the definition in the format the request
-        // asked for, so this body is the one `GetType` answers with afterwards.
+        // asked for — the definition as this request stated it (or, for a request that
+        // stated none, the one that was already stored); a later read answers the
+        // service's own rendering of it.
         Ok(UpdateTypeOutput {
             r#type: api
                 .types
                 .get(&input.type_name)
-                .map(|record| record.to_type(&input.format, &api.types)),
+                .map(|record| record.to_stated_type(&input.format, &api.types)),
         })
     }
 }

@@ -274,9 +274,10 @@ impl GraphqlApiRecord {
     /// `data` every GraphQL result carries its data under — its root operation types,
     /// every type it holds and, when the call asks for them, the directives it defines.
     ///
-    /// Each type is rendered exactly as `GetType` renders that one type in JSON, and the
-    /// built-in scalars the schema references are reported beside them, because an
-    /// introspection document holds every type its schema's fields resolve to.
+    /// Each type is rendered as GraphQL's introspection system defines a `__Type` —
+    /// which is not the document a read of ONE type answers with (`super::type_json`) —
+    /// and the built-in scalars the schema references are reported beside them, because
+    /// an introspection document holds every type its schema's fields resolve to.
     fn introspection_json(
         &self,
         declarations: &SchemaDeclarations,
