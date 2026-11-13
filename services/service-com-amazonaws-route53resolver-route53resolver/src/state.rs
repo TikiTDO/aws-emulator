@@ -664,15 +664,27 @@ pub enum FirewallChange {
     Changed,
 }
 
+/// The `StatusMessage` a domain list reports while it holds
+/// [`FIREWALL_DOMAIN_LIST_STATUS_IMPORTING`] — the import step's own sentence,
+/// stated while the domains of the file the request named are still being read
+/// into the list.
+///
+/// Like every other step's sentence it is fixed text with no part of the
+/// request in it: the URL the import reads is not quoted, only that the import
+/// is running off the file that was provided.
+pub const FIREWALL_DOMAIN_LIST_STATUS_MESSAGE_IMPORTING: &str =
+    "Importing domains from provided file.";
+
 /// The `StatusMessage` the lifecycle step `status` leaves on a domain list that
 /// last underwent `change`, or `None` for a step DNS Firewall states nothing
 /// for.
 ///
 /// It is DERIVED from the status and that change rather than held beside them,
 /// so no projection of a list can report one step's status with another step's
-/// message. `IMPORTING` is a step the list is moving THROUGH, and what the
-/// service states on it is not recorded anywhere this crate can read, so — as
-/// for an association that is coming up — no sentence is invented for it.
+/// message. The one step whose sentence the status alone does not decide is the
+/// FAILED outcome of an import, which carries the Region of the request that
+/// started it ([`firewall_domain_list_import_download_failed`]) and so is held
+/// on the record.
 pub fn firewall_domain_list_status_message(status: &str, change: FirewallChange) -> Option<String> {
     match status {
         FIREWALL_DOMAIN_LIST_STATUS_COMPLETE => Some(
@@ -684,6 +696,9 @@ pub fn firewall_domain_list_status_message(status: &str, change: FirewallChange)
         ),
         FIREWALL_DOMAIN_LIST_STATUS_DELETING => {
             Some(FIREWALL_DOMAIN_LIST_STATUS_MESSAGE_DELETING.to_string())
+        }
+        FIREWALL_DOMAIN_LIST_STATUS_IMPORTING => {
+            Some(FIREWALL_DOMAIN_LIST_STATUS_MESSAGE_IMPORTING.to_string())
         }
         _ => None,
     }

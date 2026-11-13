@@ -42,7 +42,7 @@ use super::harness::{call, error_type, ok, string_member, REGION};
 /// The bucket every case below stores its domain file in, held by the account
 /// in [`REGION`] — "the file must be in an S3 bucket that's in the same Region
 /// as your DNS Firewall".
-const BUCKET: &str = "dns-firewall-domain-files";
+pub(crate) const BUCKET: &str = "dns-firewall-domain-files";
 
 /// The `FirewallDomainListStatus` values the model declares
 /// (`smithy_query(query="shape",shape="FirewallDomainListStatus")`), which any
@@ -68,7 +68,7 @@ fn download_failed(region: &str) -> String {
 /// One emulator: this service beside the emulator's own Amazon S3, over ONE
 /// shared engine, so the domain file an import reads is an object of the
 /// account's real inventory and not a value written out here.
-fn emulator_with_object_storage() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
+pub(crate) fn emulator_with_object_storage() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     let engine = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.register_service(
@@ -85,7 +85,7 @@ fn emulator_with_object_storage() -> (MultiServiceRouter, Arc<engine::InMemoryEn
 /// Store `body` at `key` of [`BUCKET`], through Amazon S3's own store — the one
 /// map its `CreateBucket` writes and its `GetObject` reads — so the import
 /// finds exactly the object the account holds.
-fn hold_object(engine: &Arc<engine::InMemoryEngine>, key: &str, body: Vec<u8>) {
+pub(crate) fn hold_object(engine: &Arc<engine::InMemoryEngine>, key: &str, body: Vec<u8>) {
     let state = s3_state(&**engine).expect("the engine holds every mounted service's store");
     let mut store = state.lock();
     store.create_bucket(BUCKET, REGION);
@@ -97,7 +97,7 @@ fn hold_object(engine: &Arc<engine::InMemoryEngine>, key: &str, body: Vec<u8>) {
 }
 
 /// Create a domain list and return its id.
-async fn seed_list(router: &MultiServiceRouter, name: &str) -> String {
+pub(crate) async fn seed_list(router: &MultiServiceRouter, name: &str) -> String {
     let created = ok(
         router,
         "CreateFirewallDomainList",
@@ -113,7 +113,12 @@ async fn seed_list(router: &MultiServiceRouter, name: &str) -> String {
 }
 
 /// Apply one `UpdateFirewallDomains` call that must succeed.
-async fn update(router: &MultiServiceRouter, id: &str, operation: &str, domains: &[&str]) -> Value {
+pub(crate) async fn update(
+    router: &MultiServiceRouter,
+    id: &str,
+    operation: &str,
+    domains: &[&str],
+) -> Value {
     ok(
         router,
         "UpdateFirewallDomains",
@@ -127,7 +132,7 @@ async fn update(router: &MultiServiceRouter, id: &str, operation: &str, domains:
 }
 
 /// The `FirewallDomainList` of a `GetFirewallDomainList` response.
-async fn read_list(router: &MultiServiceRouter, id: &str) -> Value {
+pub(crate) async fn read_list(router: &MultiServiceRouter, id: &str) -> Value {
     let fetched = ok(
         router,
         "GetFirewallDomainList",
