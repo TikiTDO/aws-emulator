@@ -440,7 +440,7 @@ async fn a_refused_update_leaves_the_stored_link_as_it_was() {
         let message = error_message(&body);
         assert!(
             message.contains(
-                format!("Repository not found for accountId: {ACCOUNT_ID} and UUID: {absent_id}")
+                format!("Repository not found for accountId: {ACCOUNT_ID} and uuid: {absent_id}")
                     .as_str()
             ),
             "case {absent_case:?}: expected the refusal to name the account and the id that \

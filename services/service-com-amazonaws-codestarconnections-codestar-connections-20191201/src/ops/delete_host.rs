@@ -185,17 +185,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // "Before you delete a host, all connections associated to the host must be
-        // deleted" (same doc): the association lives on the connections, so it is read
-        // out of the connection store, and the count is what the caller has to clear.
-        let attached = store.connections_attached_to_host_count(&input.host_arn);
-        if attached > 0 {
+        // deleted" (same doc): the association lives on the connections, so whether any
+        // is still held is read out of the connection store. The refusal is worded by the
+        // service's own template for this case
+        // (`crate::state::host_has_connections_message`), which names the host the request
+        // supplied and reports no count: how many connections hold it is state the caller
+        // reads back through `ListConnections` with that host as its filter.
+        if store.connections_attached_to_host_count(&input.host_arn) > 0 {
             return Err(DeleteHostErrorModeled::ResourceUnavailableException(
                 ResourceUnavailableException {
-                    message: Some(format!(
-                        "The host {} cannot be deleted because {attached} connection(s) are \
-                         still associated with it. Delete those connections first.",
-                        input.host_arn
-                    )),
+                    message: Some(crate::state::host_has_connections_message(&input.host_arn)),
                 },
             )
             .into());

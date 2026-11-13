@@ -360,7 +360,7 @@ fn assert_no_such_link(case: &str, repository_link_id: &str, status: u16, body: 
     );
     let message = error_message(body);
     for needle in [
-        format!("Repository not found for accountId: {ACCOUNT_ID} and UUID: {repository_link_id}"),
+        format!("Repository not found for accountId: {ACCOUNT_ID} and uuid: {repository_link_id}"),
         "(Service: CodeConnections;".to_string(),
         "Status Code: 404;".to_string(),
         "Proxy: null)".to_string(),

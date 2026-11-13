@@ -183,12 +183,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // provider at all and is refused before anything is minted, rather than creating
         // an addressable connection whose `GetConnection` reports no provider. The model
         // declares no client-input error for this operation, so it is the scaffold
-        // channel's 400 `ValidationException`, naming both members the caller may fix.
+        // channel's 400 `ValidationException`, worded by the service's own template for
+        // this refusal (`crate::state::CREATE_CONNECTION_PROVIDER_REQUIRED_MESSAGE`):
+        // fixed text naming the two members the caller may supply, interpolating nothing
+        // from the request.
         if input.provider_type.is_none() && input.host_arn.is_none() {
             return Err(crate::scaffolded::Scaffolded::validation(
-                "CreateConnection requires either ProviderType, naming the external \
-                 provider directly, or HostArn, naming the host that holds it; the request \
-                 supplied neither",
+                crate::state::CREATE_CONNECTION_PROVIDER_REQUIRED_MESSAGE,
             ));
         }
 

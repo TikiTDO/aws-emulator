@@ -202,10 +202,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 vpc_configuration: input.vpc_configuration,
                 // A host created through the API is PENDING until it is set up in the
                 // console; see `crate::state::HOST_STATUS_PENDING` for the modeled doc
-                // sentence, and `HOST_STATUS_MESSAGE_PENDING` for the description that
-                // non-terminal status reports.
+                // sentence. It carries NO status description: `Host$StatusMessage` is
+                // reported only in the transitional VPC-config statuses
+                // (`crate::state::HOST_STATUS_MESSAGE_STATUSES`), which a created host is
+                // not in, so the member stays unset rather than being derived from the
+                // status.
                 status: crate::state::HOST_STATUS_PENDING.to_string(),
-                status_message: Some(crate::state::HOST_STATUS_MESSAGE_PENDING.to_string()),
+                status_message: None,
                 sequence,
             },
         );

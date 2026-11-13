@@ -475,7 +475,8 @@ async fn a_host_whose_vpc_configuration_is_in_flight_is_refused_until_it_settles
 
 /// RULE: a host still named by a connection cannot be deleted — "before you delete a
 /// host, all connections associated to the host must be deleted" — whatever the number of
-/// connections; connections naming ANOTHER host never block it.
+/// connections, and the refusal words the host it names without reporting how many;
+/// connections naming ANOTHER host never block it.
 #[tokio::test]
 async fn a_host_is_not_deletable_while_connections_are_associated_with_it() {
     // (case, connections attached to the host under test, connections attached to the
@@ -535,10 +536,13 @@ async fn a_host_is_not_deletable_while_connections_are_associated_with_it() {
                 "ResourceUnavailableException",
                 "case {case:?}: wrong error code in {response:?}"
             );
-            assert!(
-                error_message(&response).contains(&attached.to_string()),
-                "case {case:?}: the refusal must report how many connections still hold \
-                 the host, got {response:?}"
+            // The refusal is the fixed template with the `HostArn` the request supplied
+            // between its two halves, and it reports no count: the SAME message whether
+            // one connection or three still hold the host.
+            assert_eq!(
+                error_message(&response),
+                format!("There exist connections for host {host}, host cannot be deleted"),
+                "case {case:?}: wrong refusal message in {response:?}"
             );
             assert!(
                 emulator.holds_host(&host),

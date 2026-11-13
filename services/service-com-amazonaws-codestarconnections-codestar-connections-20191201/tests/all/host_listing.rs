@@ -53,13 +53,10 @@ const TARGET_PREFIX: &str = "CodeStar_connections_20191201";
 const PROVIDER_TYPES: &[&str] = codestar::ops::types::shared_types::PROVIDER_TYPE_VALUES;
 
 /// The status a host created through the API carries, from `CreateHost`'s own doc ("A
-/// host created through the CLI or the SDK is in `PENDING` status by default"), with the
-/// description that non-terminal status reports.
+/// host created through the CLI or the SDK is in `PENDING` status by default").
 ///
 /// Referenced from the service's own catalog rather than spelled out here.
 const CREATED_HOST_STATUS: &str = codestar::state::HOST_STATUS_PENDING;
-/// See [`CREATED_HOST_STATUS`].
-const CREATED_HOST_STATUS_MESSAGE: &str = codestar::state::HOST_STATUS_MESSAGE_PENDING;
 
 /// One emulator: the router the production front door builds, with this service mounted
 /// on a single shared engine.
@@ -365,13 +362,13 @@ fn assert_listed_host(row: &HostRow, host_arn: &str, host: &Value) {
             "case {case:?}: a host created without a VpcConfiguration reported one: {host:?}"
         ),
     }
-    // A freshly created host is in a non-terminal status, and the service reports that
-    // status's description; `CreateHost` is what writes it, so it is read from the same
-    // catalog rather than spelled out here.
-    assert_eq!(
-        host["StatusMessage"].as_str(),
-        Some(CREATED_HOST_STATUS_MESSAGE),
-        "case {case:?}: wrong StatusMessage in {host:?}"
+    // A created host awaits the console setup step, which is not one of the VPC-config
+    // transitional statuses `Host$StatusMessage` describes, so the entry reports no
+    // `StatusMessage` member at all. `host_status_descriptions.rs` pins the rule over
+    // every documented status.
+    assert!(
+        host.get("StatusMessage").is_none_or(Value::is_null),
+        "case {case:?}: a created host reported a StatusMessage in {host:?}"
     );
 }
 

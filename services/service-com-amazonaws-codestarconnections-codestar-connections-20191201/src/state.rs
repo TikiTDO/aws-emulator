@@ -47,17 +47,6 @@ pub const CONNECTION_STATUS_PENDING: &str = "PENDING";
 /// status `AVAILABLE` by setting up the host in the console", and setting the host up is a
 /// console action rather than anything the clock owes.
 pub const HOST_STATUS_PENDING: &str = "PENDING";
-/// The status description a host carries while it is `PENDING`.
-///
-/// `CreateHost`'s own doc states what a pending host is waiting for: "A host created
-/// through the CLI or the SDK is in `PENDING` status by default. You can make its
-/// status `AVAILABLE` by setting up the host in the console." `Host$StatusMessage` is
-/// modeled "The status description for the host" — so while the host sits in that
-/// non-terminal status the service has a description to report, and this is it. The
-/// WORDING is the emulator's (AWS documents none); what the API contract carries is
-/// that a pending host reports a description at all.
-pub const HOST_STATUS_MESSAGE_PENDING: &str =
-    "Host is pending. Complete the host setup in the console to make it available.";
 
 /// See [`HOST_STATUS_PENDING`].
 pub const HOST_STATUS_AVAILABLE: &str = "AVAILABLE";
@@ -76,6 +65,28 @@ pub const HOST_STATUS_VALUES: &[&str] = &[
     HOST_STATUS_VPC_CONFIG_INITIALIZING,
     HOST_STATUS_VPC_CONFIG_FAILED_INITIALIZATION,
 ];
+
+/// The statuses a host has a status description to report in.
+///
+/// `Host$StatusMessage` is modeled "The status description for the host"
+/// (`smithy_query(query="shape", shape="Host")`), optional, and the only reader of it is
+/// `ListHosts` — `GetHost`'s output shape models no such member. What the description
+/// describes is the host's VPC configuration being provisioned or torn down, so the member
+/// is reported only while the host sits in one of these transitional VPC-config statuses;
+/// a host in any other status — including one merely awaiting the console setup step
+/// ([`HOST_STATUS_PENDING`]) — reports no description at all, and a reader must not treat
+/// the status itself as a description to render.
+pub const HOST_STATUS_MESSAGE_STATUSES: &[&str] = &[
+    HOST_STATUS_VPC_CONFIG_INITIALIZING,
+    HOST_STATUS_VPC_CONFIG_FAILED_INITIALIZATION,
+    HOST_STATUS_VPC_CONFIG_DELETING,
+];
+
+/// Whether a host in `status` has a status description to report — see
+/// [`HOST_STATUS_MESSAGE_STATUSES`].
+pub fn host_status_reports_description(status: &str) -> bool {
+    HOST_STATUS_MESSAGE_STATUSES.contains(&status)
+}
 
 /// The statuses a host cannot be deleted from.
 ///
@@ -263,7 +274,8 @@ pub struct StoredHost {
     pub vpc_configuration: Option<VpcConfiguration>,
     /// The host's `HostStatus` — one of `HOST_STATUS_VALUES`.
     pub status: String,
-    /// The status description, when the service has one to report.
+    /// The status description, when the service has one to report — only in the statuses
+    /// [`HOST_STATUS_MESSAGE_STATUSES`] names, so a host in any other status holds `None`.
     pub status_message: Option<String>,
     /// Creation order, and the value `ListHosts`' `NextToken` resumes from. Drawn from
     /// the same store counter as a connection's, so no two records share one.
@@ -276,6 +288,12 @@ impl StoredHost {
     /// `GetHost` projects this onto its own (flattened, `HostArn`-less and
     /// `StatusMessage`-less) output shape, and `ListHosts` reports it whole, so both
     /// read ONE rendering of a stored host rather than each recomputing one.
+    ///
+    /// `StatusMessage` is reported only in the statuses that have a description to report
+    /// ([`HOST_STATUS_MESSAGE_STATUSES`]), which is where the rule is enforced for every
+    /// reader at once: a host in any other status reports no `StatusMessage` member at
+    /// all, so no reader can mistake one for the signal that the host's VPC configuration
+    /// is in flight.
     pub fn to_host(&self) -> Host {
         Host {
             name: Some(self.name.clone()),
@@ -284,7 +302,10 @@ impl StoredHost {
             provider_endpoint: Some(self.provider_endpoint.clone()),
             vpc_configuration: self.vpc_configuration.clone(),
             status: Some(self.status.clone()),
-            status_message: self.status_message.clone(),
+            status_message: self
+                .status_message
+                .clone()
+                .filter(|_| host_status_reports_description(&self.status)),
         }
     }
 
@@ -913,6 +934,27 @@ pub fn host_not_found_message(host_arn: &str) -> String {
     format!("No host exists with the ARN: {host_arn}")
 }
 
+/// How this service refuses deleting a host connections are still associated with.
+///
+/// `DeleteHost`'s own doc states the rule ("Before you delete a host, all connections
+/// associated to the host must be deleted"), and this is the FIXED template the live
+/// service refuses it with — the two literal halves below with the `HostArn` the request
+/// supplied between them. It reports no count: how many connections hold the host is
+/// emulator state, not part of what the service words the refusal with, and the caller
+/// reads the associations out of `ListConnections` with the host as its filter.
+pub fn host_has_connections_message(host_arn: &str) -> String {
+    format!("There exist connections for host {host_arn}, host cannot be deleted")
+}
+
+/// How `CreateConnection` refuses a request that names no provider at all.
+///
+/// `ProviderType` and `HostArn` are both modeled optional, so the model cannot express
+/// "exactly one of" and the service enforces it. The refusal is entirely FIXED text with
+/// no variable part: it names the two members the caller may supply and interpolates
+/// nothing from the request — not the connection name, not a value.
+pub const CREATE_CONNECTION_PROVIDER_REQUIRED_MESSAGE: &str =
+    "Must specify either HostArn or ProviderType";
+
 /// How this service reports a CONNECTION ARN that resolves to no connection it holds.
 ///
 /// A FIXED sentence: the recorded wire answers a connection ARN that names nothing with
@@ -1103,16 +1145,18 @@ pub fn repository_link_already_exists_message(existing_repository_link_arn: &str
 /// Stated once here so every operation that addresses a link by its id words an absent
 /// link the same way, whichever call found it absent. Built from the REQUEST — it names
 /// the id that was supplied — which is the part of it that is a contract; the status
-/// (400) and the wire code (`ResourceNotFoundException`) are the rest of it. The recorded
-/// wire of this endpoint carries the sentence in TWO casings of the word uuid for the
-/// very same refusal (`…#task#4` records `UUID`, `…#teardown#7` records `uuid`), so the
-/// exact wording is an example of what the service answers rather than a rule it
-/// follows; this is the one of the two forms the sibling CodeConnections service — the
-/// same API under its current name — also words it in.
+/// (400) and the wire code (`ResourceNotFoundException`) are the rest of it. The label
+/// that introduces the id is FIXED text, and the lowercase `uuid:` below is the casing
+/// the live service words it in (corpus `simparity-behavioral-aws-v1`, unit
+/// `codestar-connections.delete-repository-link-removes-it`, which asserts the whole
+/// message with the per-run request id masked). An older wire capture of this same
+/// refusal (`…#task#4`) reads `UUID`, which is the one the behavioural unit above and
+/// the sibling surface of this API under its current name both contradict, so it is not
+/// the form this template follows.
 pub fn repository_link_not_found_message(repository_link_id: &str) -> String {
     with_framework_tail(
         &format!(
-            "Repository not found for accountId: {} and UUID: {repository_link_id}",
+            "Repository not found for accountId: {} and uuid: {repository_link_id}",
             ::engine::emulator_account_id()
         ),
         TAIL_RESOURCE_NOT_FOUND,

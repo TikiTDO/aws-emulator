@@ -18,12 +18,12 @@
 //! channel, as `CreateRepositoryLink`'s duplicate refusal and `GetHost`'s absent host
 //! already do).
 //!
-//! The refusal's STATUS and wire CODE are what that rule fixes. Its wording is an
-//! example of what the service answers rather than a rule it follows — the recorded wire
-//! of this endpoint carries the very same refusal in two casings of the word uuid — so
-//! what is asserted of the message here is what is built from the request and from the
-//! response itself: the account the lookup was made in, the id that resolved to nothing,
-//! and the framework tail's own fields (see `state::with_framework_tail`).
+//! The refusal's STATUS, wire CODE and WORDING are what that rule fixes: the message is
+//! the fixed template the live service answers an absent link with — the label `uuid:`
+//! among its fixed text — filled from the request and from the response itself: the
+//! account the lookup was made in, the id that resolved to nothing, and the framework
+//! tail's own fields (see `state::with_framework_tail`), whose request id is the one
+//! per-run part of it.
 //!
 //! The tables below span the classes that rule generalises over — every modelled
 //! `ProviderType`, both published bounds of `OwnerId` and `RepositoryName`, a link with
@@ -69,7 +69,7 @@ fn assert_not_found(case: &str, id: &str, status: u16, body: &Value) -> String {
     for needle in [
         // The refusal names the account the lookup was made in and the id that resolved
         // to nothing, so a caller can tell which of the two is wrong.
-        format!("Repository not found for accountId: {ACCOUNT_ID} and UUID: {id}").as_str(),
+        format!("Repository not found for accountId: {ACCOUNT_ID} and uuid: {id}").as_str(),
         "(Service: CodeConnections;",
         // The tail states the status the Git-sync component RAISED the exception with —
         // the modelled `@httpError` of the shape — which on this legacy endpoint is not

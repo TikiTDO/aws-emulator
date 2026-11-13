@@ -13,7 +13,7 @@
 //!   modeled form; a later `GetHost` on that ARN reports the stored host unchanged —
 //!   over every modeled `ProviderType`, the published `HostName` / `Url` length bounds,
 //!   with and without a `VpcConfiguration`, and over several tag sets;
-//! * a host created through the API is `PENDING` and carries a status description, and
+//! * a host created through the API is `PENDING` and carries no status description, and
 //!   the ARN it is keyed by carries the region the caller signed for;
 //! * nothing about a host is keyed by its NAME: hosts created under one name get
 //!   distinct ARNs and are independent resources;
@@ -55,8 +55,7 @@ const PROVIDER_TYPES: &[&str] = codestar::ops::types::shared_types::PROVIDER_TYP
 
 /// One emulator: the router the production front door builds, with this service mounted
 /// on a single shared engine, plus a handle on that engine so a test can observe what was
-/// persisted (`Host$StatusMessage` has no implemented wire reader yet — `ListHosts` is
-/// still a scaffold with its own open issue).
+/// persisted beside what the wire reports.
 struct Emulator {
     router: MultiServiceRouter,
     engine: Arc<engine::InMemoryEngine>,
@@ -482,10 +481,10 @@ async fn a_minted_host_arn_carries_the_signed_region() {
 }
 
 /// RULE: a host created through the API is `PENDING` — a non-terminal status it leaves
-/// only when the host is set up in the console — and reports a status description while
-/// it is.
+/// only when the host is set up in the console — and carries no status description, which
+/// the service reports only for a host whose VPC configuration is in flight.
 #[tokio::test]
-async fn a_host_created_through_the_api_is_pending_with_a_status_description() {
+async fn a_host_created_through_the_api_is_pending_without_a_status_description() {
     let emulator = Emulator::new();
 
     for provider_type in PROVIDER_TYPES {
@@ -513,9 +512,10 @@ async fn a_host_created_through_the_api_is_pending_with_a_status_description() {
             "case {provider_type:?}: expected status PENDING, got {read:?}"
         );
 
-        // `Host$StatusMessage` ("The status description for the host") is persisted for
-        // the pending host; its only modeled reader is `ListHosts`, still a scaffold, so
-        // the stored record is what this asserts.
+        // `Host$StatusMessage` ("The status description for the host") describes a VPC
+        // configuration being provisioned or torn down, and a host awaiting the console
+        // setup step is in neither, so nothing is persisted for it either —
+        // `host_status_descriptions.rs` pins what `ListHosts` reports.
         let (stored_status, stored_message) = emulator.stored_status(&host_arn);
         assert_eq!(
             stored_status, HOST_STATUS_PENDING,
@@ -523,8 +523,8 @@ async fn a_host_created_through_the_api_is_pending_with_a_status_description() {
              {stored_status:?}"
         );
         assert!(
-            stored_message.as_deref().is_some_and(|m| !m.is_empty()),
-            "case {provider_type:?}: a pending host reports a status description, got \
+            stored_message.is_none(),
+            "case {provider_type:?}: a pending host carries no status description, got \
              {stored_message:?}"
         );
     }
