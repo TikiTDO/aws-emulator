@@ -220,6 +220,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        let capacity = emulator_server::ecr_capacity::configured().map_err(|_| {
+            UploadLayerPartError::from(UploadLayerPartErrorModeled::ServerException(ServerException {
+                message: Some("invalid ECR capacity configuration".to_string()),
+            }))
+        })?;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(UploadLayerPartErrorModeled::ServerException(ServerException {
                 message: Some("the ecr repository store is unavailable".to_string()),
@@ -282,8 +287,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // The addressed upload resolved, so the part is now charged against the
         // registry-wide budget: it is refused before any byte of it is kept.
-        if caller_bytes_held.saturating_add(input.layer_part_blob.len())
-            > crate::state::MAX_REGISTRY_CALLER_BYTES
+        if !capacity.store_fits(caller_bytes_held, input.layer_part_blob.len())
         {
             return Err(refusal(
                 "registry byte budget reached",
@@ -292,7 +296,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     message: Some(format!(
                         "this registry holds at most {} bytes of in-flight layer uploads \
                          and stored image manifests together",
-                        crate::state::MAX_REGISTRY_CALLER_BYTES
+                        capacity.store_bytes
                     )),
                 }),
             )
@@ -363,7 +367,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                                 message: Some(format!(
                                     "this registry holds at most {} bytes per in-flight layer \
                                      upload",
-                                    crate::state::MAX_LAYER_UPLOAD_BYTES
+                                    capacity.layer_bytes
                                 )),
                             },
                         ),

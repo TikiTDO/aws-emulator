@@ -6,6 +6,7 @@
 //! and reusable HTTP infrastructure for building in-process AWS service emulators.
 
 pub mod cli;
+pub mod ecr_capacity;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -906,10 +907,8 @@ pub async fn serve_on_ephemeral_port<S: EmulatorService>(service: S) -> (String,
     (endpoint, service)
 }
 
-/// Upper bound on a request/response body buffered when bridging a request
-/// through a [`EmulatorService`] on the production serve path. The emulator serves
-/// small canned fixtures; this only guards against an accidentally unbounded
-/// stream. A larger request is answered `413 Payload Too Large`.
+/// Default production request-body cap. Only canonical ECR native layer uploads
+/// use the configured layer cap; responses are not limited by this collector.
 const MAX_PRODUCTION_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 /// How long a client on the production data port may take to send a request's
@@ -940,6 +939,8 @@ pub enum ServeError {
     /// unreachable to its health check and manifests as an unexplained
     /// deployment failure minutes later rather than as a message at boot.
     BindAddress(String),
+    /// ECR capacity settings were invalid; no listener is started.
+    Capacity(String),
 }
 
 impl std::fmt::Display for ServeError {
@@ -948,6 +949,7 @@ impl std::fmt::Display for ServeError {
             Self::Tls(msg) => write!(f, "TLS setup failed: {msg}"),
             Self::Io(e) => write!(f, "server I/O error: {e}"),
             Self::BindAddress(msg) => write!(f, "invalid bind address: {msg}"),
+            Self::Capacity(msg) => write!(f, "invalid ECR capacity: {msg}"),
         }
     }
 }
@@ -956,7 +958,7 @@ impl std::error::Error for ServeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
-            Self::Tls(_) | Self::BindAddress(_) => None,
+            Self::Tls(_) | Self::BindAddress(_) | Self::Capacity(_) => None,
         }
     }
 }
@@ -972,7 +974,22 @@ async fn emulator_service_fallback<S: EmulatorService>(
     req: axum::extract::Request,
 ) -> axum::response::Response {
     let (parts, body) = req.into_parts();
-    let body_bytes = match read_production_body(body).await {
+    let deadline = tokio::time::Instant::now() + BODY_READ_TIMEOUT;
+    // Bound active collection AND waiting writers. Hold the active permit through
+    // dispatch so decoding/copying/store mutation cannot overlap another upload.
+    let _writer = if ecr_capacity::byte_writer(&parts) {
+        match acquire_ecr_writer(&ECR_WRITER, &ECR_WAITERS, deadline).await {
+            Ok(permit) => Some(permit),
+            Err(status) => return body_refusal(status),
+        }
+    } else { None };
+    let cap = if ecr_capacity::native_upload(&parts) {
+        match ecr_capacity::configured() {
+            Ok(capacity) => capacity.layer_bytes,
+            Err(_) => return body_refusal(http::StatusCode::INTERNAL_SERVER_ERROR),
+        }
+    } else { MAX_PRODUCTION_BODY_BYTES };
+    let body_bytes = match read_production_body(body, cap, deadline).await {
         Ok(b) => b,
         Err(status) => {
             return axum::response::Response::builder()
@@ -987,16 +1004,37 @@ async fn emulator_service_fallback<S: EmulatorService>(
     axum::response::Response::from_parts(resp_parts, axum::body::Body::from(resp_body))
 }
 
-/// Buffers a request body: declared past [`MAX_PRODUCTION_BODY_BYTES`] it is a `413` before any
+// One active writer, at most sixteen waiting bodies (not polled while waiting).
+static ECR_WRITER: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+static ECR_WAITERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
+
+async fn acquire_ecr_writer<'a>(
+    active: &'a tokio::sync::Semaphore,
+    waiters: &tokio::sync::Semaphore,
+    deadline: tokio::time::Instant,
+) -> Result<tokio::sync::SemaphorePermit<'a>, http::StatusCode> {
+    let _waiting = waiters.try_acquire().map_err(|_| http::StatusCode::SERVICE_UNAVAILABLE)?;
+    tokio::time::timeout_at(deadline, active.acquire()).await
+        .map_err(|_| http::StatusCode::REQUEST_TIMEOUT)?
+        .map_err(|_| http::StatusCode::SERVICE_UNAVAILABLE)
+}
+
+fn body_refusal(status: http::StatusCode) -> axum::response::Response {
+    axum::response::Response::builder().status(status)
+        .header(http::header::RETRY_AFTER, "1")
+        .body(axum::body::Body::empty()).expect("valid fixed response")
+}
+
+/// Buffers a request body: declared past the selected cap it is a `413` before any
 /// of it is read, past the cap as it arrives a `413`, not finished within [`BODY_READ_TIMEOUT`] a
 /// `408`, and unreadable (a reset or malformed stream) a `400`.
-async fn read_production_body(body: axum::body::Body) -> Result<bytes::Bytes, http::StatusCode> {
+async fn read_production_body(body: axum::body::Body, cap: usize, deadline: tokio::time::Instant) -> Result<bytes::Bytes, http::StatusCode> {
     let declared = axum::body::HttpBody::size_hint(&body).exact();
-    if declared.is_some_and(|length| length > MAX_PRODUCTION_BODY_BYTES as u64) {
+    if declared.is_some_and(|length| length > cap as u64) {
         return Err(refused_unread(body));
     }
-    let read = axum::body::to_bytes(body, MAX_PRODUCTION_BODY_BYTES);
-    match tokio::time::timeout(BODY_READ_TIMEOUT, read).await {
+    let read = axum::body::to_bytes(body, cap);
+    match tokio::time::timeout_at(deadline, read).await {
         Ok(Ok(bytes)) => Ok(bytes),
         Ok(Err(error)) if is_over_the_size_cap(&error) => Err(http::StatusCode::PAYLOAD_TOO_LARGE),
         Ok(Err(_)) => Err(http::StatusCode::BAD_REQUEST),
@@ -1226,6 +1264,7 @@ pub async fn serve_production_on_address<S: EmulatorService>(
     bind_address: IpAddr,
     data_port: u16,
 ) -> Result<(), ServeError> {
+    ecr_capacity::configured().map_err(|message| ServeError::Capacity(message.to_owned()))?;
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .ok();
@@ -4356,5 +4395,114 @@ mod tests {
         check!(resp.headers().get("x-amz-request-id").is_none());
         let body = String::from_utf8(resp.body().to_vec()).expect("utf-8");
         check!(body.contains("\"__type\""), "{body}");
+    }
+}
+
+#[cfg(test)]
+mod ecr_body_capacity_tests {
+    use super::*;
+
+    fn deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + std::time::Duration::from_secs(2)
+    }
+
+    #[derive(Clone)]
+    struct ObservedBody(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl EmulatorService for ObservedBody {
+        async fn handle_request(
+            &self,
+            req: http::Request<bytes::Bytes>,
+        ) -> http::Response<bytes::Bytes> {
+            self.0.store(req.body().len(), std::sync::atomic::Ordering::SeqCst);
+            assert!(req.body().iter().all(|byte| *byte == 42));
+            http::Response::builder().status(201).body(bytes::Bytes::new()).unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn production_fallback_wires_native_exception_without_enlarging_ordinary_path() {
+        // Deliberately uses the real process configuration. Run with capacity env
+        // unset (defaults), not a test-only override of the production classifier.
+        let observed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = Arc::new(ObservedBody(observed.clone()));
+        let length = 17 * 1024 * 1024;
+        for (path, expected) in [
+            ("/v2/synthetic/blobs/uploads/test-upload", http::StatusCode::CREATED),
+            ("/ordinary", http::StatusCode::PAYLOAD_TOO_LARGE),
+        ] {
+            observed.store(0, std::sync::atomic::Ordering::SeqCst);
+            let req = http::Request::builder().method("PATCH").uri(path)
+                .body(axum::body::Body::from(vec![42u8; length])).unwrap();
+            let response = emulator_service_fallback(axum::extract::State(service.clone()), req).await;
+            assert_eq!(response.status(), expected, "{path}");
+            assert_eq!(observed.load(std::sync::atomic::Ordering::SeqCst),
+                if expected == http::StatusCode::CREATED { length } else { 0 });
+        }
+    }
+
+    // Unknown wire length exercises the actual arriving-byte limiter, not just
+    // the declared-length fast refusal.
+    struct Unhinted(Option<bytes::Bytes>);
+    impl axum::body::HttpBody for Unhinted {
+        type Data = bytes::Bytes;
+        type Error = std::convert::Infallible;
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+            std::task::Poll::Ready(self.0.take().map(|b| Ok(hyper::body::Frame::data(b))))
+        }
+    }
+
+    #[tokio::test]
+    async fn production_collector_native_17mib_and_ordinary_limit() {
+        let bytes = bytes::Bytes::from(vec![42u8; 17 * 1024 * 1024]);
+        let collected = read_production_body(
+            axum::body::Body::from(bytes.clone()),
+            ecr_capacity::DEFAULT_LAYER_BYTES,
+            deadline(),
+        ).await.unwrap();
+        assert_eq!(collected, bytes);
+        assert_eq!(
+            read_production_body(axum::body::Body::from(bytes), MAX_PRODUCTION_BODY_BYTES, deadline()).await.unwrap_err(),
+            http::StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[tokio::test]
+    async fn production_collector_small_declared_and_arriving_caps() {
+        assert_eq!(read_production_body(axum::body::Body::from("1234"), 4, deadline()).await.unwrap(), "1234");
+        assert_eq!(read_production_body(axum::body::Body::from("12345"), 4, deadline()).await.unwrap_err(), http::StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(read_production_body(axum::body::Body::new(Unhinted(Some(bytes::Bytes::from_static(b"12345")))), 4, deadline()).await.unwrap_err(), http::StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn writer_wait_is_bounded_and_cancel_safe() {
+        let active = tokio::sync::Semaphore::new(1);
+        let waiters = tokio::sync::Semaphore::new(1);
+        let first = acquire_ecr_writer(&active, &waiters, deadline()).await.unwrap();
+        {
+            let waiting = acquire_ecr_writer(&active, &waiters, deadline());
+            tokio::pin!(waiting);
+            tokio::select! {
+                result = &mut waiting => panic!("should wait, got {result:?}"),
+                _ = tokio::task::yield_now() => {}
+            }
+            assert_eq!(waiters.available_permits(), 0);
+            assert_eq!(acquire_ecr_writer(&active, &waiters, deadline()).await.unwrap_err(), http::StatusCode::SERVICE_UNAVAILABLE);
+        }
+        assert_eq!(waiters.available_permits(), 1);
+        assert_eq!(acquire_ecr_writer(&active, &waiters, tokio::time::Instant::now()).await.unwrap_err(), http::StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(waiters.available_permits(), 1);
+        let (next, ()) = tokio::join!(
+            acquire_ecr_writer(&active, &waiters, deadline()),
+            async { tokio::task::yield_now().await; drop(first); }
+        );
+        drop(next.unwrap());
+        let next = acquire_ecr_writer(&active, &waiters, deadline()).await.unwrap();
+        assert_eq!(active.available_permits(), 0);
+        drop(next);
+        assert_eq!(active.available_permits(), 1);
     }
 }

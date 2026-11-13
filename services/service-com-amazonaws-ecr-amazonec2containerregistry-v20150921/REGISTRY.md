@@ -30,8 +30,9 @@ checked before mutation.
 This is not complete ECR/OCI conformance. In particular, **native manifest pushes
 do not publish EventBridge image-action notifications**: the native routing hook
 is synchronous. JSON `PutImage` retains its existing EventBridge behavior.
-No event delivery is fabricated. The shared in-memory bounds remain 128MiB per
-layer, 512MiB aggregate content/uploads/manifests and 1000 concurrent uploads;
+No event delivery is fabricated. The shared in-memory defaults remain 128MiB per
+layer and 512MiB aggregate content/uploads/manifests (configurable below), with
+1000 concurrent uploads;
 past capacity is an explicit refusal, not metadata-only success. State is not a
 persistent external registry and does not survive emulator process loss.
 
@@ -49,17 +50,45 @@ fits the in-memory bounds. Ordinary tests never execute Docker.
 
 ### Production HTTP body ceiling
 
-The production HTTPS server separately buffers at most **16MiB per request body**
-(`vendor/server/src/lib.rs`, `MAX_PRODUCTION_BODY_BYTES`). A larger body is
-refused with HTTP 413 before service dispatch; sending it with HTTP chunked
-transfer encoding does not bypass that total-body limit. The 128MiB layer bound
-above is a stored/upload-session bound, not a promise that one HTTP request can
-carry a layer that large. A client must split larger content into separate
-Registry V2 PATCH requests within the server ceiling; this service cannot force
-an unmodified Docker publisher to do so. Actual Docker/CDK request sizes and
-application layer sizes still require validation before claiming application fit.
+The production HTTPS server buffers ordinary request bodies up to **16MiB**
+(`vendor/server/src/lib.rs`, `MAX_PRODUCTION_BODY_BYTES`). Canonical native
+Registry V2 layer-upload POST/PATCH/PUT paths are the narrow exception: their
+body cap is the configured ECR layer limit described below. A body above its
+selected cap is refused with HTTP 413 before service dispatch; HTTP chunked
+transfer encoding does not bypass that total-body limit. The stored upload
+session also remains bounded by the same layer limit, including earlier chunks.
+Clients need not split a layer merely to satisfy the ordinary 16MiB cap.
+Actual Docker/CDK request sizes and application layer sizes still require
+validation before claiming application fit.
 
 The ephemeral HTTP test server used by the ignored witness does not apply this
 production-server body ceiling. A tiny witness passing there is not production
 large-layer/streaming proof. The server's extra-route seam also receives already
 buffered requests; it is not an existing streaming bypass for registry uploads.
+
+### Production upload capacity
+
+The production HTTP bridge admits canonical native layer upload POST/PATCH/PUT
+bodies up to the ECR layer limit. Unrelated requests, manifests and JSON API wire
+bodies retain the 16 MiB production cap. JSON decoded parts and native layers use
+the same store accounting, including in-flight bytes, stored blobs and manifests.
+
+`EMULATOR_ECR_MAX_LAYER_BYTES` defaults to 134217728 (128 MiB);
+`EMULATOR_ECR_MAX_STORE_BYTES` defaults to 536870912 (512 MiB).
+Optional values are positive decimal byte counts, with layer <= store.
+The finite configuration ceilings are 1073741824 and 8589934592 respectively;
+these are not recommended application budgets. Invalid configuration stops
+production startup; the settings are read once per process. Restart to change
+them. Actual application compressed layer sizes still need measurement.
+
+One production ECR byte writer collects and dispatches at a time, with at most
+sixteen waiting requests whose bodies are not collected while waiting. Waiting
+and body reading share the existing body deadline. A full queue returns 503 with
+Retry-After: 1; an expired wait returns 408. Cancellation releases the permit.
+This lets ordinary parallel Docker layer requests wait without simultaneously
+buffering enlarged bodies. It is not a streaming interface, an exact RSS bound,
+or a global concurrency cap: transport buffers, collection/copy allocation,
+store growth, readers and unrelated requests remain additional memory.
+Authentication still occurs in the service after bounded transport admission;
+classification grants no registry permission. Native EventBridge omission is
+unchanged.

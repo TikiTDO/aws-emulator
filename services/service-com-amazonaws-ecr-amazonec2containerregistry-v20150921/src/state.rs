@@ -918,8 +918,9 @@ pub const ABANDONED_UPLOAD_AGE: Duration = Duration::from_secs(60 * 60);
 /// to: `UploadLayerPart` and `PutImage` refuse, with the `LimitExceededException` each
 /// models, the call that would take the registry past it, and no byte of the refused
 /// payload is kept. It is a bound on THIS PROCESS's memory rather than an AWS quota (AWS
-/// publishes none), set well above the bytes any ordinary push or test sends.
-pub const MAX_REGISTRY_CALLER_BYTES: usize = 512 * 1024 * 1024;
+/// publishes none). This constant is the default; the process-stable configured
+/// store limit is enforced at runtime and is a logical-byte, not RSS, budget.
+pub const MAX_REGISTRY_CALLER_BYTES: usize = emulator_server::ecr_capacity::DEFAULT_STORE_BYTES;
 
 /// The `partSize` `InitiateLayerUpload` reports: the size ECR tells the client to send
 /// future layer parts in.
@@ -939,8 +940,8 @@ pub const REPORTED_LAYER_PART_SIZE: i64 = 10 * 1024 * 1024;
 /// `LimitExceededException` `UploadLayerPart` models ("the operation did not succeed
 /// because it would have exceeded a service limit for your account") and no byte of it
 /// is kept. AWS publishes no fixed maximum layer size, so the number is this
-/// emulator's own bound, set well above any layer an ordinary push sends.
-pub const MAX_LAYER_UPLOAD_BYTES: usize = 128 * 1024 * 1024;
+/// emulator's default bound. Runtime writes use the configured ECR layer limit.
+pub const MAX_LAYER_UPLOAD_BYTES: usize = emulator_server::ecr_capacity::DEFAULT_LAYER_BYTES;
 
 /// See [`MAX_REPOSITORIES`]. This one bounds [`Repo::layer_blobs`], which grows by one
 /// entry per `CompleteLayerUpload` that registers a blob the repository did not already
@@ -1028,6 +1029,18 @@ impl LayerUpload {
         part_last_byte: i64,
         blob: &[u8],
     ) -> Result<i64, LayerPartRejection> {
+        let capacity = emulator_server::ecr_capacity::configured()
+            .map_err(|_| LayerPartRejection::UploadTooLarge)?;
+        self.receive_part_with_capacity(part_first_byte, part_last_byte, blob, *capacity)
+    }
+
+    fn receive_part_with_capacity(
+        &mut self,
+        part_first_byte: i64,
+        part_last_byte: i64,
+        blob: &[u8],
+        capacity: emulator_server::ecr_capacity::EcrCapacity,
+    ) -> Result<i64, LayerPartRejection> {
         let declared_len = part_last_byte
             .checked_sub(part_first_byte)
             .and_then(|span| span.checked_add(1))
@@ -1039,7 +1052,7 @@ impl LayerUpload {
         if part_first_byte != self.next_part_first_byte() {
             return Err(LayerPartRejection::NonConsecutivePart);
         }
-        if self.received_bytes.len().saturating_add(blob.len()) > MAX_LAYER_UPLOAD_BYTES {
+        if !capacity.layer_fits(self.received_bytes.len(), blob.len()) {
             return Err(LayerPartRejection::UploadTooLarge);
         }
         self.received_bytes.extend_from_slice(blob);
@@ -2805,10 +2818,20 @@ impl ComAmazonawsEcrAmazonec2containerregistryV20150921State {
     }
 
     /// Whether `additional` more caller-supplied bytes fit under
-    /// [`MAX_REGISTRY_CALLER_BYTES`]. A caller that asks for more is refused before any
+    /// the configured ECR store limit (default [`MAX_REGISTRY_CALLER_BYTES`]).
+    /// A caller that asks for more is refused before any
     /// byte of its payload is stored.
     pub fn has_byte_budget_for(&self, additional: usize) -> bool {
-        self.caller_bytes_held().saturating_add(additional) <= MAX_REGISTRY_CALLER_BYTES
+        emulator_server::ecr_capacity::configured()
+            .is_ok_and(|cap| self.has_byte_budget_with_capacity(additional, *cap))
+    }
+
+    fn has_byte_budget_with_capacity(
+        &self,
+        additional: usize,
+        capacity: emulator_server::ecr_capacity::EcrCapacity,
+    ) -> bool {
+        capacity.store_fits(self.caller_bytes_held(), additional)
     }
 
     /// How many basic image scans this registry has started within `interval` of `now`:
@@ -4271,3 +4294,33 @@ pub use registry_v2::*;
 pub use layer_download::*;
 pub use image_scan::*;
 pub use scanning::*;
+
+#[cfg(test)]
+mod configured_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn actual_layer_append_respects_injected_capacity_without_mutation() {
+        let capacity = emulator_server::ecr_capacity::EcrCapacity::parse(Some("4"), Some("8")).unwrap();
+        for registry_principal in [None, Some("synthetic-native".to_string())] {
+            let mut upload = LayerUpload {
+                registry_principal,
+                repository_name: "synthetic".to_string(),
+                part_size: 4,
+                started_at: SystemTime::UNIX_EPOCH,
+                received_bytes: Vec::new(),
+            };
+            assert_eq!(upload.receive_part_with_capacity(0, 2, b"abc", capacity), Ok(2));
+            assert_eq!(upload.receive_part_with_capacity(3, 4, b"de", capacity), Err(LayerPartRejection::UploadTooLarge));
+            assert_eq!(upload.received_bytes, b"abc");
+            assert_eq!(upload.receive_part_with_capacity(3, 3, b"d", capacity), Ok(3));
+            assert_eq!(upload.received_bytes, b"abcd");
+            let mut store = ComAmazonawsEcrAmazonec2containerregistryV20150921State::default();
+            store.uploads.insert("synthetic".to_string(), upload);
+            assert_eq!(store.caller_bytes_held(), 4);
+            assert!(store.has_byte_budget_with_capacity(4, capacity));
+            assert!(!store.has_byte_budget_with_capacity(5, capacity));
+            assert_eq!(store.caller_bytes_held(), 4);
+        }
+    }
+}
