@@ -6,9 +6,11 @@
 //!
 //! A group carries the parameters a CALLER set (reported `Source` `user`); the engine's own
 //! defaults belong to the FAMILY and are published by it
-//! (`crate::state::published_parameters`), so a freshly created group reports an empty
-//! `Parameters` list and a `Source` naming the engine reports the family's published
-//! defaults instead of the group's own set.
+//! (`crate::state::published_parameters`), so a `Source` naming the engine reports the
+//! family's published defaults and a request naming no source at all reports every
+//! parameter of the group: each one its family publishes, under the value the group sets for
+//! it or under the engine's own default where it sets none, and each carrying the apply
+//! method that parameter's change takes in the group.
 //!
 //! ## Shape of an operation
 //!

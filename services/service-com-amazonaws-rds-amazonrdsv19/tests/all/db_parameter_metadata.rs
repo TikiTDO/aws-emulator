@@ -25,8 +25,8 @@
 //! range with a negative bound, a single admitted value).
 
 use service_com_amazonaws_rds_amazonrdsv19::state::{
-    published_db_parameters, ClusterParameterSpec, APPLY_TYPE_DYNAMIC, APPLY_TYPE_STATIC,
-    PARAMETER_SOURCE_ENGINE_DEFAULT, PARAMETER_SOURCE_USER,
+    published_db_parameters, ClusterParameterSpec, APPLY_METHOD_PENDING_REBOOT,
+    APPLY_TYPE_DYNAMIC, APPLY_TYPE_STATIC, PARAMETER_SOURCE_ENGINE_DEFAULT, PARAMETER_SOURCE_USER,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -256,11 +256,16 @@ async fn a_new_groups_parameter_report_publishes_each_parameters_declared_record
                 "case {case:?}: a published parameter reports its Description, got {:?}",
                 entry.description
             );
-            // "ApplyMethod: indicates when to apply parameter updates" — a property of a
-            // change a caller asked for, and nobody asked for an engine default.
+            // "ApplyMethod: indicates when to apply parameter updates" — and in a GROUP's
+            // own listing every parameter carries one: a parameter nobody has changed is
+            // reported under the method a change to it would take while none is waiting,
+            // `pending-reboot`. The FAMILY-level report below is about the engine and about
+            // no group, so it carries none.
             assert_eq!(
-                entry.apply_method, None,
-                "case {case:?}: an engine default carries no ApplyMethod, got {:?}",
+                entry.apply_method.as_deref(),
+                Some(APPLY_METHOD_PENDING_REBOOT),
+                "case {case:?}: a group reports an engine default under the apply method a \
+                 change to it would take, got {:?}",
                 entry.apply_method
             );
         }

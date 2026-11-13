@@ -238,11 +238,11 @@ impl DbClusterParameterGroupRecord {
         Parameter {
             parameter_name: Some(name.to_string()),
             parameter_value: setting.map(|setting| setting.value.clone()),
-            description: spec.map(|spec| spec.description.to_string()),
+            description: spec.and_then(|spec| published_column(spec.description)),
             source: Some(PARAMETER_SOURCE_USER.to_string()),
             apply_type: spec.map(|spec| spec.apply_type.to_string()),
             data_type: spec.map(|spec| spec.data_type.to_string()),
-            allowed_values: spec.map(|spec| spec.allowed_values.to_string()),
+            allowed_values: spec.and_then(|spec| published_column(spec.allowed_values)),
             is_modifiable: spec.map(|spec| spec.is_modifiable),
             // Answered about THIS group's family, and only where the catalog publishes the
             // version the parameter was introduced in; see
@@ -296,7 +296,7 @@ impl DbClusterParameterGroupRecord {
         .map(|spec| {
             (
                 spec.name.to_string(),
-                cluster_engine_default_parameter_to_wire(&self.family, spec),
+                group_default_cluster_parameter_to_wire(&self.family, spec),
             )
         })
         .collect()
@@ -362,11 +362,11 @@ impl DbParameterGroupRecord {
         Parameter {
             parameter_name: Some(name.to_string()),
             parameter_value: setting.map(|setting| setting.value.clone()),
-            description: spec.map(|spec| spec.description.to_string()),
+            description: spec.and_then(|spec| published_column(spec.description)),
             source: Some(PARAMETER_SOURCE_USER.to_string()),
             apply_type: spec.map(|spec| spec.apply_type.to_string()),
             data_type: spec.map(|spec| spec.data_type.to_string()),
-            allowed_values: spec.map(|spec| spec.allowed_values.to_string()),
+            allowed_values: spec.and_then(|spec| published_column(spec.allowed_values)),
             is_modifiable: spec.map(|spec| spec.is_modifiable),
             // Reported only where the catalog publishes the version the parameter was
             // introduced in, exactly as [`engine_default_parameter_to_wire`] reports it: "the
@@ -485,7 +485,9 @@ pub fn published_cluster_parameter_at_any_level(
 /// release, and both catalogs here say so in their own module headers — the cluster tables are
 /// "not AWS's whole list" and the DB-parameter tables are drawn from the head of it. A name
 /// outside a sample is therefore no evidence that the engine lacks the parameter, so nothing is
-/// refused for it.
+/// refused for it: the engine parameters such a group really carries reach past this sample —
+/// `aws_default_s3_role`, which an Aurora MySQL cluster's own S3 import reads off its cluster
+/// parameter group, is one of them.
 pub fn publishes_a_complete_vocabulary(family: &str) -> bool {
     published_parameters(family).is_some()
         || crate::ops::describe_engine_default_parameters::family_engine(family)
@@ -581,17 +583,18 @@ pub fn db_parameter_default_apply_method(family: &str, name: &str) -> &'static s
 /// version, since "the earliest engine version to which the parameter can apply" is a fact
 /// about the engine's release history and not something this front door can derive.
 ///
-/// `ParameterValue` and `AllowedValues` are reported only where the catalog publishes one. A
-/// parameter the engine AUTOSIZES at startup publishes no default, and one the engine
-/// publishes neither an enumeration nor a range for has no allowed values; reporting an empty
-/// string for either would say the engine runs that parameter at the empty value, or admits
-/// only it, which is not something the engine ever published.
+/// `ParameterValue`, `AllowedValues` and `Description` are reported only where the catalog
+/// publishes one. A parameter the engine AUTOSIZES at startup publishes no default, one the
+/// engine publishes neither an enumeration nor a range for has no allowed values, and one the
+/// published list carries no explanatory text for has no description; reporting an empty
+/// string for any of them would say the engine runs that parameter at the empty value, admits
+/// only it, or describes it as the empty sentence, none of which the engine ever published.
 pub fn engine_default_parameter_to_wire(family: &str, spec: &ClusterParameterSpec) -> Parameter {
     let spec = published_spec_for_family(family, spec);
     Parameter {
         parameter_name: Some(spec.name.to_string()),
         parameter_value: published_default(spec.default_value),
-        description: Some(spec.description.to_string()),
+        description: published_column(spec.description),
         source: Some(PARAMETER_SOURCE_ENGINE_DEFAULT.to_string()),
         apply_type: Some(spec.apply_type.to_string()),
         data_type: Some(spec.data_type.to_string()),
@@ -644,6 +647,37 @@ pub fn cluster_engine_default_parameter_to_wire(
         minimum_engine_version: (!spec.minimum_engine_version.is_empty())
             .then(|| minimum_engine_version_in_family(family, spec)),
         ..engine_default_parameter_to_wire(family, spec)
+    }
+}
+
+/// A parameter the family publishes, as a GROUP of that family reports it in its own
+/// parameter listing: the published record of [`engine_default_parameter_to_wire`] plus the
+/// apply method that parameter carries in the group.
+///
+/// A group's own listing is about the GROUP rather than about the engine, and every
+/// parameter of a group has an apply method: `Parameter$ApplyMethod` "indicates when to
+/// apply parameter updates", and a parameter whose value nobody has changed is reported
+/// under [`APPLY_METHOD_PENDING_REBOOT`] — the method a change to it would take while none
+/// is waiting to be applied. The FAMILY's engine-default report
+/// (`DescribeEngineDefaultParameters`) is about the engine and about no group at all, so it
+/// reports no apply method; the two projections differ in exactly that member.
+pub fn group_default_parameter_to_wire(family: &str, spec: &ClusterParameterSpec) -> Parameter {
+    Parameter {
+        apply_method: Some(APPLY_METHOD_PENDING_REBOOT.to_string()),
+        ..engine_default_parameter_to_wire(family, spec)
+    }
+}
+
+/// The CLUSTER-level counterpart of [`group_default_parameter_to_wire`]: what a DB CLUSTER
+/// parameter group reports for a parameter of its family that nobody has changed — the
+/// cluster-level published record plus that same apply method.
+pub fn group_default_cluster_parameter_to_wire(
+    family: &str,
+    spec: &ClusterParameterSpec,
+) -> Parameter {
+    Parameter {
+        apply_method: Some(APPLY_METHOD_PENDING_REBOOT.to_string()),
+        ..cluster_engine_default_parameter_to_wire(family, spec)
     }
 }
 

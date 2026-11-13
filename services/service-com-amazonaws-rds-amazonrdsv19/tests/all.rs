@@ -273,6 +273,8 @@ mod orderable_db_instance_options;
 mod pagination_marker_positions;
 #[path = "all/parameter_group_and_snapshot_copies.rs"]
 mod parameter_group_and_snapshot_copies;
+#[path = "all/parameter_group_apply_method.rs"]
+mod parameter_group_apply_method;
 #[path = "all/parameter_refusal_codes.rs"]
 mod parameter_refusal_codes;
 #[path = "all/postgres_rds_namespace_parameters.rs"]

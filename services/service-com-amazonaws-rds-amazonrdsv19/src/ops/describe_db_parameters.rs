@@ -259,8 +259,9 @@ fn check_filter_names(filters: &[Filter]) -> Result<(), String> {
 }
 
 /// The parameters `group`'s family publishes, each with the default value the engine runs
-/// with and `Source` `engine-default`: what a `Source` naming the engine reports, and the
-/// half of [`every_parameter_type`] the group has set nothing for.
+/// with, `Source` `engine-default` and the apply method the group reports for a parameter
+/// nobody has changed: what a `Source` naming the engine reports, and the half of
+/// [`every_parameter_type`] the group has set nothing for.
 fn published_defaults(
     group: &crate::state::DbParameterGroupRecord,
 ) -> BTreeMap<String, Parameter> {
@@ -270,7 +271,7 @@ fn published_defaults(
         .map(|spec| {
             (
                 spec.name.to_string(),
-                crate::state::engine_default_parameter_to_wire(&group.family, spec),
+                crate::state::group_default_parameter_to_wire(&group.family, spec),
             )
         })
         .collect()

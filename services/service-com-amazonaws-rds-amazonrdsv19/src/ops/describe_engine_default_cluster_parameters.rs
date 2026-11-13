@@ -306,6 +306,17 @@ fn cluster_engine_default_parameters(
 /// values, default value, modifiable, minimum engine version, description.
 pub(crate) const MYSQL_CLUSTER_PARAMETERS: &[crate::state::ClusterParameterSpec] = &[
     parameter(
+        "activate_all_roles_on_login",
+        crate::state::APPLY_TYPE_DYNAMIC,
+        "boolean",
+        "0,1",
+        "0",
+        true,
+        "",
+        "Automatically set all granted roles as active after the user has authenticated \
+         successfully.",
+    ),
+    parameter(
         "binlog_format",
         crate::state::APPLY_TYPE_STATIC,
         "string",
