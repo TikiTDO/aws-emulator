@@ -144,6 +144,103 @@ pub(crate) fn already_past() -> SystemTime {
     SystemTime::now() - Duration::from_secs(1)
 }
 
+/// How long a poll of a job's runs waits for them to come to rest.
+///
+/// Deliberately generous, and nothing is asserted about how long anything took: what the
+/// poll waits for is the EXECUTION the service owes a run, performed by whichever call
+/// finds it owed and bounded by the ceiling this emulator gives one call, plus the span
+/// the clock then owes the run itself. A window far longer than both is what separates a
+/// run that has not finished YET from one that never finishes, on a host of any speed.
+pub(crate) const RUN_AT_REST_DEADLINE: Duration = Duration::from_secs(120);
+
+/// How long one turn of that poll waits before reading again — the gap between two reads
+/// of a client that polls, not a span anything is expected to finish inside.
+pub(crate) const RUN_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Whether a reported run has come to rest, by the states a run never leaves again.
+pub(crate) fn at_rest(run: &Value) -> bool {
+    let state = run
+        .get("JobRunState")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    TERMINAL_JOB_RUN_STATES.contains(&state)
+}
+
+/// Read the run `run_id` of `job_name` back until it has come to rest, and answer the
+/// `JobRun` it then reports.
+///
+/// The state a run comes to rest in is owed to it by its own script's EXECUTION — which
+/// whichever call finds that execution owed performs, the start or a later read — and then
+/// by the clock, one owed span later. So the run is polled for that CONDITION rather than
+/// assumed to have reached it by the first read, which is what a client polling the run
+/// does and what keeps the outcome independent of what the host was doing meanwhile. The
+/// owed span is made due through the store on every turn rather than slept out, and a run
+/// still not at rest when the window closes fails the case instead of hanging.
+pub(crate) async fn run_at_rest(
+    router: &MultiServiceRouter,
+    engine: &Arc<engine::InMemoryEngine>,
+    case: &str,
+    job_name: &str,
+    run_id: &str,
+) -> Value {
+    let deadline = SystemTime::now() + RUN_AT_REST_DEADLINE;
+    loop {
+        set_due_instant(engine, job_name, already_past());
+        let run = get_run(router, job_name, run_id).await;
+        if at_rest(&run) {
+            return run;
+        }
+        assert!(
+            SystemTime::now() < deadline,
+            "case {case:?}: run {run_id:?} of {job_name:?} must come to rest, and it reports \
+             {run}"
+        );
+        tokio::time::sleep(RUN_POLL_INTERVAL).await;
+    }
+}
+
+/// Read the runs of `job_name` back until every one of them has come to rest, and answer
+/// them as `GetJobRuns` reports them.
+///
+/// A chain of attempts advances one attempt per owed span — the retry a failed attempt
+/// bought is recorded, and its script executed, by the call that finds that attempt
+/// finished — so the chain has come to rest exactly when no run of the job is still in
+/// flight. Polled for that condition, as [`run_at_rest`] polls for one run's.
+pub(crate) async fn runs_at_rest(
+    router: &MultiServiceRouter,
+    engine: &Arc<engine::InMemoryEngine>,
+    case: &str,
+    job_name: &str,
+) -> Vec<Value> {
+    let deadline = SystemTime::now() + RUN_AT_REST_DEADLINE;
+    loop {
+        set_due_instant(engine, job_name, already_past());
+        let page = ok(router, "GetJobRuns", &json!({ "JobName": job_name })).await;
+        // The chain is read in ONE page: a job of these suites holds far fewer runs than a
+        // page does, so a token on the answer would mean runs the caller never saw.
+        assert!(
+            page.get("NextToken").is_none_or(Value::is_null),
+            "case {case:?}: every run of {job_name:?} must fit one page, got {page}"
+        );
+        let listed = page
+            .get("JobRuns")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!("case {case:?}: GetJobRuns must report JobRuns, got {page}")
+            });
+        if !listed.is_empty() && listed.iter().all(at_rest) {
+            return listed;
+        }
+        assert!(
+            SystemTime::now() < deadline,
+            "case {case:?}: every run of {job_name:?} must come to rest, and they report \
+             {listed:?}"
+        );
+        tokio::time::sleep(RUN_POLL_INTERVAL).await;
+    }
+}
+
 /// Assert that `run` failed on the one thing a run of these suites' jobs fails on: its
 /// script could not be read.
 ///

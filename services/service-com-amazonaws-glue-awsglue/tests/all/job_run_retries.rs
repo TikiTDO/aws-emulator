@@ -32,11 +32,11 @@ use std::time::{Duration, SystemTime};
 use serde_json::{json, Value};
 use service_com_amazonaws_glue_awsglue::state::{
     FIRST_JOB_RUN_ATTEMPT, JOB_RUN_SETTLES_AFTER, JOB_RUN_STATE_FAILED, JOB_RUN_STATE_STOPPED,
-    MAX_RUNS_PER_JOB, TERMINAL_JOB_RUN_STATES,
+    TERMINAL_JOB_RUN_STATES,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::job_runs::{emulator_with_engine, get_run, job_body, set_due_instant, start_run};
+use crate::job_runs::{emulator_with_engine, get_run, job_body, runs_at_rest, start_run};
 use crate::wire::ok;
 
 /// The retry budget a job definition that names none carries: the `@default` of
@@ -69,25 +69,17 @@ async fn listed_runs(router: &MultiServiceRouter, case: &str, job_name: &str) ->
 /// Each attempt of a chain is a further EXECUTION of the job's script, which the service
 /// performs once the attempt it retries has come to rest — so the chain advances one attempt
 /// per owed span, exactly as a client polling the job's runs observes it. Here the span is
-/// made due rather than slept for, and the runs are read back until the chain stops changing,
-/// which is the state a client that polled long enough would see. The number of turns is
-/// bounded by the runs one job can hold.
+/// made due rather than slept for and the runs are read back until no run of the job is in
+/// flight any more, through the one poll this crate's run suites share
+/// ([`crate::job_runs::runs_at_rest`]), which is the state a client that polled long enough
+/// would see.
 async fn settled_runs(
     router: &MultiServiceRouter,
     engine: &std::sync::Arc<engine::InMemoryEngine>,
     case: &str,
     job_name: &str,
 ) -> Vec<Value> {
-    let mut runs: Vec<Value> = Vec::new();
-    for _ in 0..=MAX_RUNS_PER_JOB {
-        set_due_instant(engine, job_name, SystemTime::UNIX_EPOCH);
-        let listed = listed_runs(router, case, job_name).await;
-        if listed == runs {
-            return runs;
-        }
-        runs = listed;
-    }
-    panic!("case {case:?}: the chain of {job_name} never came to rest, got {runs:?}")
+    runs_at_rest(router, engine, case, job_name).await
 }
 
 /// The listed runs keyed by the `Attempt` each reports, which must name them uniquely.

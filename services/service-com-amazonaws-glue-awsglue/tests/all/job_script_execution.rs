@@ -24,8 +24,10 @@
 //! named, in a language no engine here runs) and what the run therefore comes to rest in.
 //!
 //! The due instant a run's terminal state falls at is moved THROUGH THE STORE rather than
-//! slept for ([`crate::job_runs::set_due_instant`]), so every transition here is
-//! deterministic.
+//! slept for, and every run is read back until it has come to rest
+//! ([`crate::job_runs::run_at_rest`]) — the execution a run is owed is performed by
+//! whichever call finds it owed — so every transition here is deterministic and no outcome
+//! depends on how fast the host runs.
 
 use std::sync::Arc;
 
@@ -37,7 +39,7 @@ use service_com_amazonaws_glue_awsglue::state::{
 };
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::job_runs::{already_past, set_due_instant};
+use crate::job_runs::{run_at_rest, runs_at_rest};
 use crate::wire::{emulator_on, ok, REGION};
 
 /// The role a job runs as: "the name or Amazon Resource Name (ARN) of the IAM role
@@ -110,7 +112,7 @@ pub(crate) async fn stage_script(router: &MultiServiceRouter, key: &str, source:
 }
 
 /// The body of one object, or `None` when the object store does not serve it.
-async fn object_body(router: &MultiServiceRouter, key: &str) -> Option<String> {
+pub(crate) async fn object_body(router: &MultiServiceRouter, key: &str) -> Option<String> {
     let object = s3(router)
         .get_object()
         .bucket(BUCKET)
@@ -122,8 +124,15 @@ async fn object_body(router: &MultiServiceRouter, key: &str) -> Option<String> {
     String::from_utf8(bytes.to_vec()).ok()
 }
 
-/// Start a run of `job_name` with `arguments`, make the state the clock owes it due, and
-/// answer the `JobRun` `GetJobRun` then reports.
+/// Start a run of `job_name` with `arguments` and answer the `JobRun` `GetJobRun` reports
+/// once that run has come to rest.
+///
+/// The run's script is executed by whichever call finds that execution owed — the start, or
+/// a later read when the start found no free interpreter — and the state it came to falls
+/// due one owed span after it answered. So the run is READ BACK UNTIL it has come to rest
+/// ([`crate::job_runs::run_at_rest`]), with the owed span made due through the store on
+/// every turn rather than slept out: what the run reports then is what its own execution
+/// came to, however busy the host was while it ran.
 pub(crate) async fn run_to_rest(
     router: &MultiServiceRouter,
     engine: &Arc<engine::InMemoryEngine>,
@@ -142,18 +151,7 @@ pub(crate) async fn run_to_rest(
         .and_then(Value::as_str)
         .unwrap_or_else(|| panic!("StartJobRun must answer a JobRunId, got {started}"))
         .to_string();
-    // The span the clock owes the run is made due rather than waited out: what the run comes
-    // to rest in was decided by the execution the start performed.
-    set_due_instant(engine, job_name, already_past());
-    let body = ok(
-        router,
-        "GetJobRun",
-        &json!({ "JobName": job_name, "RunId": run_id }),
-    )
-    .await;
-    body.get("JobRun")
-        .cloned()
-        .unwrap_or_else(|| panic!("GetJobRun must report a JobRun, got {body}"))
+    run_at_rest(router, engine, job_name, job_name, &run_id).await
 }
 
 /// What a row expects of the run's `ErrorMessage`.
@@ -662,24 +660,9 @@ raise RuntimeError("this attempt failed after writing its object")
 
         // Each attempt is a further EXECUTION the service performs once the attempt it
         // retries has come to rest, so the chain advances one attempt per owed span: the
-        // span is made due rather than slept for and the runs are read back until the chain
-        // stops changing, which is what a client polling them observes.
-        let mut runs: Vec<Value> = Vec::new();
-        for _ in 0..=10 {
-            set_due_instant(&engine, &name, already_past());
-            let page = ok(&router, "GetJobRuns", &json!({ "JobName": name })).await;
-            let listed = page
-                .get("JobRuns")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_else(|| {
-                    panic!("case {case:?}: GetJobRuns must report JobRuns, got {page}")
-                });
-            if listed == runs {
-                break;
-            }
-            runs = listed;
-        }
+        // span is made due rather than slept for and the runs are read back until no run of
+        // the job is in flight any more, which is what a client polling them observes.
+        let runs = runs_at_rest(&router, &engine, case, &name).await;
         assert_eq!(
             runs.len(),
             attempts,
