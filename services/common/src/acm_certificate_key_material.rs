@@ -50,6 +50,7 @@ pub const MAX_CERTIFICATES: usize = 1_000;
 /// Every member is the caller's own material, held as it was brought in — PEM text, the
 /// encoding `ImportCertificate` takes and `GetCertificate` reports — so the certificate a
 /// client is presented is byte for byte the one the account imported.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct CertificateKeyMaterial {
     /// The PEM-encoded leaf certificate.
     pub certificate_pem: String,
@@ -185,6 +186,44 @@ impl CertificateKeyMaterialDirectory {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.by_arn.is_empty()
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedKeyMaterialDirectory {
+    by_arn: BTreeMap<String, CertificateKeyMaterial>,
+    order: VecDeque<String>,
+}
+
+/// Serving TLS material survives a restart when `EMULATOR_STATE_DIR` is enabled so HTTPS
+/// load balancer listeners and custom domains continue presenting valid certificates.
+impl crate::persist::Persisted for CertificateKeyMaterialDirectory {
+    const SERVICE: &'static str = "acm_certificate_key_material";
+    const VERSION: u32 = 1;
+
+    fn snapshot(&self) -> serde_json::Value {
+        let plain = PersistedKeyMaterialDirectory {
+            by_arn: self
+                .by_arn
+                .iter()
+                .map(|(arn, material)| (arn.clone(), (**material).clone()))
+                .collect(),
+            order: self.order.clone(),
+        };
+        serde_json::to_value(plain).expect("ACM certificate key material directory serializes")
+    }
+
+    fn restore(_version: u32, snapshot: serde_json::Value) -> Result<Self, String> {
+        let plain: PersistedKeyMaterialDirectory =
+            serde_json::from_value(snapshot).map_err(|error| error.to_string())?;
+        Ok(Self {
+            by_arn: plain
+                .by_arn
+                .into_iter()
+                .map(|(arn, material)| (arn, Arc::new(material)))
+                .collect(),
+            order: plain.order,
+        })
     }
 }
 

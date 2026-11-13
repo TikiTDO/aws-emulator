@@ -411,6 +411,7 @@ pub fn mint_ops_item_id(sequence: u64, at: SystemTime) -> String {
 /// ([`OpsItemRecord::to_ops_item`]) rather than recomputing anything: the status, the
 /// version, who created it and when all come from what the create persisted.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct OpsItemRecord {
     /// The server-minted id, unique within the store ([`mint_ops_item_id`]).
     pub ops_item_id: String,
@@ -446,12 +447,16 @@ pub struct OpsItemRecord {
     /// a re-parse of every one of their operational-data documents.
     pub dedup: Option<String>,
     /// "The time a runbook workflow started", as the create reported it.
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub actual_start_time: Option<::aws_smithy_types::DateTime>,
     /// "The time a runbook workflow ended", as the create reported it.
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub actual_end_time: Option<::aws_smithy_types::DateTime>,
     /// "The time specified in a change request for a runbook workflow to start".
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub planned_start_time: Option<::aws_smithy_types::DateTime>,
     /// "The time specified in a change request for a runbook workflow to end".
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub planned_end_time: Option<::aws_smithy_types::DateTime>,
     /// The tags the create assigned, keyed by tag key.
     pub tags: BTreeMap<String, String>,

@@ -324,6 +324,7 @@ pub struct ResolvedBaseline {
 /// Every member a baseline read reports is here, so a read projects this record rather
 /// than recomputing anything: what the create persisted is what a later read reports.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PatchBaselineRecord {
     /// The server-minted id this record is stored under ([`mint_baseline_id`]).
     pub baseline_id: String,

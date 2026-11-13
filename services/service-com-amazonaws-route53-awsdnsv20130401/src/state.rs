@@ -689,6 +689,7 @@ pub const DELEGATION_SET_PREFIX: &str = "/delegationset/";
 /// adds the `/delegationset/` prefix the wire carries, exactly as
 /// [`StoredZone::to_hosted_zone`] adds `/hostedzone/`.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StoredDelegationSet {
     /// The bare delegation set id, which is also this set's key in
     /// [`ComAmazonawsRoute53Awsdnsv20130401State::delegation_sets`].
@@ -716,13 +717,14 @@ impl StoredDelegationSet {
 ///
 /// The id is stored BARE (`C…`); [`StoredChange::to_change_info`] adds the
 /// `/change/` prefix the wire carries.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoredChange {
     /// The bare change id, which is also this record's key in [`Route53State::changes`].
     pub id: String,
     /// When the change was submitted, in milliseconds since the Unix epoch.
     pub submitted_at_millis: i64,
     /// The instant the change becomes `INSYNC`; see [`CHANGE_PROPAGATION`].
+    #[serde(with = "::service_common::persist::instant")]
     pub insync_at: Instant,
     /// The `ChangeBatch` comment, when the submitter gave one.
     pub comment: Option<String>,
@@ -758,12 +760,13 @@ impl StoredChange {
 /// Holds the setting the caller asked for plus the instant the zone finishes
 /// moving to it, so the status a read reports is DERIVED from the clock (see
 /// [`AcceleratedRecovery::status`]) rather than advanced by whoever reads it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AcceleratedRecovery {
     /// Whether the last accepted update asked for accelerated recovery ON.
     pub enabled: bool,
     /// The instant the zone finishes moving to that setting; see
     /// [`ACCELERATED_RECOVERY_PROPAGATION`].
+    #[serde(with = "::service_common::persist::instant")]
     pub settles_at: Instant,
 }
 
@@ -796,6 +799,7 @@ impl AcceleratedRecovery {
 /// `BTreeMap` keyed by this type give both the uniqueness rule and the list
 /// order for free.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RecordKey {
     /// The record name's octets with its labels reversed and a trailing dot,
     /// lowercased: `www.example.com` sorts as `com.example.www.`. See
@@ -829,7 +833,7 @@ impl RecordKey {
 }
 
 /// A hosted zone and the record sets it holds.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoredZone {
     /// The bare zone id (`Z…`), which is also this zone's key in [`Route53State::zones`].
     pub id: String,
@@ -859,6 +863,7 @@ pub struct StoredZone {
     /// [`MAX_VPC_ASSOCIATION_AUTHORIZATIONS`].
     pub vpc_authorizations: Vec<VPC>,
     /// This zone's record sets, keyed (and therefore ordered) by [`RecordKey`].
+    #[serde(with = "::service_common::persist::entries")]
     pub records: BTreeMap<RecordKey, ResourceRecordSet>,
     /// The zone's tags, keyed by tag key — the set `ChangeTagsForResource`
     /// edits and `ListTagsForResource` reports. Held ON the zone, so deleting
@@ -1172,6 +1177,7 @@ pub fn vpc_position_in(vpcs: &[VPC], vpc_id: &str) -> Option<usize> {
 /// record, it is evaluated, and that assessment is what
 /// [`health_check_status`] publishes as the health check's CloudWatch series.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StoredHealthCheck {
     /// The health check id, which is also this record's key in
     /// [`ComAmazonawsRoute53Awsdnsv20130401State::health_checks`].
@@ -1635,6 +1641,7 @@ pub fn health_check_is_calculated(config: &HealthCheckConfig) -> bool {
 /// editable (`UpdateTrafficPolicyComment`) — so the `RRType` the document names
 /// is read off it once, when the version is created, rather than on every read.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StoredTrafficPolicyVersion {
     /// The `RRType` the document's `RecordType` names, as
     /// [`traffic_policy_record_type`] read it off the document.
@@ -1673,6 +1680,7 @@ pub struct StoredTrafficPolicyVersion {
 /// policy's id and name cannot then disagree between two of its versions, and
 /// the highest LIVE key is its latest version.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StoredTrafficPolicy {
     /// The policy id, which is also this record's key in
     /// [`ComAmazonawsRoute53Awsdnsv20130401State::traffic_policies`].
@@ -1788,7 +1796,7 @@ impl StoredTrafficPolicy {
 /// (`TrafficPolicyInstance$TrafficPolicyType`): the document itself stays in
 /// [`ComAmazonawsRoute53Awsdnsv20130401State::traffic_policies`], so an instance
 /// and the policy it was created from cannot disagree about it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoredTrafficPolicyInstance {
     /// The instance id, which is also this record's key in
     /// [`ComAmazonawsRoute53Awsdnsv20130401State::traffic_policy_instances`].
@@ -1810,6 +1818,7 @@ pub struct StoredTrafficPolicyInstance {
     pub traffic_policy_type: String,
     /// The instant the generated record sets are in place; see
     /// [`TRAFFIC_POLICY_INSTANCE_PROPAGATION`].
+    #[serde(with = "::service_common::persist::instant")]
     pub applied_at: Instant,
 }
 
@@ -1878,6 +1887,7 @@ pub fn traffic_policy_instance_order_key(
 /// later change moves — plus the BLOCKS it holds, which
 /// [`crate::ops::change_cidr_collection`] puts there one location at a time.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StoredCidrCollection {
     /// The collection id, which is also this record's key in
     /// [`ComAmazonawsRoute53Awsdnsv20130401State::cidr_collections`].
@@ -1941,7 +1951,7 @@ impl StoredCidrCollection {
 }
 
 /// Per-service state for com-amazonaws-route53-awsdnsv20130401. A handler reaches it through [`service_state`].
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ComAmazonawsRoute53Awsdnsv20130401State {
     /// Every hosted zone, keyed by its bare id. A `BTreeMap` so
     /// `ListHostedZones` pages over a stable total order of zone ids. Bounded by
@@ -1999,6 +2009,7 @@ pub struct ComAmazonawsRoute53Awsdnsv20130401State {
     /// it reports them. SERVICE-owned: seeded from [`CHECKER_IP_RANGES`] when
     /// this store is created and only ever read afterwards, so every call
     /// answers the same list.
+    #[serde(skip, default = "checker_ip_ranges")]
     checker_ip_ranges: Vec<String>,
     /// The geographic locations `ListGeoLocations` reports and `GetGeoLocation`
     /// resolves, in the order the API reports them. SERVICE-owned in exactly the
@@ -2006,17 +2017,34 @@ pub struct ComAmazonawsRoute53Awsdnsv20130401State {
     /// [`geo_location::catalog`] when this store is created and only ever read
     /// afterwards, so every call answers the same catalog and a read of it can
     /// never change what a later caller sees.
+    #[serde(skip, default = "geo_location::catalog")]
     geo_locations: Vec<GeoLocationDetails>,
     /// Whether the one checker clock that publishes the health checks' status
     /// series ([`health_check_status::drive_health_check_metrics`]) is running, so
     /// a second write does not start a second one.
+    #[serde(skip)]
     pub(crate) checker_clock_running: bool,
     /// The claim the running checker clock holds, so a clock that ends on its
     /// wake-up cap releases only its OWN claim.
+    #[serde(skip)]
     pub(crate) checker_clock_generation: u64,
     /// The running checker clock's task handle, held so the task a write started
     /// stays stoppable and so a replaced one is aborted rather than left running.
+    #[serde(skip)]
     pub(crate) checker_clock: Option<::tokio::task::JoinHandle<()>>,
+}
+
+impl ::service_common::persist::Persisted for ComAmazonawsRoute53Awsdnsv20130401State {
+    const SERVICE: &'static str = "route53";
+    const VERSION: u32 = 1;
+
+    fn snapshot(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("Route 53 state serializes")
+    }
+
+    fn restore(_version: u32, snapshot: serde_json::Value) -> Result<Self, String> {
+        serde_json::from_value(snapshot).map_err(|error| error.to_string())
+    }
 }
 
 /// The store a fresh engine starts with: no zones and no changes, and the
@@ -2728,6 +2756,7 @@ fn dns_lower_labels(name: &str) -> Vec<Vec<u8>> {
 /// A name has ONE canonical spelling, so `WWW.example.com`, `www.example.com.`
 /// and `\167ww.example.com` give the same key and name the same record set.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DnsNameKey {
     /// The reversed labels' octets joined by `.` — the documented sort position.
     dotted: Vec<u8>,
@@ -3599,6 +3628,7 @@ fn strip_id_prefix<'a>(id: &'a str, collection: &str) -> &'a str {
 /// keeping the generator in the state struct is what makes them unique ACROSS
 /// calls rather than per handler.
 #[derive(Debug, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct IdMinter {
     seed: u64,
 }

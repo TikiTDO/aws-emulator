@@ -20,6 +20,7 @@ tokio = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 tracing = { workspace = true }
 # `PutParameter`'s AllowedPattern is a regular expression the value must satisfy.
 # The floor matches the version the vendored framework pins, so the tree resolves one.

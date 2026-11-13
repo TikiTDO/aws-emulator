@@ -141,6 +141,8 @@ mod resend_validation_email;
 mod resource_tag_input_constraints;
 #[path = "all/resource_tagging.rs"]
 mod resource_tagging;
+#[path = "all/restart_persistence.rs"]
+mod restart_persistence;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/stated_enum_value_sets.rs"]

@@ -129,6 +129,7 @@ pub fn supported_target_keys() -> Vec<&'static str> {
 
 /// One invocation of a command: the copy of it that one managed node holds.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CommandInvocationRecord {
     /// The node this invocation was created for, and the key it is held under.
     pub instance_id: String,
@@ -158,6 +159,7 @@ impl CommandInvocationRecord {
 /// A command as this store holds it: the request as Systems Manager received it, and the
 /// invocations it created.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CommandRecord {
     /// "A unique identifier for this command" (`Command$CommandId`), and part of the
     /// store key.

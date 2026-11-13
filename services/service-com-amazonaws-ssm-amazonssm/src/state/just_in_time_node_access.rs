@@ -162,6 +162,7 @@ pub fn access_request_arn(region: &str, access_request_id: &str) -> String {
 /// (`ctx.credential_store().create(..)`): nothing here chooses them, and they are held only
 /// in this in-memory store, for as long as they are valid.
 #[derive(Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VendedCredential {
     /// "The access key ID that identifies the temporary security credentials", which is also
     /// the id the credential is held in the emulator's credential store under.
@@ -205,6 +206,7 @@ impl VendedCredential {
 
 /// One just-in-time node access request, as `GetAccessToken` reports it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AccessRequestRecord {
     /// The server-minted `AccessRequestId` this record is stored under.
     pub access_request_id: String,

@@ -58,6 +58,7 @@ pub struct NoSuchKeySigningKey {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.route53#VPC")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VPC {
     pub vpc_region: Option<String>,
     pub vpc_id: Option<String>,
@@ -101,6 +102,7 @@ pub struct NoSuchCidrCollectionException {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.route53#ResourceRecordSet")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ResourceRecordSet {
     pub name: String,
     pub r#type: String,
@@ -121,6 +123,7 @@ pub struct ResourceRecordSet {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.route53#GeoLocation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct GeoLocation {
     pub continent_code: Option<String>,
     pub country_code: Option<String>,
@@ -129,12 +132,14 @@ pub struct GeoLocation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.route53#ResourceRecord")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ResourceRecord {
     pub value: String,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.route53#AliasTarget")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AliasTarget {
     pub hosted_zone_id: String,
     pub dns_name: String,
@@ -143,6 +148,7 @@ pub struct AliasTarget {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.route53#CidrRoutingConfig")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CidrRoutingConfig {
     pub collection_id: String,
     pub location_name: String,
@@ -150,6 +156,7 @@ pub struct CidrRoutingConfig {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.route53#GeoProximityLocation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct GeoProximityLocation {
     pub aws_region: Option<String>,
     pub local_zone_group: Option<String>,
@@ -159,6 +166,7 @@ pub struct GeoProximityLocation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.route53#Coordinates")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Coordinates {
     pub latitude: String,
     pub longitude: String,
@@ -189,6 +197,7 @@ pub struct ThrottlingException {
 // comparison of two whole configurations.
 #[smithy_macros::smithy(shape = "com.amazonaws.route53#HealthCheckConfig")]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct HealthCheckConfig {
     pub ip_address: Option<String>,
     pub port: Option<i32>,
@@ -214,6 +223,7 @@ pub struct HealthCheckConfig {
 // (see the note on `HealthCheckConfig`).
 #[smithy_macros::smithy(shape = "com.amazonaws.route53#AlarmIdentifier")]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AlarmIdentifier {
     pub region: String,
     pub name: String,
@@ -323,6 +333,7 @@ pub struct NoSuchDelegationSet {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.route53#KeySigningKey")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct KeySigningKey {
     pub name: Option<String>,
     pub kms_arn: Option<String>,
@@ -338,7 +349,9 @@ pub struct KeySigningKey {
     pub dnskey_record: Option<String>,
     pub status: Option<String>,
     pub status_message: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub created_date: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub last_modified_date: Option<::aws_smithy_types::DateTime>,
 }
 

@@ -181,12 +181,13 @@ type Observation = Option<bool>;
 /// A health check whose type has no probe schedule carries none of this (see the
 /// module docs on `RECOVERY_CONTROL`), which is why
 /// [`StoredHealthCheck::evaluation`] is an `Option`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HealthCheckEvaluation {
     /// The time stamp the next probe's datapoint carries. Advances by the check's
     /// interval per probe, so the series keeps the spacing the real one has.
     next_stamp: SystemTime,
     /// The instant the next probe comes due; see [`ACCELERATED_PROBE_SPACING`].
+    #[serde(with = "::service_common::persist::instant")]
     next_probe_at: Instant,
     /// The status the series is currently reporting, before `Disabled` and
     /// `Inverted` are applied. A new check starts healthy (see the module docs).

@@ -75,6 +75,7 @@ pub fn cloud_connector_ceiling_message() -> String {
 
 /// One cloud connector, as the connector reads report it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CloudConnectorRecord {
     /// The server-generated id this record is stored under.
     pub id: String,

@@ -183,11 +183,16 @@ pub fn populate_issued_key_material(
     if !enabled() {
         return;
     }
+    let missing_in_dir = |arn: &str| -> bool {
+        directory
+            .map(|dir_state| dir_state.lock().material(arn).is_none())
+            .unwrap_or(false)
+    };
     let mut minted_entries: Vec<(String, CertificateKeyMaterial)> = Vec::new();
     for (arn, cert) in certificates.iter_mut() {
         if cert.status != STATUS_ISSUED
             || cert.cert_type != TYPE_AMAZON_ISSUED
-            || cert.certificate_body.is_some()
+            || (cert.certificate_body.is_some() && !missing_in_dir(arn))
         {
             continue;
         }

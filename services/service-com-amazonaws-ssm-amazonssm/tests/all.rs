@@ -109,6 +109,8 @@ mod resource_data_syncs;
 mod resource_policies;
 #[path = "all/resource_tags.rs"]
 mod resource_tags;
+#[path = "all/restart_persistence.rs"]
+mod restart_persistence;
 #[path = "all/run_command.rs"]
 mod run_command;
 #[path = "all/secretsmanager_reference.rs"]

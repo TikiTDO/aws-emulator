@@ -98,6 +98,7 @@ pub struct InvalidParameters {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#Target")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Target {
     pub key: Option<String>,
     pub values: Option<Vec<String>>,
@@ -105,12 +106,14 @@ pub struct Target {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#InstanceAssociationOutputLocation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceAssociationOutputLocation {
     pub s3_location: Option<S3OutputLocation>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#S3OutputLocation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct S3OutputLocation {
     pub output_s3_region: Option<String>,
     pub output_s3_bucket_name: Option<String>,
@@ -119,6 +122,7 @@ pub struct S3OutputLocation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#TargetLocation")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TargetLocation {
     pub accounts: Option<Vec<String>>,
     pub regions: Option<Vec<String>>,
@@ -135,6 +139,7 @@ pub struct TargetLocation {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#AlarmConfiguration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AlarmConfiguration {
     pub ignore_poll_alarm_failure: bool,
     pub alarms: Vec<Alarm>,
@@ -142,6 +147,7 @@ pub struct AlarmConfiguration {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#Alarm")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Alarm {
     pub name: String,
 }
@@ -254,12 +260,14 @@ pub struct UnsupportedPlatformType {
 #[smithy_macros::smithy(union_for = "com.amazonaws.ssm#CloudConnectorConfiguration")]
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum CloudConnectorConfiguration {
     AzureConfiguration(AzureConfiguration),
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#AzureConfiguration")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AzureConfiguration {
     pub tenant_id: String,
     pub tenant_display_name: Option<String>,
@@ -271,12 +279,14 @@ pub struct AzureConfiguration {
 #[smithy_macros::smithy(union_for = "com.amazonaws.ssm#ConfigurationTargets")]
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum ConfigurationTargets {
     Subscriptions(Vec<AzureSubscription>),
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#AzureSubscription")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AzureSubscription {
     pub id: String,
     pub display_name: Option<String>,
@@ -300,6 +310,7 @@ pub struct ServiceQuotaExceededException {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#DocumentRequires")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DocumentRequires {
     pub name: String,
     pub version: Option<String>,
@@ -353,6 +364,7 @@ pub struct DocumentDescription {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#DocumentParameter")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DocumentParameter {
     pub name: Option<String>,
     pub r#type: Option<String>,
@@ -418,6 +430,7 @@ pub struct ResourceLimitExceededException {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#OpsItemDataValue")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct OpsItemDataValue {
     pub value: Option<String>,
     pub r#type: Option<String>,
@@ -425,12 +438,14 @@ pub struct OpsItemDataValue {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#OpsItemNotification")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct OpsItemNotification {
     pub arn: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#RelatedOpsItem")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RelatedOpsItem {
     pub ops_item_id: String,
 }
@@ -468,12 +483,14 @@ pub struct OpsMetadataTooManyUpdatesException {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#PatchFilterGroup")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PatchFilterGroup {
     pub patch_filters: Vec<PatchFilter>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#PatchFilter")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PatchFilter {
     pub key: String,
     pub values: Vec<String>,
@@ -481,12 +498,14 @@ pub struct PatchFilter {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#PatchRuleGroup")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PatchRuleGroup {
     pub patch_rules: Vec<PatchRule>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#PatchRule")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PatchRule {
     pub patch_filter_group: PatchFilterGroup,
     pub compliance_level: Option<String>,
@@ -497,6 +516,7 @@ pub struct PatchRule {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#PatchSource")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PatchSource {
     pub name: String,
     pub products: Vec<String>,
@@ -505,6 +525,7 @@ pub struct PatchSource {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#ResourceDataSyncS3Destination")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ResourceDataSyncS3Destination {
     pub bucket_name: String,
     pub prefix: Option<String>,
@@ -516,12 +537,14 @@ pub struct ResourceDataSyncS3Destination {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#ResourceDataSyncDestinationDataSharing")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ResourceDataSyncDestinationDataSharing {
     pub destination_data_sharing_type: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#ResourceDataSyncSource")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ResourceDataSyncSource {
     pub source_type: String,
     pub aws_organizations_source: Option<ResourceDataSyncAwsOrganizationsSource>,
@@ -532,6 +555,7 @@ pub struct ResourceDataSyncSource {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#ResourceDataSyncAwsOrganizationsSource")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ResourceDataSyncAwsOrganizationsSource {
     pub organization_source_type: String,
     pub organizational_units: Option<Vec<ResourceDataSyncOrganizationalUnit>>,
@@ -539,6 +563,7 @@ pub struct ResourceDataSyncAwsOrganizationsSource {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#ResourceDataSyncOrganizationalUnit")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ResourceDataSyncOrganizationalUnit {
     pub organizational_unit_id: Option<String>,
 }
@@ -793,6 +818,7 @@ pub struct UnsupportedOperatingSystem {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#InstanceAggregatedAssociationOverview")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceAggregatedAssociationOverview {
     pub detailed_status: Option<String>,
     pub instance_association_status_aggregated_count: Option<std::collections::HashMap<String, i32>>,
@@ -902,6 +928,7 @@ pub struct ValidationException {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#CloudWatchOutputConfig")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CloudWatchOutputConfig {
     pub cloud_watch_log_group_name: Option<String>,
     pub cloud_watch_output_enabled: bool,
@@ -948,6 +975,7 @@ pub struct MaintenanceWindowRunCommandParameters {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.ssm#NotificationConfig")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NotificationConfig {
     pub notification_arn: Option<String>,
     pub notification_events: Option<Vec<String>>,

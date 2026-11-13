@@ -258,6 +258,7 @@ pub fn source_rejection(source: &ResourceDataSyncSource) -> Option<String> {
 
 /// One resource data sync configuration, as the sync listing reports it.
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ResourceDataSyncRecord {
     /// "A name for the configuration", the key this record is held under within its
     /// Region.

@@ -137,6 +137,8 @@ mod private_zone_creation;
 mod resource_tags;
 #[path = "all/resource_tags_batch.rs"]
 mod resource_tags_batch;
+#[path = "all/restart_persistence.rs"]
+mod restart_persistence;
 #[path = "all/reusable_delegation_sets.rs"]
 mod reusable_delegation_sets;
 #[path = "all/state_roundtrip.rs"]

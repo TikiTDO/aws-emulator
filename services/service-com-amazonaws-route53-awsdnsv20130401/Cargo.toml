@@ -24,6 +24,7 @@ tokio = { workspace = true, features = ["time", "net", "io-util", "rt"] }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 tracing = { workspace = true }
 # `state::new_request_id`'s mixing function: a maintained digest, so the request
 # id the error envelope carries is mixed by a reviewed implementation rather than
