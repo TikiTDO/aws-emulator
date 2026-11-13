@@ -1853,6 +1853,21 @@ pub fn domain_not_found(domain_name: &str) -> String {
     format!("Domain {domain_name} is not found")
 }
 
+/// The `ResourceNotFoundException` message the PROFILE-COLLECTION operations word an
+/// absent domain with: the operations that create or search the profiles of a domain
+/// (`POST /domains/{DomainName}/profiles` and `POST /domains/{DomainName}/profiles/search`)
+/// report that absence in their own fixed sentence, which names the input MEMBER rather
+/// than the resource kind and says which account the domain was looked for in. Its
+/// variable parts are the `DomainName` the request's URI label carried and this
+/// emulator's own account id — never a literal. Shared by those operations, so the same
+/// absent name reads the same whichever of them was called.
+pub fn profile_collection_domain_not_found(domain_name: &str) -> String {
+    format!(
+        "DomainName {domain_name} is not found in account {}",
+        ::engine::emulator_account_id()
+    )
+}
+
 /// The `ResourceNotFoundException` message the UPLOAD-JOB operations word an absent
 /// domain with: the service reports that absence from its upload-job path in its own
 /// fixed sentence, whose only variable part is the `DomainName` the request's URI label

@@ -212,7 +212,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             let domain = store.domains.get(&input.domain_name).ok_or_else(|| {
                 SearchProfilesError::from(SearchProfilesErrorModeled::ResourceNotFoundException(
                     ResourceNotFoundException {
-                        message: Some(crate::state::domain_not_found(&input.domain_name)),
+                        message: Some(crate::state::profile_collection_domain_not_found(
+                            &input.domain_name,
+                        )),
                     },
                 ))
             })?;

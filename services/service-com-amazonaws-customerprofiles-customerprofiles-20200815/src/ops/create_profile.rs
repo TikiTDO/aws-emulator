@@ -190,7 +190,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let domain = store.domains.get_mut(&input.domain_name).ok_or_else(|| {
             CreateProfileError::from(CreateProfileErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
-                    message: Some(crate::state::domain_not_found(&input.domain_name)),
+                    message: Some(crate::state::profile_collection_domain_not_found(
+                        &input.domain_name,
+                    )),
                 },
             ))
         })?;

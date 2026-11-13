@@ -163,11 +163,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the objects ingested onto it are that data, so they go with it.
         domain.remove_profile_objects(|_, profile| profile == input.profile_id);
 
-        Ok(DeleteProfileOutput {
-            message: Some(format!("Profile {} deleted", input.profile_id)),
-        })
+        Ok(DeleteProfileOutput { message: Some(DELETE_ACKNOWLEDGEMENT.to_string()) })
     }
 }
+
+/// The `Message` a successful delete answers with: `DeleteProfileResponse$Message` is
+/// documented as "A message that indicates the delete request is done", and the service
+/// words that acknowledgement as one FIXED value — it interpolates nothing from the
+/// request or from the store, so every successful delete answers the same body.
+const DELETE_ACKNOWLEDGEMENT: &str = "OK";
 
 /// The store is unreachable — a server fault, not a bad request.
 fn unavailable() -> DeleteProfileError {
