@@ -99,7 +99,7 @@ pub use execution::{
     STATUS_SUCCEEDED, STATUS_SUPERSEDED, TRANSITION_INBOUND, TRANSITION_OUTBOUND,
 };
 pub use jobs::{
-    mint_artifact_credentials, JobProblem, MAX_OUTPUT_VARIABLES_BYTES,
+    invalid_state_message, mint_artifact_credentials, JobProblem, MAX_OUTPUT_VARIABLES_BYTES,
     MAX_OUTPUT_VARIABLE_VALUE_BYTES,
 };
 pub use rules::{

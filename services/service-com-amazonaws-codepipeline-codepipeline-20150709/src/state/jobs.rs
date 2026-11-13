@@ -470,7 +470,15 @@ fn output_variables_too_large_message(variables: &HashMap<String, String>) -> St
 /// * a job in any other terminal status has terminated, so its outcome is settled;
 /// * a job that is not terminal and not `InProgress` is one no worker has acknowledged,
 ///   so there is no worker whose outcome it would be.
-fn invalid_state_message(job_id: &str, status: &str, desired: &str) -> String {
+///
+/// One source for every operation that refuses a RESULT on the job's state, whichever
+/// plane the worker reports on: `PutJobSuccessResult`/`PutJobFailureResult` here, and
+/// the partner plane's `PutThirdPartyJobSuccessResult`/`PutThirdPartyJobFailureResult`,
+/// which model the same `InvalidJobStateException` for the same three conditions, so
+/// neither plane words one of them for itself. The statement names the job the REQUEST
+/// named and the condition it is in — never the `JobStatus` the store holds, which the
+/// service does not disclose here.
+pub fn invalid_state_message(job_id: &str, status: &str, desired: &str) -> String {
     if status == desired {
         return format!(
             "The status of job with id {job_id} is already set to the desired value. It cannot \

@@ -217,10 +217,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // replaced — so reporting a failure for a job that already completed, or
         // reporting one twice, is refused rather than silently overwriting the
         // result already recorded.
+        //
+        // WHICH of those conditions it is decides the statement, and the statement is
+        // the one this service makes for a job-result refusal on either job plane
+        // (`crate::state::invalid_state_message`): the job the request named and the
+        // condition it is in, with the stored `JobStatus` not disclosed.
         if !job.accepts_result() {
-            let message = format!(
-                "job {} is {}, so no result can be reported for it",
-                input.job_id, job.status
+            let message = crate::state::invalid_state_message(
+                &input.job_id,
+                &job.status,
+                crate::state::JOB_STATUS_FAILED,
             );
             audit(ctx, &input.job_id, "refused: invalid job state");
             return Err(
