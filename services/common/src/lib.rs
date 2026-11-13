@@ -2260,3 +2260,6 @@ mod tests {
         }
     }
 }
+
+/// The one client every service runs a real container through, when host workloads are on.
+pub mod host_runtime;
