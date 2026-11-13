@@ -31,11 +31,13 @@ pub struct ServiceFailureException {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#Role")]
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Role {
     pub path: String,
     pub role_name: String,
     pub role_id: String,
     pub arn: String,
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub create_date: ::aws_smithy_types::DateTime,
     pub assume_role_policy_document: Option<String>,
     pub description: Option<String>,
@@ -48,6 +50,7 @@ pub struct Role {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#AttachedPermissionsBoundary")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AttachedPermissionsBoundary {
     pub permissions_boundary_type: Option<String>,
     pub permissions_boundary_arn: Option<String>,
@@ -55,6 +58,7 @@ pub struct AttachedPermissionsBoundary {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#Tag")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Tag {
     pub key: String,
     pub value: String,
@@ -62,13 +66,16 @@ pub struct Tag {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#RoleLastUsed")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RoleLastUsed {
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub last_used_date: Option<::aws_smithy_types::DateTime>,
     pub region: Option<String>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#SourceRoleTemplate")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SourceRoleTemplate {
     pub template_arn: String,
     pub template_minor_version: i32,
@@ -133,6 +140,7 @@ pub struct PasswordPolicyViolationException {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#DelegationPermission")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DelegationPermission {
     pub policy_template_arn: Option<String>,
     pub parameters: Option<Vec<PolicyParameter>>,
@@ -140,6 +148,7 @@ pub struct DelegationPermission {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#PolicyParameter")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PolicyParameter {
     pub name: Option<String>,
     pub values: Option<Vec<String>>,
@@ -148,21 +157,25 @@ pub struct PolicyParameter {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#Group")]
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Group {
     pub path: String,
     pub group_name: String,
     pub group_id: String,
     pub arn: String,
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub create_date: ::aws_smithy_types::DateTime,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#InstanceProfile")]
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct InstanceProfile {
     pub path: String,
     pub instance_profile_name: String,
     pub instance_profile_id: String,
     pub arn: String,
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub create_date: ::aws_smithy_types::DateTime,
     pub roles: Vec<Role>,
     pub tags: Option<Vec<Tag>>,
@@ -178,6 +191,7 @@ pub struct LoginProfile {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#Policy")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Policy {
     pub policy_name: Option<String>,
     pub policy_id: Option<String>,
@@ -188,17 +202,21 @@ pub struct Policy {
     pub permissions_boundary_usage_count: Option<i32>,
     pub is_attachable: bool,
     pub description: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_date: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub update_date: Option<::aws_smithy_types::DateTime>,
     pub tags: Option<Vec<Tag>>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#PolicyVersion")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PolicyVersion {
     pub document: Option<String>,
     pub version_id: Option<String>,
     pub is_default_version: bool,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_date: Option<::aws_smithy_types::DateTime>,
 }
 
@@ -225,12 +243,15 @@ pub struct ServiceNotSupportedException {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#User")]
 #[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct User {
     pub path: String,
     pub user_name: String,
     pub user_id: String,
     pub arn: String,
+    #[serde(with = "::service_common::persist::smithy_time")]
     pub create_date: ::aws_smithy_types::DateTime,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub password_last_used: Option<::aws_smithy_types::DateTime>,
     pub permissions_boundary: Option<AttachedPermissionsBoundary>,
     pub tags: Option<Vec<Tag>>,
@@ -304,6 +325,7 @@ pub struct GetContextKeysForCustomPolicyOutput {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#DelegationRequest")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DelegationRequest {
     pub delegation_request_id: Option<String>,
     pub owner_account_id: Option<String>,
@@ -315,15 +337,18 @@ pub struct DelegationRequest {
     pub owner_id: Option<String>,
     pub approver_id: Option<String>,
     pub state: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub expiration_time: Option<::aws_smithy_types::DateTime>,
     pub requestor_id: Option<String>,
     pub requestor_name: Option<String>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub create_date: Option<::aws_smithy_types::DateTime>,
     pub session_duration: Option<i32>,
     pub redirect_url: Option<String>,
     pub notes: Option<String>,
     pub rejection_reason: Option<String>,
     pub only_send_by_owner: bool,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub updated_time: Option<::aws_smithy_types::DateTime>,
 }
 
@@ -336,12 +361,15 @@ pub struct ErrorDetails {
 
 #[smithy_macros::smithy(shape = "com.amazonaws.iam#ServerCertificateMetadata")]
 #[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ServerCertificateMetadata {
     pub path: String,
     pub server_certificate_name: String,
     pub server_certificate_id: String,
     pub arn: String,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub upload_date: Option<::aws_smithy_types::DateTime>,
+    #[serde(with = "::service_common::persist::smithy_time_opt")]
     pub expiration: Option<::aws_smithy_types::DateTime>,
 }
 

@@ -194,6 +194,44 @@ fn load_in<T: Persisted>(dir: &Path, namespace: &str) -> Result<Option<T>, Persi
         .map_err(|detail| PersistError::Restore { path, detail })
 }
 
+/// Serde for the SDK's [`aws_smithy_types::DateTime`], which carries none of its own: stored as
+/// `[seconds, subsecond nanos]` since the epoch, so a restored timestamp is exactly the one saved.
+/// Use as `#[serde(with = "::service_common::persist::smithy_time")]`.
+pub mod smithy_time {
+    use aws_smithy_types::DateTime;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(time: &DateTime, serializer: S) -> Result<S::Ok, S::Error> {
+        (time.secs(), time.subsec_nanos()).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<DateTime, D::Error> {
+        let (secs, nanos) = <(i64, u32)>::deserialize(deserializer)?;
+        Ok(DateTime::from_secs_and_nanos(secs, nanos))
+    }
+}
+
+/// [`smithy_time`] for an optional timestamp.
+pub mod smithy_time_opt {
+    use aws_smithy_types::DateTime;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        time: &Option<DateTime>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        time.map(|time| (time.secs(), time.subsec_nanos()))
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<DateTime>, D::Error> {
+        let parts = Option::<(i64, u32)>::deserialize(deserializer)?;
+        Ok(parts.map(|(secs, nanos)| DateTime::from_secs_and_nanos(secs, nanos)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
