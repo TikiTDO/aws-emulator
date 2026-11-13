@@ -137,18 +137,26 @@ pub struct SigV4Authenticator {
 }
 
 static MINTED: std::sync::OnceLock<SigV4Authenticator> = std::sync::OnceLock::new();
+static REQUESTED: std::sync::OnceLock<&'static SigV4Authenticator> = std::sync::OnceLock::new();
 
 impl SigV4Authenticator {
     pub fn for_this_process() -> &'static Self {
-        MINTED.get_or_init(|| Self {
-            access_key_id: format!("EMULATOR{}", random_from(HEX_ALPHABET, 12)),
-            secret_access_key: random_from(HEX_ALPHABET, 40),
+        REQUESTED.get_or_init(|| match crate::boot_identity::retained_or_ephemeral() {
+            Some(identity) => &identity.sigv4,
+            None => MINTED.get_or_init(Self::generate),
         })
     }
 
     /// The keys, once something in this process registered the authenticator.
     pub fn minted_credentials() -> Option<&'static Self> {
-        MINTED.get()
+        REQUESTED.get().copied()
+    }
+
+    pub(crate) fn generate() -> Self {
+        Self {
+            access_key_id: format!("EMULATOR{}", random_from(HEX_ALPHABET, 12)),
+            secret_access_key: random_from(HEX_ALPHABET, 40),
+        }
     }
 
     /// The secret of `key_id`: this key pair's own, else a created credential's.

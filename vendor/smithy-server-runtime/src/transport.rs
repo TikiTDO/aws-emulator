@@ -275,6 +275,9 @@ impl PayloadExchange for RuntimeExchange {
                 admission: self.admission,
                 validated: validated.clone(),
             };
+            // Match ordinary dispatch: only an admitted API call advances idle time.
+            // This records its start, not continuous activity during a long transfer.
+            emulator_server::cli::record_api_call();
             let response = self.handler.clone().run(request, context).await;
             if response.status().as_u16() < 400 && !validated.load(Ordering::Acquire) {
                 return emulator_server::transport::normalize_refusal(self.handler.refuse(
