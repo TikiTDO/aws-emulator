@@ -459,6 +459,11 @@ mod cognito_post_confirmation_lambda_trigger;
 mod cognito_group_role_mapping;
 #[path = "all/cognito_sms_caller_role_trust.rs"]
 mod cognito_sms_caller_role_trust;
+// Declared beside its sibling cognito suites, at the head, for the same reason they are
+// here: what a bucket policy decides about a read made with credentials an identity pool
+// vended spans Amazon Cognito Identity, IAM, STS and Amazon S3 at once.
+#[path = "all/cognito_vended_session_bucket_policy.rs"]
+mod cognito_vended_session_bucket_policy;
 #[path = "all/pi_resource_metadata_reflects_rds_configuration.rs"]
 mod pi_resource_metadata_reflects_rds_configuration;
 // At the head for the reason the entries above record: the appended tail and the sorted
