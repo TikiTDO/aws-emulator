@@ -337,7 +337,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // types. Done BEFORE the store is read, so a template real AWS refuses outright
         // never reaches a write.
         if let Some(body) = &submitted_body {
-            crate::state::validate_template_body(body)
+            let max_template_bytes = if input.template_url.is_some() {
+                crate::state::TEMPLATE_MAX_BYTES
+            } else {
+                crate::state::TEMPLATE_BODY_MAX_BYTES
+            };
+            crate::state::validate_template_body_within(body, max_template_bytes)
                 .map_err(crate::scaffolded::Scaffolded::validation_error)?;
             // "In some cases, you must explicitly acknowledge that your stack template
             // contains certain capabilities in order for CloudFormation to update the
