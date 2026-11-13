@@ -190,9 +190,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         // Borrowed, never copied: the body may be 51,200 bytes and nothing below needs
         // to own it.
-        let template_body: &str = match (&input.template_body, &fetched) {
-            (Some(body), _) => body.as_str(),
-            (None, Some(body)) => body.as_str(),
+        let (template_body, max_template_bytes) = match (&input.template_body, &fetched) {
+            (Some(body), _) => (body.as_str(), crate::state::TEMPLATE_BODY_MAX_BYTES),
+            (None, Some(body)) => (body.as_str(), crate::state::TEMPLATE_MAX_BYTES),
             (None, None) => {
                 return Err(crate::scaffolded::Scaffolded::validation_error(
                     "Either TemplateBody or TemplateURL must be specified",
@@ -201,7 +201,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         // The documented `TemplateBody` maximum, which the model carries no `@length`
         // for — the same rule every operation that takes a body is held to.
-        crate::state::validate_template_body(template_body)
+        crate::state::validate_template_body_within(template_body, max_template_bytes)
             .map_err(crate::scaffolded::Scaffolded::validation_error)?;
         // The documented per-template quotas, named one by one: a body past one of them is
         // refused for the quota it is past rather than for the form it has, which is the

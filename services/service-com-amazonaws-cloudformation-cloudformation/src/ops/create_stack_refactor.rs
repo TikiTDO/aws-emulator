@@ -179,7 +179,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     "Each StackDefinition must specify a StackName",
                 ));
             };
-            let template_body = match (&definition.template_body, &definition.template_url) {
+            let (template_body, max_template_bytes) =
+                match (&definition.template_body, &definition.template_url) {
                 // The same conditional every operation of this service that takes a
                 // template is held to: a body and a reference are two spellings of one
                 // document, so naming both says two things at once.
@@ -188,25 +189,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         crate::state::BOTH_TEMPLATE_SOURCES,
                     ))
                 }
-                (Some(body), None) => Some(body.clone()),
+                (Some(body), None) => (Some(body.clone()), crate::state::TEMPLATE_BODY_MAX_BYTES),
                 // A `TemplateURL` says WHERE the template is, not what it means: the object
                 // it addresses is read from this emulator's own Amazon S3 and becomes the
                 // body the refactor records, so a final state submitted by reference and
                 // the same one submitted inline describe the same stack
                 // (`crate::state::template_url`).
-                (None, Some(url)) => Some(
-                    crate::state::template_url::fetch(ctx, &region, url)
-                        .await
-                        .map_err(crate::scaffolded::Scaffolded::validation_error)?,
+                (None, Some(url)) => (
+                    Some(
+                        crate::state::template_url::fetch(ctx, &region, url)
+                            .await
+                            .map_err(crate::scaffolded::Scaffolded::validation_error)?,
+                    ),
+                    crate::state::TEMPLATE_MAX_BYTES,
                 ),
                 // "The stacks being refactored" may include one whose own template the
                 // refactor does not change, which is a definition carrying neither.
-                (None, None) => None,
+                (None, None) => (None, crate::state::TEMPLATE_BODY_MAX_BYTES),
             };
             if let Some(body) = template_body.as_deref() {
                 // The template rules every operation that SUBMITS a body is held to, so a
                 // refactor cannot record a final state a stack could not be given.
-                crate::state::validate_template_body(body)
+                crate::state::validate_template_body_within(body, max_template_bytes)
                     .map_err(crate::scaffolded::Scaffolded::validation_error)?;
                 crate::state::validate_template_quotas(body)
                     .map_err(crate::scaffolded::Scaffolded::validation_error)?;
