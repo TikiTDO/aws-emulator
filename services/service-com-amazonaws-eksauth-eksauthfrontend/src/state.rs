@@ -160,6 +160,19 @@ pub const DEFAULT_REGION: &str = "us-east-1";
 /// running recycles its sessions.
 pub const SESSION_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// The ARN of the EKS cluster named `name` in `region`:
+/// `arn:<partition>:eks:<region>:<account>:cluster/<name>`.
+///
+/// A cluster is an EKS resource, so its ARN carries the `eks` namespace rather than the
+/// `eks-auth` one this service's ACTIONS are published under. Stated once here because it
+/// is read in two places — the record a registered cluster carries, and the resource an
+/// authorization decision about a request naming that cluster is taken against — and the
+/// two must spell one ARN.
+#[must_use]
+pub fn cluster_arn(region: &str, name: &str) -> String {
+    ::engine::emulator_arn("eks", region, &format!("cluster/{name}"))
+}
+
 /// Per-service state for com-amazonaws-eksauth-eksauthfrontend. A handler reaches it through [`service_state`].
 #[derive(Debug, Default)]
 pub struct ComAmazonawsEksauthEksauthfrontendState {
@@ -332,7 +345,7 @@ impl Cluster {
         let identity = random_hex(32).to_uppercase();
         Self {
             name: name.to_string(),
-            arn: ::engine::emulator_arn("eks", region, &format!("cluster/{name}")),
+            arn: cluster_arn(region, name),
             region: region.to_string(),
             oidc_issuer: format!("https://oidc.eks.{region}.amazonaws.com/id/{identity}"),
             signing_key_id: encode_jwt_segment(random_bytes(SIGNING_KEY_DIGEST_BYTES)),

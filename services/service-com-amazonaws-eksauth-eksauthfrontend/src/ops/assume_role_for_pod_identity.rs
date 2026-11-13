@@ -38,6 +38,13 @@
 //! the framework refuses it first, and `crate::service` words that refusal as this
 //! service's own `InvalidParameterException`.
 //!
+//! Nor does a request IAM does not allow: the caller's own identity-based policies are
+//! judged against `eks-auth:AssumeRoleForPodIdentity` on the cluster the request addresses
+//! BEFORE either of those, in `crate::service::identity_authorization`, which answers the
+//! modelled `AccessDeniedException` (400) itself. So the `AccessDeniedException` this file
+//! constructs is only the other thing that shape says — the cluster holds no pod identity
+//! association for the service account the token names (step 4).
+//!
 //! ## Reaching this service's state
 //!
 //! The engine is held on `self` (constructor-injected), NOT passed per request — so

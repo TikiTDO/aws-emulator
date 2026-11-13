@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/assume_role_for_pod_identity.rs"]
 mod assume_role_for_pod_identity;
+#[path = "all/identity_authorization.rs"]
+mod identity_authorization;
 #[path = "all/rejection_errors.rs"]
 mod rejection_errors;
 #[path = "all/state_roundtrip.rs"]
