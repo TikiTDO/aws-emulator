@@ -260,6 +260,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
         crate::state::payload_upload::reclaim_abandoned(&*self.engine, &_mutation, &payload_store,
             ::std::time::SystemTime::now()).await.map_err(|_| storage_error())?;
+        let owner = {
         let store = state.lock();
 
         // The layer is uploaded into a repository, so there has to be one: an upload
@@ -290,11 +291,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The upload id the client addresses this upload by, in the layout the model
         // gives `UploadId` — see [`new_upload_id`]. Minted only once every check has
         // passed: a refused call consumes no id.
+        crate::state::payloads::repository_owner(store.repository(&input.repository_name)
+            .map_err(|fault| fault_error(fault))?).map_err(|_| storage_error())?
+        };
         let upload_id = new_upload_id();
         let part_size = crate::state::REPORTED_LAYER_PART_SIZE;
-        let owner = crate::state::payloads::repository_owner(store.repository(&input.repository_name)
-            .map_err(|fault| fault_error(fault))?).map_err(|_| storage_error())?;
-        drop(store);
         let bound = crate::state::payload_upload::initiate(
             &_mutation, &payload_store, owner.clone(), &upload_id,
             crate::state::payload_upload::UploadProtocol {

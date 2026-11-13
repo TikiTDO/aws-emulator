@@ -304,6 +304,7 @@ impl<Eng: Send + Sync + 'static> PutImage<Eng> {
             message: Some("durable image publication unavailable".to_string()),
         }));
         let payload_store = crate::state::payloads::bound_store(engine).map_err(|_| storage_error())?;
+        let (planned_replications,before) = {
         let store = state.lock();
 
         // The repository the push addresses has to exist before anything is charged
@@ -344,6 +345,8 @@ impl<Eng: Send + Sync + 'static> PutImage<Eng> {
         let planned_replications = store.planned_replications(&input.repository_name, now);
 
         let before = store.repository(&input.repository_name).map_err(fault_error)?.clone();
+        (planned_replications,before)
+        };
         let mut repo = before.clone();
 
         // A manifest is only pushable once every blob it references is in the
@@ -524,7 +527,6 @@ impl<Eng: Send + Sync + 'static> PutImage<Eng> {
             image_tag: input.image_tag.clone(),
             at: now,
         };
-        drop(store);
         crate::state::catalog::publish_images(mutation, &payload_store, &before, &mut repo).await.map_err(|_| storage_error())?;
         state.lock().repositories.insert(repo.name.clone(), repo);
         Ok((output, pushed))

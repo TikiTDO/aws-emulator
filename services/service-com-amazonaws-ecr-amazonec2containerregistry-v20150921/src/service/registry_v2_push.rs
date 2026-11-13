@@ -147,6 +147,7 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
         };
         // The native boundary validates complete descriptor sets; no truncated
         // iterator or malformed document may be treated as a pullable image.
+        {
         let store = state.lock();
         let Ok(repository) = store.repository(repo) else {
             return error(404, "NAME_UNKNOWN", "repository name not known to registry");
@@ -204,7 +205,7 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
                 "image requires configuration descriptor",
             );
         }
-        drop(store);
+        } // descriptor validation borrows no shared state across the async helper
         let input = crate::ops::types::PutImageInput {
             image_manifest: manifest.to_string(),
             image_manifest_media_type: Some(media_type.to_string()),

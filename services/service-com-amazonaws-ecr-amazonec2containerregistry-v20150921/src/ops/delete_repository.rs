@@ -182,6 +182,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }));
         let _mutation = crate::state::payloads::mutation_guard(&*self.engine).await.map_err(|_| storage_error())?;
         let payload_store = crate::state::payloads::bound_store(&*self.engine).map_err(|_| storage_error())?;
+        let removed = {
         let store = state.lock();
         let repo = store
             .repository(&input.repository_name)
@@ -204,9 +205,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // The repository the caller gets back is the one that was stored, including the
         // images' own removal: the record and every image in it leaves the store.
-        let removed = store.repository(&input.repository_name).map_err(fault_error)?.clone();
+        store.repository(&input.repository_name).map_err(fault_error)?.clone()
+        };
         let scope = crate::state::payloads::repository_owner(&removed).map_err(|_| storage_error())?;
-        drop(store);
         let mut change = scope.assertion(&payload_store).await.map_err(|_| storage_error())?;
         change.value = None;
         _mutation.commit(&payload_store, service_common::payload_store::ReferenceTransaction {
