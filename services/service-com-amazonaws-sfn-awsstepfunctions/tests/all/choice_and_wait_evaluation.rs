@@ -43,7 +43,11 @@ use crate::state_machine_lifecycle::{
 
 /// What the service states about a path a `Choice` rule's condition could not resolve,
 /// beside the path itself.
-const CHOICE_CONDITION_DIAGNOSIS: &str =
+///
+/// `pub(crate)`, not private: `tests/all.rs` is this binary's crate root, so a sibling
+/// suite asserting the same diagnosis reads it from here rather than carrying a second
+/// copy of the sentence.
+pub(crate) const CHOICE_CONDITION_DIAGNOSIS: &str =
     "The choice state's condition path references an invalid value.";
 
 /// Start one execution per row of a `Choice` table and report which branch each took:

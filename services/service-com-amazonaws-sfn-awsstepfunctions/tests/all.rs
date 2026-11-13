@@ -163,6 +163,8 @@ mod parallel_branch_stop;
 mod parallel_run_a_job;
 #[path = "all/payload_byte_limits.rs"]
 mod payload_byte_limits;
+#[path = "all/poller_choice_path_cause.rs"]
+mod poller_choice_path_cause;
 #[path = "all/refusal_message_fidelity.rs"]
 mod refusal_message_fidelity;
 #[path = "all/refusal_message_wording.rs"]
