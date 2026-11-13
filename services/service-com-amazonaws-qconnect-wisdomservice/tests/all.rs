@@ -23,6 +23,8 @@ mod ai_agent_update;
 mod ai_guardrail;
 #[path = "all/ai_guardrail_update.rs"]
 mod ai_guardrail_update;
+#[path = "all/ai_prompt.rs"]
+mod ai_prompt;
 #[path = "all/assistant_ai_agent_binding.rs"]
 mod assistant_ai_agent_binding;
 #[path = "all/assistant_association.rs"]

@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateAIPrompt
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateAIPrompt`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateAIPrompt::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Mints an AI prompt INSIDE the assistant the route names, stores it, and answers out of
+//! the STORED record, so what this call reports is what every later `GetAIPrompt` reports.
+//! The service answers the create with the prompt already `ACTIVE`, so no status change is
+//! owed afterwards; a create whose `assistantId` names no assistant this account holds is
+//! the modelled `ResourceNotFoundException` (HTTP 404); and a replayed `clientToken`
+//! answers with the prompt that token already created.
 //!
 //! ## Shape of an operation
 //!
@@ -110,6 +108,34 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+use crate::state::AiPrompt;
+
+/// The modelled `ResourceNotFoundException` (HTTP 404), naming the resource the request
+/// addressed — the member the model provides for exactly that.
+fn not_found(message: &str, resource_name: &str) -> CreateAIPromptError {
+    CreateAIPromptErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+        message: Some(message.to_string()),
+        resource_name: Some(resource_name.to_string()),
+    })
+    .into()
+}
+
+/// The modelled `ValidationException` (HTTP 400).
+fn validation(message: String) -> CreateAIPromptError {
+    CreateAIPromptErrorModeled::ValidationException(ValidationException {
+        message: Some(message),
+    })
+    .into()
+}
+
+/// The modelled `ServiceQuotaExceededException` (HTTP 402).
+fn quota_exceeded() -> CreateAIPromptError {
+    CreateAIPromptErrorModeled::ServiceQuotaExceededException(ServiceQuotaExceededException {
+        message: Some(crate::state::message_ai_prompt_quota()),
+    })
+    .into()
+}
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -184,18 +210,152 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateAIPrompt` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateAIPromptErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateAIPrompt"))
+        // Modeled constraints (`name`'s and `description`'s length and pattern,
+        // `modelId`'s length, the template text's length, the inference parameters' ranges
+        // and the `type`, `templateType`, `apiFormat` and `visibilityStatus`
+        // enumerations) are already refused BEFORE this handler runs, so reaching here
+        // means the input satisfies every one of them.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            // Unreachable in this emulator: the router builds one `InMemoryEngine` and
+            // hands it to every service.
+            crate::scaffolded::Scaffolded::not_implemented("CreateAIPrompt")
+        })?;
+
+        let region = crate::state::request_region(&ctx.parts().headers);
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+
+        // An AI prompt exists only inside an assistant, so the parent is resolved first: a
+        // create naming an assistant this account does not hold is not found, whatever
+        // else the request carries. Its id and ARN are read off the stored record rather
+        // than rebuilt, so the prompt reports the assistant's own ARN.
+        let Some(assistant) = store.assistant(&input.assistant_id) else {
+            return Err(not_found(
+                crate::state::MESSAGE_ASSISTANT_NOT_FOUND,
+                &input.assistant_id,
+            ));
+        };
+        let assistant_id = assistant.assistant_id.clone();
+        let assistant_arn = assistant.assistant_arn.clone();
+
+        // The model puts no bound on the `tags` map, so the store does: AWS's tagging
+        // restrictions allow at most 50 tags on a resource, and a request past that is
+        // outside what the service accepts. The count is taken from what the caller sent,
+        // before the map is stored.
+        let tags = input.tags.clone().unwrap_or_default();
+        if tags.len() > crate::state::MAX_TAGS_PER_RESOURCE {
+            return Err(validation(crate::state::message_too_many_tags()));
+        }
+
+        // What this create's `@idempotencyToken` identifies: every member the record below
+        // is built from, with the tag map fingerprinted in key order
+        // (`crate::state::tags_fingerprint`). The template and inference configurations
+        // are fingerprinted through their `Debug` rendering, which is stable for one
+        // request.
+        let fingerprint = crate::state::request_fingerprint(&[
+            input.name.clone(),
+            input.r#type.clone(),
+            input.template_type.clone(),
+            input.model_id.clone(),
+            input.api_format.clone(),
+            input.visibility_status.clone(),
+            input.description.clone().unwrap_or_default(),
+            format!("{:?}", input.template_configuration),
+            format!("{:?}", input.inference_configuration),
+            crate::state::tags_fingerprint(&tags),
+        ]);
+
+        // A replayed `@idempotencyToken` answers with the prompt it already created under
+        // THIS assistant rather than creating a second one, while the same token carrying
+        // a DIFFERENT request is the modelled idempotency conflict rather than a record
+        // the caller did not ask for. The token is scoped to this operation and this
+        // parent, so the same token on another create is another resource.
+        let token_scope = format!("{}/{assistant_id}", Self::NAME);
+        match store.replayed_create(&token_scope, input.client_token.as_deref(), &fingerprint) {
+            crate::state::Replay::Conflict => {
+                return Err(CreateAIPromptErrorModeled::ConflictException(ConflictException {
+                    message: Some(crate::state::MESSAGE_IDEMPOTENCY_CONFLICT.to_string()),
+                })
+                .into())
+            }
+            crate::state::Replay::Retry(created) => {
+                if let Some(prompt) = store.ai_prompt(&assistant_id, &created) {
+                    return Ok(CreateAIPromptOutput {
+                        ai_prompt: Some(prompt.to_ai_prompt_data()),
+                    });
+                }
+            }
+            crate::state::Replay::Fresh => {}
+        }
+
+        // The assistant's AI prompt bound, which is what keeps this store finite.
+        let Some(assistant) = store.assistant(&assistant_id) else {
+            // Unreachable: the lookup above found this assistant while the lock is held.
+            return Err(not_found(
+                crate::state::MESSAGE_ASSISTANT_NOT_FOUND,
+                &input.assistant_id,
+            ));
+        };
+        if assistant.ai_prompts.len() >= crate::state::MAX_AI_PROMPTS_PER_ASSISTANT {
+            return Err(quota_exceeded());
+        }
+
+        let seq = store.next_seq();
+        let Some(ai_prompt_id) = store
+            .assistant(&assistant_id)
+            .and_then(|assistant| assistant.mint_ai_prompt_id(seq))
+        else {
+            return Err(validation(
+                "could not mint a unique aiPromptId; retry the request".to_string(),
+            ));
+        };
+        let prompt = AiPrompt {
+            ai_prompt_arn: crate::state::ai_prompt_arn(&region, &assistant_id, &ai_prompt_id),
+            ai_prompt_id: ai_prompt_id.clone(),
+            assistant_id: assistant_id.clone(),
+            assistant_arn,
+            name: input.name.clone(),
+            r#type: input.r#type.clone(),
+            template_type: input.template_type.clone(),
+            model_id: input.model_id.clone(),
+            api_format: input.api_format.clone(),
+            template_configuration: input.template_configuration.clone(),
+            inference_configuration: input.inference_configuration.clone(),
+            description: input.description.clone(),
+            visibility_status: input.visibility_status.clone(),
+            // A caller created this one, which is what the model's `Origin` wording calls
+            // `CUSTOMER`.
+            origin: crate::state::AI_AGENT_ORIGIN_CUSTOMER.to_string(),
+            // The service answers the create with the prompt already in service, so there
+            // is no transition the clock owes it afterwards.
+            status: crate::state::AI_RESOURCE_STATUS_ACTIVE.to_string(),
+            tags,
+            // Nothing has modified the record yet, so it was last written when it was
+            // created.
+            modified_at: now,
+        };
+        if !store.insert_ai_prompt(prompt) {
+            // The bound the insert enforces, which the check above already answered for:
+            // reaching here means the assistant filled up while the lock was held, which
+            // this operation cannot do.
+            return Err(quota_exceeded());
+        }
+        store.remember_create(
+            &token_scope,
+            input.client_token.as_deref(),
+            &fingerprint,
+            &ai_prompt_id,
+        );
+
+        // Render out of the INSERTED record rather than out of the request: what this
+        // call answers is what a later `GetAIPrompt` answers.
+        let Some(stored) = store.ai_prompt(&assistant_id, &ai_prompt_id) else {
+            // Unreachable: the insert above put this id on the assistant while the lock
+            // is held.
+            return Err(crate::scaffolded::Scaffolded::not_implemented("CreateAIPrompt"));
+        };
+        Ok(CreateAIPromptOutput {
+            ai_prompt: Some(stored.to_ai_prompt_data()),
+        })
     }
 }

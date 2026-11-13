@@ -11,6 +11,10 @@
 //! module beside this one, re-exported here so every handler keeps reaching the store
 //! through `crate::state::…`.
 
+/// The AI-prompt family: the record, its projection and its lookups.
+mod ai_prompts;
+pub use ai_prompts::*;
+
 /// The message-template family: the record, its projections and its lookups.
 mod message_templates;
 pub use message_templates::*;
@@ -1965,6 +1969,11 @@ pub struct Assistant {
     /// its assistant, as an AI agent and a session are, so it goes when the assistant
     /// goes.
     pub ai_guardrails: HashMap<String, AiGuardrail>,
+    /// The AI prompts this assistant holds, keyed by `aiPromptId`, at most
+    /// [`MAX_AI_PROMPTS_PER_ASSISTANT`] of them, on the same footing as
+    /// [`Self::ai_guardrails`]: a prompt is reachable only through its assistant, so it
+    /// goes when the assistant goes.
+    pub ai_prompts: HashMap<String, AiPrompt>,
     /// This assistant's orchestrator configurations, with the same contract as
     /// [`Self::ai_agent_configuration`].
     pub orchestrator_configuration_list: Vec<OrchestratorConfigurationEntry>,
@@ -3333,6 +3342,13 @@ impl ComAmazonawsQconnectWisdomserviceState {
         {
             return Some(&agent.tags);
         }
+        if let Some(prompt) = assistant
+            .ai_prompts
+            .get(id)
+            .filter(|prompt| prompt.ai_prompt_arn == resource_arn)
+        {
+            return Some(&prompt.tags);
+        }
         assistant
             .sessions
             .get(id)
@@ -3428,6 +3444,13 @@ impl ComAmazonawsQconnectWisdomserviceState {
             .filter(|agent| agent.ai_agent_arn == resource_arn)
         {
             return Some(&mut agent.tags);
+        }
+        if let Some(prompt) = assistant
+            .ai_prompts
+            .get_mut(&id)
+            .filter(|prompt| prompt.ai_prompt_arn == resource_arn)
+        {
+            return Some(&mut prompt.tags);
         }
         assistant
             .sessions
@@ -3688,6 +3711,9 @@ impl ComAmazonawsQconnectWisdomserviceState {
                         .contains_key(created.resource_id.as_str())
                     || assistant
                         .ai_agents
+                        .contains_key(created.resource_id.as_str())
+                    || assistant
+                        .ai_prompts
                         .contains_key(created.resource_id.as_str())
                     || associations.contains(&created.resource_id)
             })

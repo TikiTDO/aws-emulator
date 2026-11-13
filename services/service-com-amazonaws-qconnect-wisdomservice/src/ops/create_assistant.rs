@@ -283,6 +283,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // A fresh assistant holds no AI guardrail: one is created by
             // `CreateAIGuardrail`, under the assistant the route names.
             ai_guardrails: ::std::collections::HashMap::new(),
+            // A fresh assistant holds no AI prompt either: one is created by
+            // `CreateAIPrompt`, under the assistant the route names.
+            ai_prompts: ::std::collections::HashMap::new(),
             orchestrator_configuration_list: Vec::new(),
             // The assistant owns the service-managed session from the moment it exists:
             // a `GetSession` on it right after this create reports it, with no

@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetAIPrompt
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetAIPrompt`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetAIPrompt::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! REPORTS the AI prompt the route names, out of the record `CreateAIPrompt` stored, so a
+//! read answers exactly what the create answered and reading one changes nothing. A route
+//! naming an assistant this account does not hold, or a prompt that assistant does not
+//! hold, is the modelled `ResourceNotFoundException` (HTTP 404).
 //!
 //! ## Shape of an operation
 //!
@@ -80,6 +76,16 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+
+/// The modelled `ResourceNotFoundException` (HTTP 404), naming the resource the request
+/// addressed — the member the model provides for exactly that.
+fn not_found(message: &str, resource_name: &str) -> GetAIPromptError {
+    GetAIPromptErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+        message: Some(message.to_string()),
+        resource_name: Some(resource_name.to_string()),
+    })
+    .into()
+}
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -153,18 +159,43 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetAIPrompt` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetAIPromptErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetAIPrompt"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            // Unreachable in this emulator: the router builds one `InMemoryEngine` and
+            // hands it to every service.
+            crate::scaffolded::Scaffolded::not_implemented("GetAIPrompt")
+        })?;
+        let store = state.lock();
+
+        // A prompt exists only inside an assistant, so the parent is resolved first: a
+        // read naming an assistant this account does not hold is not found, whatever the
+        // rest of the route names.
+        if store.assistant(&input.assistant_id).is_none() {
+            return Err(not_found(
+                crate::state::MESSAGE_ASSISTANT_NOT_FOUND,
+                &input.assistant_id,
+            ));
+        }
+        let Some(prompt) = store.ai_prompt(&input.assistant_id, &input.ai_prompt_id) else {
+            return Err(not_found(
+                crate::state::MESSAGE_AI_PROMPT_NOT_FOUND,
+                &input.ai_prompt_id,
+            ));
+        };
+        // The version this read answered for: the one the label addressed, and the working
+        // copy's floating alias when the label named no version — which is what the
+        // reported ARN carries, so a client can tell which version it read.
+        let (_, qualifier) = crate::state::resolve_qualified_id(&input.ai_prompt_id);
+        let qualifier = qualifier.unwrap_or(crate::state::VERSION_QUALIFIER_LATEST);
+        Ok(GetAIPromptOutput {
+            ai_prompt: Some(prompt.to_ai_prompt_data_at_version(qualifier)),
+            // The model's own wording: the version number is "returned if an AI Prompt
+            // version was specified via use of a qualifier for the `aiPromptId` on the
+            // request". This read answered for the prompt's working copy rather than for a
+            // published version of it — a numbered qualifier names nothing here — and the
+            // working copy carries no `Version` number (the model's `Version` is `range
+            // 1..`), so there is none to report.
+            version_number: None,
+        })
     }
 }
