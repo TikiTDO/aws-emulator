@@ -46,8 +46,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Whether IAM lets a request perform the action it asks for — the decision taken in front
-/// of every operation whose model declares `AccessDeniedException`, and the layer
-/// ([`authorization::Gated`]) that takes it there.
+/// of every operation this service publishes, and the layer ([`authorization::Gated`]) that
+/// takes it there.
 pub mod authorization;
 
 /// The Event API's DATA plane: the two sockets each `Api` is served on — the HTTP endpoint
@@ -400,8 +400,8 @@ fn declared_form_refusal(violations: &[Violation]) -> Option<Refused> {
 /// router builds one shared engine and hands it to `new`.
 pub struct EmulatedService<Eng: Send + Sync + 'static> {
     entry: crate::ServiceDefinition<Eng>,
-    /// One [`authorization::Gated`] per operation whose model declares
-    /// `AccessDeniedException`, keyed by the routing key the model names that operation by
+    /// One [`authorization::Gated`] per operation this service publishes, keyed by the
+    /// routing key the model names that operation by
     /// ([`Operation::NAME`], the same key the generated routing table uses). Built once
     /// here, never per request; each entry carries the operation's TYPE and a handle on the
     /// one shared engine, so this is a table of names rather than a second set of
@@ -421,15 +421,15 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     }
 }
 
-/// The [`authorization::Gated`] wrapper for every operation whose model declares
-/// `AccessDeniedException` ([`authorization::GATED_OPERATIONS`]).
+/// The [`authorization::Gated`] wrapper for every operation this service publishes
+/// ([`authorization::GATED_OPERATIONS`]).
 ///
 /// Authorization is a property of the request's identity, the action it names and the
 /// resource it addresses rather than of what a handler goes on to do, so it is taken here
-/// for all of them at once — implemented or still scaffolded. A stub answers 501 for a
-/// request whose caller IAM permits and the refusal otherwise, which is the order the real
-/// service evaluates them in; leaving a modelled operation out would serve an unauthorized
-/// caller, the very divergence this removes.
+/// for all of them at once — implemented or still scaffolded, and whatever error set the
+/// operation itself declares. A stub answers 501 for a request whose caller IAM permits and
+/// the refusal otherwise, which is the order the real service evaluates them in; leaving an
+/// operation out would serve an unauthorized caller, the very divergence this removes.
 fn gated_table<Eng: Send + Sync + 'static>(
     engine: &Arc<Eng>,
 ) -> HashMap<&'static str, Box<dyn ErasedOperation>> {
@@ -449,29 +449,79 @@ fn gated_table<Eng: Send + Sync + 'static>(
     }
     register!(
         associate_api::AssociateApi,
+        associate_merged_graphql_api::AssociateMergedGraphqlApi,
+        associate_source_graphql_api::AssociateSourceGraphqlApi,
+        create_api::CreateApi,
+        create_api_cache::CreateApiCache,
+        create_api_key::CreateApiKey,
+        create_channel_namespace::CreateChannelNamespace,
+        create_data_source::CreateDataSource,
         create_domain_name::CreateDomainName,
+        create_function::CreateFunction,
+        create_graphql_api::CreateGraphqlApi,
+        create_resolver::CreateResolver,
+        create_type::CreateType,
         delete_api::DeleteApi,
+        delete_api_cache::DeleteApiCache,
+        delete_api_key::DeleteApiKey,
         delete_channel_namespace::DeleteChannelNamespace,
+        delete_data_source::DeleteDataSource,
         delete_domain_name::DeleteDomainName,
+        delete_function::DeleteFunction,
         delete_graphql_api::DeleteGraphqlApi,
+        delete_resolver::DeleteResolver,
+        delete_type::DeleteType,
         disassociate_api::DisassociateApi,
+        disassociate_merged_graphql_api::DisassociateMergedGraphqlApi,
+        disassociate_source_graphql_api::DisassociateSourceGraphqlApi,
         evaluate_code::EvaluateCode,
         evaluate_mapping_template::EvaluateMappingTemplate,
+        flush_api_cache::FlushApiCache,
         get_api::GetApi,
         get_api_association::GetApiAssociation,
+        get_api_cache::GetApiCache,
         get_channel_namespace::GetChannelNamespace,
+        get_data_source::GetDataSource,
+        get_data_source_introspection::GetDataSourceIntrospection,
         get_domain_name::GetDomainName,
+        get_function::GetFunction,
         get_graphql_api::GetGraphqlApi,
         get_graphql_api_environment_variables::GetGraphqlApiEnvironmentVariables,
+        get_introspection_schema::GetIntrospectionSchema,
+        get_resolver::GetResolver,
+        get_schema_creation_status::GetSchemaCreationStatus,
+        get_source_api_association::GetSourceApiAssociation,
+        get_type::GetType,
+        list_api_keys::ListApiKeys,
+        list_apis::ListApis,
+        list_channel_namespaces::ListChannelNamespaces,
+        list_data_sources::ListDataSources,
         list_domain_names::ListDomainNames,
+        list_functions::ListFunctions,
+        list_graphql_apis::ListGraphqlApis,
+        list_resolvers::ListResolvers,
+        list_resolvers_by_function::ListResolversByFunction,
+        list_source_api_associations::ListSourceApiAssociations,
         list_tags_for_resource::ListTagsForResource,
+        list_types::ListTypes,
+        list_types_by_association::ListTypesByAssociation,
         put_graphql_api_environment_variables::PutGraphqlApiEnvironmentVariables,
+        start_data_source_introspection::StartDataSourceIntrospection,
+        start_schema_creation::StartSchemaCreation,
+        start_schema_merge::StartSchemaMerge,
         tag_resource::TagResource,
         untag_resource::UntagResource,
         update_api::UpdateApi,
+        update_api_cache::UpdateApiCache,
+        update_api_key::UpdateApiKey,
         update_channel_namespace::UpdateChannelNamespace,
+        update_data_source::UpdateDataSource,
         update_domain_name::UpdateDomainName,
+        update_function::UpdateFunction,
         update_graphql_api::UpdateGraphqlApi,
+        update_resolver::UpdateResolver,
+        update_source_api_association::UpdateSourceApiAssociation,
+        update_type::UpdateType,
     );
     wrappers
 }
@@ -501,11 +551,9 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // NOT a re-route: the key is the one the generated table's own protocol resolves,
         // and the operation it names is the one served — wrapped in
         // [`authorization::Gated`] so IAM's decision about the action is taken BEFORE the
-        // handler runs, as AWS takes it. Only the operations whose model declares
-        // `AccessDeniedException` are in that table
-        // ([`authorization::GATED_OPERATIONS`]); every other key resolves to `None` here
-        // exactly as it did before, so the generated table serves it unchanged and the
-        // router's routing-error path is untouched.
+        // handler runs, as AWS takes it. Every operation this service publishes is in that
+        // table ([`authorization::GATED_OPERATIONS`]); a key the model does not name
+        // resolves to `None` here, so the router's routing-error path is untouched.
         let key = self.entry.protocol().routing_key(req).ok()?;
         self.gated.get(key).map(::std::convert::AsRef::as_ref)
     }
@@ -577,5 +625,31 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // consume it on `None`.
         let _ = error;
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RULE: the table `override_operation` resolves a request through carries EXACTLY the
+    /// operations the gate is asked about ([`authorization::GATED_OPERATIONS`], which that
+    /// module's own test holds to the model), so no published action is served without IAM's
+    /// decision and no key the model does not name is routed here.
+    #[test]
+    fn every_published_action_is_served_behind_the_decision() {
+        // The engine here is only what the wrappers are BUILT from: this asserts the
+        // table's keys, so nothing is stored in or read from it.
+        let engine = Arc::new(engine::InMemoryEngine::new());
+        let table = gated_table::<engine::InMemoryEngine>(&engine);
+        let mut wrapped: Vec<&str> = table.keys().copied().collect();
+        wrapped.sort_unstable();
+        let mut asked: Vec<&str> = authorization::GATED_OPERATIONS.to_vec();
+        asked.sort_unstable();
+        assert_eq!(
+            wrapped, asked,
+            "case \"the whole surface\": expected one wrapper per published action, got \
+             {wrapped:?} against {asked:?}"
+        );
     }
 }

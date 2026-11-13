@@ -8,12 +8,18 @@
 //! — or that an explicit `Deny` covers — is told it is not authorized rather than told
 //! anything about the resource it named, and the call performs nothing: no resource is
 //! minted, no status moves, nothing is read back. This service models that refusal as
-//! `AccessDeniedException` (`@error("client")`, `@httpError(403)`), declared by the
-//! operations [`GATED_OPERATIONS`] names
-//! (`smithy_query(query="operation",operation="GetDomainName,ListDomainNames,EvaluateCode")`
-//! and the rest of that list). An operation whose model declares no 403 is NOT judged
-//! here: answering a caller an error its operation does not model would be a different
-//! divergence from the one this removes.
+//! `AccessDeniedException` (`@error("client")`, `@httpError(403)`,
+//! `smithy_query(query="shape",shape="AccessDeniedException")`), and it is the answer to
+//! EVERY action this service publishes ([`GATED_OPERATIONS`], which is the whole bound
+//! operation set, `smithy_query(query="list_operations")`).
+//!
+//! The decision belongs to the authorization layer in FRONT of the service rather than to
+//! the operation behind it, so which operations it judges does not follow from the error
+//! set an operation declares: an operation's modelled errors are the ones the SERVICE
+//! raises once it is reached, and a caller IAM refuses never reaches it. Judging only the
+//! operations that happen to declare the shape would serve an unauthorized caller the very
+//! resources the policy withholds — a collection read among them — so the decision is
+//! taken for all of them alike.
 //!
 //! The decision is a property of the request's identity, the action it names and the
 //! resource it addresses rather than of what a handler goes on to do, so it is taken ONCE
@@ -114,39 +120,89 @@ const ACCESS_DENIED_STATUS: u16 = 403;
 /// The media type this restJson1 service renders an error in.
 const JSON_CONTENT_TYPE: &str = "application/json";
 
-/// Every operation of this model that declares `AccessDeniedException`, i.e. the whole set
-/// this gate is asked about, as `Operation::NAME` spells each one.
+/// Every action this service publishes, i.e. the whole set this gate is asked about, as
+/// `Operation::NAME` spells each one — which is also the name of the IAM action
+/// (`appsync:<OperationName>`) a policy states about it.
 ///
-/// Source: the modelled error set of each operation
-/// (`smithy_query(query="operation",operation="…")`, which is also what each handler's own
-/// `…ErrorModeled` enum lists). An operation absent from this list models no 403, so there
-/// is no modelled answer for it to refuse an unauthorized caller with and it is left
-/// unjudged; the list is asserted against the model by this module's own test.
+/// Source: the operations bound to the service shape
+/// (`smithy_query(query="list_operations")`); the list is asserted against the model by
+/// this module's own test, so an operation the model gains is judged rather than quietly
+/// served to a caller no policy allows.
 pub const GATED_OPERATIONS: &[&str] = &[
     "AssociateApi",
+    "AssociateMergedGraphqlApi",
+    "AssociateSourceGraphqlApi",
+    "CreateApi",
+    "CreateApiCache",
+    "CreateApiKey",
+    "CreateChannelNamespace",
+    "CreateDataSource",
     "CreateDomainName",
+    "CreateFunction",
+    "CreateGraphqlApi",
+    "CreateResolver",
+    "CreateType",
     "DeleteApi",
+    "DeleteApiCache",
+    "DeleteApiKey",
     "DeleteChannelNamespace",
+    "DeleteDataSource",
     "DeleteDomainName",
+    "DeleteFunction",
     "DeleteGraphqlApi",
+    "DeleteResolver",
+    "DeleteType",
     "DisassociateApi",
+    "DisassociateMergedGraphqlApi",
+    "DisassociateSourceGraphqlApi",
     "EvaluateCode",
     "EvaluateMappingTemplate",
+    "FlushApiCache",
     "GetApi",
     "GetApiAssociation",
+    "GetApiCache",
     "GetChannelNamespace",
+    "GetDataSource",
+    "GetDataSourceIntrospection",
     "GetDomainName",
+    "GetFunction",
     "GetGraphqlApi",
     "GetGraphqlApiEnvironmentVariables",
+    "GetIntrospectionSchema",
+    "GetResolver",
+    "GetSchemaCreationStatus",
+    "GetSourceApiAssociation",
+    "GetType",
+    "ListApiKeys",
+    "ListApis",
+    "ListChannelNamespaces",
+    "ListDataSources",
     "ListDomainNames",
+    "ListFunctions",
+    "ListGraphqlApis",
+    "ListResolvers",
+    "ListResolversByFunction",
+    "ListSourceApiAssociations",
     "ListTagsForResource",
+    "ListTypes",
+    "ListTypesByAssociation",
     "PutGraphqlApiEnvironmentVariables",
+    "StartDataSourceIntrospection",
+    "StartSchemaCreation",
+    "StartSchemaMerge",
     "TagResource",
     "UntagResource",
     "UpdateApi",
+    "UpdateApiCache",
+    "UpdateApiKey",
     "UpdateChannelNamespace",
+    "UpdateDataSource",
     "UpdateDomainName",
+    "UpdateFunction",
     "UpdateGraphqlApi",
+    "UpdateResolver",
+    "UpdateSourceApiAssociation",
+    "UpdateType",
 ];
 
 /// What a refusal names as the principal of a request whose session credential has already
@@ -226,11 +282,22 @@ fn named(
 /// What the request addresses: its URI space first, and the member its INPUT names a
 /// resource by where the URI carries no label for one.
 ///
-/// The three spaces the gated operations are bound to: `/v{n}/domainnames…` (a custom
-/// domain name and its API association), `/v{n}/apis…` (a GraphQL API, an Event API and a
-/// channel namespace of one) and `/v1/tags/{resourceArn}` (the tagging surface, whose label
-/// IS the target's ARN). Anything else — the two sandbox evaluation paths among them —
-/// names no resource of this service.
+/// The spaces this service's operations are bound to (`smithy_query(query="digest")`):
+/// `/v{n}/domainnames…` (a custom domain name and its API association), `/v{n}/apis…` (a
+/// GraphQL API, an Event API, and the children each addresses under it — a data source, a
+/// function, a type, a resolver on a field of a type, a channel namespace), the
+/// `/v1/{mergedApis,sourceApis}/{identifier}…` association spaces (whose label identifies
+/// one side's API, by its id or by its ARN) and `/v1/tags/{resourceArn}` (the tagging
+/// surface, whose label IS the target's ARN). Anything else — the two sandbox evaluation
+/// paths and the data-source introspection space among them — names no resource of this
+/// service.
+///
+/// A child is named under its API's own `apis/{apiId}` path, as this service's own ARN
+/// builders spell it (`crate::state::data_source_resource` and the rest), so a policy
+/// written about one covers exactly the calls that address it and a policy written about
+/// `apis/{apiId}/*` covers every child of that API. A call that addresses a child
+/// COLLECTION rather than one member of it is judged against the parent it collects under,
+/// which is the resource such a call names.
 fn addressed(
     path: &str,
     input: Option<&::serde_json::Map<String, ::serde_json::Value>>,
@@ -256,13 +323,38 @@ fn addressed(
             let Some(api_id) = segment(2) else {
                 return Addressed::Account;
             };
-            match (segment(3).as_deref(), segment(4)) {
-                (Some("channelNamespaces"), Some(name)) => Addressed::Resource(
-                    crate::state::channel_namespace_resource(&api_id, &name),
-                ),
-                _ => Addressed::Resource(crate::state::api_resource(&api_id)),
-            }
+            Addressed::Resource(match (segment(3).as_deref(), segment(4)) {
+                (Some("channelNamespaces"), Some(name)) => {
+                    crate::state::channel_namespace_resource(&api_id, &name)
+                }
+                (Some("datasources"), Some(name)) => {
+                    crate::state::data_source_resource(&api_id, &name)
+                }
+                (Some("functions"), Some(function_id)) => {
+                    crate::state::function_resource(&api_id, &function_id)
+                }
+                (Some("types"), Some(type_name)) => match (segment(5).as_deref(), segment(6)) {
+                    (Some("resolvers"), Some(field_name)) => {
+                        crate::state::resolver_resource(&api_id, &type_name, &field_name)
+                    }
+                    _ => crate::state::type_resource(&api_id, &type_name),
+                },
+                // Every other child space — the API keys, the cache, the schema, the
+                // environment variables, the source-API associations — is addressed under
+                // the API itself, which is the resource those calls name.
+                _ => crate::state::api_resource(&api_id),
+            })
         }
+        // One side's API, named by either form its `…Identifier` label admits
+        // ([`crate::state::is_api_identifier`]): an ARN is already the whole resource, an
+        // API id is the resource portion of one.
+        Some("mergedApis" | "sourceApis") => match segment(2) {
+            Some(identifier) if identifier.starts_with(crate::state::ARN_PREFIX) => {
+                Addressed::Arn(identifier)
+            }
+            Some(api_id) => Addressed::Resource(crate::state::api_resource(&api_id)),
+            None => Addressed::Account,
+        },
         Some("tags") => match segment(2) {
             Some(arn) => Addressed::Arn(arn),
             None => Addressed::Account,
@@ -652,13 +744,13 @@ mod tests {
     }
 
     /// RULE applied to the whole surface: [`GATED_OPERATIONS`] is EXACTLY the set of
-    /// operations whose model declares `AccessDeniedException`.
+    /// operations the service shape binds, so every action this service publishes is judged.
     ///
     /// The names come from the MODEL rather than from a second hand list, so an operation
-    /// that gains or loses the 403 fails here instead of silently serving an unauthorized
-    /// caller (or answering an error its own model does not declare).
+    /// the model gains fails here instead of silently serving a caller whose policies allow
+    /// nothing.
     #[test]
-    fn the_gated_set_is_exactly_the_operations_modelling_the_refusal() {
+    fn the_gated_set_is_every_operation_the_service_publishes() {
         let model = std::fs::read_to_string(MODEL_PATH)
             .expect("the model that generated this crate ships beside it");
         let model: ::serde_json::Value =
@@ -666,29 +758,44 @@ mod tests {
         let shapes = model["shapes"]
             .as_object()
             .expect("a Smithy model declares shapes");
-        let mut modelled: Vec<&str> = shapes
-            .iter()
-            .filter(|(_, shape)| shape["type"] == "operation")
-            .filter(|(_, shape)| {
-                shape["errors"]
-                    .as_array()
-                    .is_some_and(|errors| {
-                        errors.iter().any(|error| {
-                            error["target"].as_str().is_some_and(|target| {
-                                target.ends_with(&format!("#{ACCESS_DENIED_EXCEPTION}"))
-                            })
-                        })
-                    })
-            })
-            .filter_map(|(id, _)| id.rsplit('#').next())
+        let mut bound: Vec<&str> = shapes
+            .values()
+            .filter(|shape| shape["type"] == "service")
+            .filter_map(|service| service["operations"].as_array())
+            .flatten()
+            .filter_map(|bound| bound["target"].as_str())
+            .filter_map(|target| target.rsplit('#').next())
             .collect();
-        modelled.sort_unstable();
+        bound.sort_unstable();
         let mut gated: Vec<&str> = GATED_OPERATIONS.to_vec();
         gated.sort_unstable();
         assert_eq!(
-            gated, modelled,
-            "case \"the whole surface\": expected the gated set to be the operations \
-             modelling {ACCESS_DENIED_EXCEPTION}, got {gated:?} against {modelled:?}"
+            gated, bound,
+            "case \"the whole surface\": expected the gated set to be every operation the \
+             service binds, got {gated:?} against {bound:?}"
+        );
+    }
+
+    /// RULE: `AccessDeniedException` is a shape of THIS model, so the refusal this gate
+    /// answers with is one the service declares — whether or not the operation a refused
+    /// request named lists it among its own errors.
+    #[test]
+    fn the_refusal_is_a_shape_this_model_declares() {
+        let model = std::fs::read_to_string(MODEL_PATH)
+            .expect("the model that generated this crate ships beside it");
+        let model: ::serde_json::Value =
+            ::serde_json::from_str(&model).expect("the model that generated this crate is JSON");
+        let declared = model["shapes"]
+            .as_object()
+            .expect("a Smithy model declares shapes")
+            .iter()
+            .find(|(id, _)| id.ends_with(&format!("#{ACCESS_DENIED_EXCEPTION}")))
+            .map(|(_, shape)| shape["traits"]["smithy.api#httpError"].clone());
+        assert_eq!(
+            declared,
+            Some(::serde_json::json!(ACCESS_DENIED_STATUS)),
+            "case {ACCESS_DENIED_EXCEPTION:?}: expected the model to declare it at \
+             {ACCESS_DENIED_STATUS}, got {declared:?}"
         );
     }
 
@@ -785,6 +892,67 @@ mod tests {
                 Addressed::Resource(
                     "apis/abcdefghijklmnopqrstuvwxyz/channelNamespace/orders".to_string(),
                 ),
+            ),
+            (
+                "a data source of a GraphQL API",
+                "/v1/apis/abcdefghijklmnopqrstuvwxyz/datasources/orders_table",
+                None,
+                Addressed::Resource(
+                    "apis/abcdefghijklmnopqrstuvwxyz/datasources/orders_table".to_string(),
+                ),
+            ),
+            (
+                "a function of a GraphQL API",
+                "/v1/apis/abcdefghijklmnopqrstuvwxyz/functions/fn-1",
+                None,
+                Addressed::Resource(
+                    "apis/abcdefghijklmnopqrstuvwxyz/functions/fn-1".to_string(),
+                ),
+            ),
+            (
+                "a type of a GraphQL API",
+                "/v1/apis/abcdefghijklmnopqrstuvwxyz/types/Query",
+                None,
+                Addressed::Resource("apis/abcdefghijklmnopqrstuvwxyz/types/Query".to_string()),
+            ),
+            (
+                "a resolver on a field of a type",
+                "/v1/apis/abcdefghijklmnopqrstuvwxyz/types/Query/resolvers/orders",
+                None,
+                Addressed::Resource(
+                    "apis/abcdefghijklmnopqrstuvwxyz/types/Query/resolvers/orders".to_string(),
+                ),
+            ),
+            (
+                "a resolver collection, which names the type it collects under",
+                "/v1/apis/abcdefghijklmnopqrstuvwxyz/types/Query/resolvers",
+                None,
+                Addressed::Resource("apis/abcdefghijklmnopqrstuvwxyz/types/Query".to_string()),
+            ),
+            (
+                "a GraphQL API's API keys, which name the API itself",
+                "/v1/apis/abcdefghijklmnopqrstuvwxyz/apikeys/da2-key",
+                None,
+                Addressed::Resource("apis/abcdefghijklmnopqrstuvwxyz".to_string()),
+            ),
+            (
+                "a Merged API addressed by its id",
+                "/v1/mergedApis/abcdefghijklmnopqrstuvwxyz/sourceApiAssociations",
+                None,
+                Addressed::Resource("apis/abcdefghijklmnopqrstuvwxyz".to_string()),
+            ),
+            (
+                "a source API addressed by its ARN",
+                "/v1/sourceApis/arn%3Aaws%3Aappsync%3Aus-east-1%3A000000000000%3Aapis%2Fabc\
+                 /mergedApiAssociations",
+                None,
+                Addressed::Arn("arn:aws:appsync:us-east-1:000000000000:apis/abc".to_string()),
+            ),
+            (
+                "the data source introspection space, which names no resource",
+                "/v1/datasources/introspections/abc",
+                None,
+                Addressed::Account,
             ),
             (
                 "the tagging surface, whose label is the target's ARN",

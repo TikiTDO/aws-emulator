@@ -2,17 +2,17 @@
 
 //! IAM authorization of this service's operations, over the restJson1 wire.
 //!
-//! The rule under test: a request to an operation whose model declares
-//! `AccessDeniedException` is served only to a caller whose identity-based IAM policies
-//! allow THAT operation's own action (`appsync:<OperationName>`) on the resource the
-//! request addresses — the custom domain's ARN, the API's, the channel namespace's, the ARN
-//! a tagging call names, and the any-resource wildcard for a call that addresses no
-//! resource of its own. Every other caller is refused with the modelled
-//! `AccessDeniedException` (HTTP 403) BEFORE the operation reads or writes anything, so a
-//! refused caller learns nothing about what the account holds — not even whether the
-//! resource it named exists — and a refused mutation changes nothing. An operation whose
-//! model declares no 403 is not judged at all, because answering a caller an error its
-//! operation does not model would be a different divergence.
+//! The rule under test: a request to an operation of this service is served only to a
+//! caller whose identity-based IAM policies allow THAT operation's own action
+//! (`appsync:<OperationName>`) on the resource the request addresses — the custom domain's
+//! ARN, the API's, the channel namespace's, the ARN a tagging call names, and the
+//! any-resource wildcard for a call that addresses no resource of its own. Every other
+//! caller is refused with the modelled `AccessDeniedException` (HTTP 403) BEFORE the
+//! operation reads or writes anything, so a refused caller learns nothing about what the
+//! account holds — not even whether the resource it named exists — and a refused mutation
+//! changes nothing. The decision belongs to the layer in front of the service, so it is
+//! taken for every action this service publishes, whether or not the operation behind it
+//! lists the refusal among its own modelled errors.
 //!
 //! The decision is the real one: the principals below are made with IAM's and STS's OWN
 //! operations over the same engine (`CreateUser` + `PutUserPolicy` + `CreateAccessKey`,
@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 use service_com_amazonaws_appsync_awsdeepdishcontrolplaneservice::service::authorization::{
-    ACTION_PREFIX, ANY_RESOURCE, GATED_OPERATIONS,
+    ACTION_PREFIX, ANY_RESOURCE,
 };
 use service_com_amazonaws_appsync_awsdeepdishcontrolplaneservice::{state, EmulatedService};
 use smithy_server_runtime::MultiServiceRouter;
@@ -42,28 +42,28 @@ use crate::resource_tags::encode_label;
 
 /// The region every call below is signed for, so the ARNs the decisions are made about are
 /// the ones this region's resources carry.
-const REGION: &str = "eu-west-1";
+pub const REGION: &str = "eu-west-1";
 
 /// The access-key id standing for the account's own published credential: neither STS nor
 /// IAM holds a record for it, so it resolves to the account's ambient identity, which holds
 /// no IAM policies and is allowed — the position AWS account root credentials are in.
-const ACCOUNT_KEY: &str = "EMULATORTESTKEY12345";
+pub const ACCOUNT_KEY: &str = "EMULATORTESTKEY12345";
 
 /// The wire name and status of the modelled refusal.
-const ACCESS_DENIED: &str = "AccessDeniedException";
-const ACCESS_DENIED_STATUS: u16 = 403;
+pub const ACCESS_DENIED: &str = "AccessDeniedException";
+pub const ACCESS_DENIED_STATUS: u16 = 403;
 
 /// One response, reduced to what a client branches on.
 #[derive(Debug)]
-struct Reply {
-    status: u16,
-    error_code: String,
-    body: Value,
+pub struct Reply {
+    pub status: u16,
+    pub error_code: String,
+    pub body: Value,
 }
 
 impl Reply {
     /// The `message` the error body carries.
-    fn message(&self) -> String {
+    pub fn message(&self) -> String {
         self.body["message"]
             .as_str()
             .unwrap_or_default()
@@ -73,19 +73,19 @@ impl Reply {
 
 /// A principal a call is signed as: the access key id it presents, and the ARN a refusal
 /// must blame it by — what `sts:GetCallerIdentity` reports for that key.
-struct Principal {
-    access_key_id: String,
-    arn: String,
+pub struct Principal {
+    pub access_key_id: String,
+    pub arn: String,
 }
 
 /// The emulator these tests drive: one shared engine carrying this service beside the IAM
 /// and STS services the principals and their policies are made with.
-struct Emulator {
+pub struct Emulator {
     router: MultiServiceRouter,
 }
 
 impl Emulator {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
         let mut router = MultiServiceRouter::new();
         // The suite signs nothing: the `Authorization` header carries only the credential
@@ -106,7 +106,7 @@ impl Emulator {
     }
 
     /// One call to this service, with `access_key_id` in the SigV4 credential scope.
-    async fn call(
+    pub async fn call(
         &self,
         access_key_id: &str,
         method: &str,
@@ -190,7 +190,7 @@ impl Emulator {
 
     /// Create an IAM user carrying `policy` as its inline policy (when one is given), mint
     /// a long-term access key for it, and answer that key id with the user's own ARN.
-    async fn user(&self, user_name: &str, policy: Option<&str>) -> Principal {
+    pub async fn user(&self, user_name: &str, policy: Option<&str>) -> Principal {
         let created = self
             .query(
                 "iam",
@@ -312,7 +312,7 @@ fn xml_element(body: &str, name: &str) -> Option<String> {
 }
 
 /// A policy document allowing `action` on `resource`.
-fn allow(action: &str, resource: &str) -> String {
+pub fn allow(action: &str, resource: &str) -> String {
     format!(
         "{{\"Version\":\"2012-10-17\",\"Statement\":[{{\"Effect\":\"Allow\",\
          \"Action\":\"{action}\",\"Resource\":\"{resource}\"}}]}}"
@@ -330,7 +330,7 @@ fn allow_all_but(denied: &str) -> String {
 }
 
 /// An ARN of this service in the region the suite signs for.
-fn arn(resource: &str) -> String {
+pub fn arn(resource: &str) -> String {
     ::engine::emulator_arn(ACTION_PREFIX, REGION, resource)
 }
 
@@ -544,7 +544,7 @@ fn gated_requests(fixture: &Fixture, suffix: &str) -> Vec<Gated> {
 }
 
 /// The refusal IAM words for a request no identity-based document allows.
-fn default_deny_message(principal: &str, operation: &str, resource: &str) -> String {
+pub fn default_deny_message(principal: &str, operation: &str, resource: &str) -> String {
     let action = format!("{ACTION_PREFIX}:{operation}");
     format!(
         "User: {principal} is not authorized to perform: {action} on resource: {resource} \
@@ -804,30 +804,49 @@ async fn an_assumed_role_session_is_judged_on_the_roles_policies() {
     );
 }
 
-/// RULE: an operation whose model declares no `AccessDeniedException` is not judged, since
-/// there is no modelled answer for it to refuse an unauthorized caller with.
+/// RULE: an operation that does NOT list `AccessDeniedException` among its own modelled
+/// errors is judged all the same — the decision is the layer's, not the operation's — so a
+/// caller whose policies allow nothing is refused with the 403 and its implicit-deny
+/// sentence, and the same call is served once a policy allows the action.
 ///
-/// The rows are operations of three different URI spaces, each one absent from
-/// [`GATED_OPERATIONS`] — asserted here rather than assumed, so a model change moves this
-/// test rather than letting it pass vacuously.
+/// The rows are operations of three different URI spaces and three different methods, each
+/// one asserted to be outside the modelled 403 set rather than assumed, so a model change
+/// moves this test rather than letting it pass vacuously.
 #[tokio::test]
-async fn an_operation_modelling_no_refusal_is_not_judged() {
+async fn an_operation_modelling_no_refusal_is_judged_too() {
     let emulator = Emulator::new();
     let fixture = fixture(&emulator).await;
-    let principal = emulator.user("ungated_probe", None).await;
+    let ungranted = emulator.user("ungated_probe", None).await;
+    let granted = emulator
+        .user(
+            "ungated_allowed",
+            Some(&allow(&format!("{ACTION_PREFIX}:*"), ANY_RESOURCE)),
+        )
+        .await;
 
-    // (the operation, its method, its path, its body, the answer it gives this caller)
-    let rows: &[(&str, &str, String, Option<Value>, u16)] = &[
+    /// One row: the operation, the resource it is judged against, its method, its path, its
+    /// body, and the answer an authorized caller gets.
+    type Row = (&'static str, String, &'static str, String, Option<Value>, u16);
+    let rows: &[Row] = &[
         (
             "ListGraphqlApis",
+            arn(ANY_RESOURCE),
             "GET",
             "/v1/apis".to_string(),
             None,
             200,
         ),
-        ("ListApis", "GET", "/v2/apis".to_string(), None, 200),
+        (
+            "ListApis",
+            arn(ANY_RESOURCE),
+            "GET",
+            "/v2/apis".to_string(),
+            None,
+            200,
+        ),
         (
             "ListApiKeys",
+            arn(&state::api_resource(&fixture.api_id)),
             "GET",
             format!("/v1/apis/{}/apikeys", fixture.api_id),
             None,
@@ -835,26 +854,87 @@ async fn an_operation_modelling_no_refusal_is_not_judged() {
         ),
         (
             "CreateApiKey",
+            arn(&state::api_resource(&fixture.api_id)),
             "POST",
             format!("/v1/apis/{}/apikeys", fixture.api_id),
             Some(json!({})),
             200,
         ),
+        (
+            "ListDataSources",
+            arn(&state::api_resource(&fixture.api_id)),
+            "GET",
+            format!("/v1/apis/{}/datasources", fixture.api_id),
+            None,
+            200,
+        ),
     ];
-    for (operation, method, path, body, expected) in rows {
+    for (operation, resource, method, path, body, served) in rows {
         assert!(
-            !GATED_OPERATIONS.contains(operation),
-            "case {operation:?}: this operation models the refusal, so it belongs in the \
-             gated table instead of here"
+            modelled_refusals(operation)
+                .is_none_or(|errors| !errors.iter().any(|error| error == ACCESS_DENIED)),
+            "case {operation:?}: this operation models the refusal, so it is covered by the \
+             tables above rather than by this one"
         );
-        let reply = emulator
-            .call(&principal.access_key_id, method, path, body.as_ref())
+        let refused = emulator
+            .call(&ungranted.access_key_id, method, path, body.as_ref())
             .await;
         assert_eq!(
-            reply.status, *expected,
-            "case {operation:?}: expected the operation's own {expected} answer for an \
-             unjudged caller, got {} {:?} with {:?}",
+            refused.status, ACCESS_DENIED_STATUS,
+            "case {operation:?}: expected a caller whose policies allow nothing to be \
+             refused, got {} {:?} with {:?}",
+            refused.status, refused.error_code, refused.body
+        );
+        assert_eq!(
+            refused.error_code, ACCESS_DENIED,
+            "case {operation:?}: expected {ACCESS_DENIED}, got {:?}",
+            refused.error_code
+        );
+        assert_eq!(
+            refused.message(),
+            default_deny_message(&ungranted.arn, operation, resource),
+            "case {operation:?}: expected IAM's implicit-deny sentence, got {:?}",
+            refused.message()
+        );
+        let reply = emulator
+            .call(&granted.access_key_id, method, path, body.as_ref())
+            .await;
+        assert_eq!(
+            reply.status, *served,
+            "case {operation:?}: expected the operation's own {served} answer for a caller \
+             the policy allows, got {} {:?} with {:?}",
             reply.status, reply.error_code, reply.body
         );
     }
+}
+
+/// The error shapes `operation`'s own model declares, or `None` for a name the model does
+/// not carry — read from the model that generated this crate, so the row above is checked
+/// against the model rather than against a second hand list.
+fn modelled_refusals(operation: &str) -> Option<Vec<String>> {
+    const MODEL_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/smithy-model/com-amazonaws-appsync-awsdeepdishcontrolplaneservice.json"
+    );
+    let model: Value = serde_json::from_str(
+        &std::fs::read_to_string(MODEL_PATH).expect("the model ships beside this crate"),
+    )
+    .expect("the model is JSON");
+    let (_, shape) = model["shapes"]
+        .as_object()
+        .expect("a Smithy model declares shapes")
+        .iter()
+        .find(|(id, shape)| {
+            shape["type"] == "operation" && id.ends_with(&format!("#{operation}"))
+        })?;
+    Some(
+        shape["errors"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter_map(|error| error["target"].as_str())
+            .filter_map(|target| target.rsplit('#').next())
+            .map(str::to_string)
+            .collect(),
+    )
 }

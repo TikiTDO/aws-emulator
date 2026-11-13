@@ -71,6 +71,8 @@ mod error_contract;
 mod evaluate_code;
 #[path = "all/event_api.rs"]
 mod event_api;
+#[path = "all/event_api_authorization_gate.rs"]
+mod event_api_authorization_gate;
 #[path = "all/event_api_create_outcomes.rs"]
 mod event_api_create_outcomes;
 #[path = "all/event_api_data_plane.rs"]

@@ -48,6 +48,12 @@ const NAMESPACE_NOT_FOUND: &str = "Channel namespace not found.";
 /// AppSync's fixed text for a create whose name the API already holds.
 const NAMESPACE_EXISTS: &str = "Channel namespace already exists.";
 
+/// AppSync's fixed text for an authorization override naming a type the parent API's
+/// authorization providers do not set up: a rule about the namespace, stated without
+/// naming the member that carried the mode or the mode itself.
+const NAMESPACE_AUTH_MODE: &str =
+    "Channel namespace auth type must be present in the API's auth providers.";
+
 /// `Namespace`'s published maximum length (`@length` 1..50,
 /// `smithy_query(query="shape", shape="Namespace")`).
 const NAMESPACE_MAX_LEN: usize = 50;
@@ -541,10 +547,10 @@ async fn an_override_outside_the_configured_providers_is_refused() {
                 answer.error_type, "BadRequestException",
                 "case {case}: expected error type BadRequestException, got {answer:?}"
             );
-            assert!(
-                answer.message.contains(member) && answer.message.contains(*unconfigured),
-                "case {case}: expected the refusal to name the member and the mode, \
-                 got {answer:?}"
+            assert_eq!(
+                answer.message, NAMESPACE_AUTH_MODE,
+                "case {case}: expected the service's own sentence for an unconfigured \
+                 namespace auth mode, got {answer:?}"
             );
             let read = get_namespace(&router, &api_id, "refused").await;
             assert_eq!(
@@ -583,6 +589,11 @@ async fn an_override_outside_the_configured_providers_is_refused() {
     assert_eq!(
         update.error_type, "BadRequestException",
         "case an update to an unconfigured override: expected BadRequestException, got {update:?}"
+    );
+    assert_eq!(
+        update.message, NAMESPACE_AUTH_MODE,
+        "case an update to an unconfigured override: expected the same sentence the create \
+         is refused with, got {update:?}"
     );
     let read = get_namespace(&router, &api_id, "accepted").await;
     assert_eq!(

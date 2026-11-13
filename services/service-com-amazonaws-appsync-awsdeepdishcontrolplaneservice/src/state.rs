@@ -1053,6 +1053,20 @@ pub fn event_config_refusal(event_config: &EventConfig) -> Option<String> {
     None
 }
 
+/// The text a `BadRequestException` (HTTP 400) carries for a channel namespace whose
+/// authorization override names a type the parent API's authorization providers do not
+/// set up.
+///
+/// AppSync states this one as a rule about the namespace rather than about the member
+/// that carried the mode, so the sentence is fixed and has no variable part: the caller
+/// is told the auth type has to be one the API offers. It is the sentence a recorded
+/// `CreateChannelNamespace` whose `publishAuthModes`/`subscribeAuthModes` name a type the
+/// parent `Api`'s `eventConfig.authProviders` does not carry is refused with. (The API
+/// configuration's OWN mode lists are a different error class, worded by
+/// [`unconfigured_auth_mode_message`].)
+pub const CHANNEL_NAMESPACE_AUTH_MODE_MESSAGE: &str =
+    "Channel namespace auth type must be present in the API's auth providers.";
+
 /// Why the authorization overrides a channel-namespace create or update carries are
 /// not well formed, as the text a `BadRequestException` (HTTP 400) states it with, or
 /// `None` when they are.
@@ -1070,15 +1084,10 @@ pub fn channel_namespace_auth_modes_refusal(
     publish_auth_modes: &[AuthMode],
     subscribe_auth_modes: &[AuthMode],
 ) -> Option<String> {
-    [
-        ("publishAuthModes", publish_auth_modes),
-        ("subscribeAuthModes", subscribe_auth_modes),
-    ]
-    .into_iter()
-    .find_map(|(member, modes)| {
-        unconfigured_auth_mode(modes, configured)
-            .map(|auth_type| unconfigured_auth_mode_message(member, auth_type))
-    })
+    [publish_auth_modes, subscribe_auth_modes]
+        .into_iter()
+        .any(|modes| unconfigured_auth_mode(modes, configured).is_some())
+        .then(|| CHANNEL_NAMESPACE_AUTH_MODE_MESSAGE.to_string())
 }
 
 /// One stored custom domain name, plus the API association it carries.
