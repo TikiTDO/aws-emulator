@@ -271,6 +271,8 @@ mod handler_s3_bucket_policy_principal;
 mod handler_s3_object_access;
 #[path = "all/handler_s3_prefix_deny_precedence.rs"]
 mod handler_s3_prefix_deny_precedence;
+#[path = "all/handler_s3_wildcard_grant.rs"]
+mod handler_s3_wildcard_grant;
 #[path = "all/handler_sdk_client_config.rs"]
 mod handler_sdk_client_config;
 #[path = "all/handler_sdk_error_classes.rs"]

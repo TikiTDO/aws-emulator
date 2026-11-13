@@ -199,7 +199,7 @@ impl Emulator {
     /// The identity policy in force on `role_name` from now on: `document`, or none at all
     /// — which is what makes a row about the grant that is in force when the handler calls,
     /// rather than about the one in force when its credentials were minted.
-    async fn role_policy(&self, case: &str, role_name: &str, document: Option<&str>) {
+    pub(crate) async fn role_policy(&self, case: &str, role_name: &str, document: Option<&str>) {
         match document {
             Some(document) => {
                 self.query(
