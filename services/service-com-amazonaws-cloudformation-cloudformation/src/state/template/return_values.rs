@@ -3789,6 +3789,10 @@ pub const CLOUDFRONT_ORIGIN_ACCESS_IDENTITY: &str =
 pub const CLOUDFRONT_CACHE_POLICY: &str = "AWS::CloudFront::CachePolicy";
 pub const CLOUDFRONT_ORIGIN_REQUEST_POLICY: &str = "AWS::CloudFront::OriginRequestPolicy";
 pub const CLOUDFRONT_RESPONSE_HEADERS_POLICY: &str = "AWS::CloudFront::ResponseHeadersPolicy";
+/// "Ref returns the ID of the key group" / "the public key ID": CloudFront mints both, and
+/// the provisioner reports the minted id as the physical id.
+pub const CLOUDFRONT_KEY_GROUP: &str = "AWS::CloudFront::KeyGroup";
+pub const CLOUDFRONT_PUBLIC_KEY: &str = "AWS::CloudFront::PublicKey";
 
 /// The Amazon API Gateway resource types whose published `Ref` is a SERVICE-ASSIGNED id
 /// rather than a name a template states: a REST API, a resource of one, and a deployment

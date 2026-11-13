@@ -320,6 +320,53 @@ pub(crate) async fn call_rest_xml(
     })
 }
 
+/// [`call_rest_xml`] for a service that versions what it stores by an `ETag` it answers in a
+/// response HEADER and demands back as `If-Match` on every update and delete (CloudFront:
+/// "The value of the ETag header that you received when retrieving the …"). Sends `if_match`
+/// when given, and answers the document with the `ETag` the response carried.
+pub(crate) async fn call_rest_xml_versioned(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    signing_name: &str,
+    region: &str,
+    method: &'static str,
+    uri: &str,
+    body: Option<&str>,
+    if_match: Option<&str>,
+) -> Result<(String, Option<String>), Refusal> {
+    let payload = body.map(str::as_bytes).unwrap_or_default().to_vec();
+    let mut headers = vec![("content-type", REST_XML.to_string())];
+    if let Some(version) = if_match {
+        headers.push(("if-match", version.to_string()));
+    }
+    let (status, answered_headers, answer) =
+        dispatch_with_headers(ctx, signing_name, region, method, uri, headers, payload)
+            .await
+            .map_err(|message| Refusal {
+                code: "InternalFailure".to_string(),
+                message,
+            })?;
+    let document = String::from_utf8_lossy(&answer).into_owned();
+    if (200..300).contains(&status) {
+        let etag = answered_headers
+            .into_iter()
+            .find(|(name, _)| name == "etag")
+            .map(|(_, value)| value);
+        return Ok((document, etag));
+    }
+    let code = xml_element(&document, "Code")
+        .unwrap_or_else(|| format!("{UNNAMED_CODE_PREFIX}{status}"));
+    Err(Refusal {
+        message: sdk_message(
+            signing_name,
+            status,
+            &code,
+            &xml_element(&document, "Message").unwrap_or_default(),
+        ),
+        code,
+    })
+}
+
+
 /// One element carrying TEXT, as a restXml request body spells a scalar member:
 /// `<Name>value</Name>`, with the five predefined entities escaped by the same maintained
 /// XML implementation that reads the answers back ([`xml_element`]) — so a value carrying
@@ -848,6 +895,24 @@ pub(super) async fn dispatch(
     headers: Vec<(&'static str, String)>,
     body: Vec<u8>,
 ) -> Result<(u16, Vec<u8>), String> {
+    let (status, _headers, payload) =
+        dispatch_with_headers(ctx, signing_name, region, method, uri, headers, body).await?;
+    Ok((status, payload))
+}
+
+/// [`dispatch`], answering the response's HEADERS as well, each name lower-cased as HTTP
+/// carries it: for the services that bind a member to a response header rather than to the
+/// document, such as CloudFront's `ETag`, which every update and delete of that resource
+/// must send back as `If-Match`.
+pub(super) async fn dispatch_with_headers(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    signing_name: &str,
+    region: &str,
+    method: &'static str,
+    uri: &str,
+    headers: Vec<(&'static str, String)>,
+    body: Vec<u8>,
+) -> Result<(u16, Vec<(String, String)>, Vec<u8>), String> {
     let host = format!("{signing_name}.{region}.amazonaws.com");
     let mut request = ::http::Request::builder()
         .method(method)
@@ -900,7 +965,12 @@ pub(super) async fn dispatch(
         .bytes()
         .ok_or("the in-process answer carried a streaming body")?
         .to_vec();
-    Ok((status, payload))
+    let answered_headers = response
+        .headers()
+        .iter()
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.to_string()))
+        .collect();
+    Ok((status, answered_headers, payload))
 }
 
 /// One in-process call's task, held so that dropping this guard ABORTS it.
