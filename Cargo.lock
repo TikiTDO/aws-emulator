@@ -13014,6 +13014,7 @@ dependencies = [
  "serde_json",
  "service-com-amazonaws-cloudwatch-graniteserviceversion20100801",
  "service-com-amazonaws-cloudwatchlogs-logs-20140328",
+ "service-com-amazonaws-dynamodb-dynamodb-20120810",
  "service-com-amazonaws-glue-awsglue",
  "service-com-amazonaws-iam-awsidentitymanagementv20100508",
  "service-com-amazonaws-kinesis-kinesis-20131202",

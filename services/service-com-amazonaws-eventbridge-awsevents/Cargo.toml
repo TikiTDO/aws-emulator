@@ -147,6 +147,10 @@ service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true 
 # EventBridge and Lambda on one engine: the invocation a permitted target really made is
 # asserted at the function's OWN side effect, read back through that service's GetParameter.
 service-com-amazonaws-ssm-amazonssm = { workspace = true }
+# The table a RUNNING function target's handler writes into, mounted beside EventBridge and
+# Lambda on one engine: the item a matched rule's invocation really wrote is asserted through
+# that service's own GetItem, which is where a client of the pipeline looks for it.
+service-com-amazonaws-dynamodb-dynamodb-20120810 = { workspace = true }
 # The deployment package that suite uploads is a .zip archive it writes in memory.
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
