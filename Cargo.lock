@@ -20489,6 +20489,7 @@ dependencies = [
  "ipnet",
  "iso8601-duration",
  "jsonata-rs",
+ "nix",
  "percent-encoding",
  "rand 0.9.5",
  "ring",
