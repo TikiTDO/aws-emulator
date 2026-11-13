@@ -1,15 +1,27 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op RejectDelegationRequest
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `RejectDelegationRequest`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`RejectDelegationRequest::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! ## What this operation answers on the wire
+//!
+//! A mutation: it resolves the `DelegationRequestId` the request carries against the
+//! delegation requests the account holds and, for one it holds, records the denial —
+//! "rejects a delegation request, denying the requested temporary access" — so the read
+//! that follows reports the `REJECTED` state, the explanation the call carried and the
+//! last-updated instant this call wrote. The output shape is `Unit`, so what the call did
+//! is observable only through `GetDelegationRequest` and `ListDelegationRequests`.
+//!
+//! An identifier the account holds NO delegation request under references "a resource
+//! entity that does not exist", so the call is refused with the modelled
+//! `NoSuchEntityException` (HTTP 404, awsQuery code `NoSuchEntity`) whose message
+//! describes the resource asked about ([`crate::state::delegation_request_write_not_found_message`])
+//! and nothing is written for it — the identifier stays one the account holds nothing
+//! under.
+//!
+//! A caller whose identity-based policies do not permit the call is refused before the
+//! lookup, `403` `<Code>AccessDenied</Code>` ([`crate::state::authorization::authorize_named`]),
+//! so a request that was not allowed changes nothing and learns nothing about which
+//! requests the account holds.
 //!
 //! ## Shape of an operation
 //!
@@ -76,6 +88,22 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+
+/// The `stateType` value a rejected delegation request reaches: "rejects a delegation
+/// request, denying the requested temporary access. Once a request is rejected, it cannot
+/// be accepted or updated later" (`RejectDelegationRequest`), one of the seven values
+/// `stateType` declares ([`super::types::STATE_TYPE_VALUES`]).
+const STATE_REJECTED: &str = "REJECTED";
+
+/// How long after it was rejected a delegation request expires, which is what
+/// `DelegationRequest$ExpirationTime` ("the expiry time of this delegation request")
+/// reports once this call has run.
+///
+/// The figure is the operation's own documented one — "rejected requests expire after 7
+/// days" (`smithy_query(query="doc", shape="RejectDelegationRequest")`) — counted from the
+/// instant the rejection was recorded, so a denial sets the request's remaining life
+/// rather than leaving the life the filing gave it.
+const REJECTED_LIFETIME_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -167,18 +195,105 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `RejectDelegationRequest` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(RejectDelegationRequestErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("RejectDelegationRequest"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(RejectDelegationRequestErrorModeled::ServiceFailureException(
+                ServiceFailureException {
+                    message: Some("the IAM store is unavailable".to_string()),
+                },
+            )
+            .into());
+        };
+
+        // A mutation: the operation "rejects a delegation request, denying the requested
+        // temporary access", so the lock is held for write across the lookup and the
+        // write — a request the account does not hold cannot be filed between the two.
+        let mut store = state.lock();
+
+        // The acting principal the audit records below are attributed to.
+        let caller_akid = ::engine::extract_akid(&ctx.parts().headers);
+
+        // IAM decides a call against the caller's policies before it touches the
+        // resource, so the decision is made first and on the ARN the identifier names —
+        // the same ARN whether or not the account holds a request under it, which is what
+        // keeps a refused caller from learning which identifiers the account holds. A
+        // refusal names the request as the request named it.
+        crate::state::authorization::authorize_named(
+            &store,
+            ctx,
+            crate::state::authorization::REJECT_DELEGATION_REQUEST,
+            &crate::state::delegation_request_arn(&input.delegation_request_id),
+            &format!("delegation request {}", input.delegation_request_id),
+        )?;
+
+        // The identifier is the handle `CreateDelegationRequest` filed the request under,
+        // held verbatim, so it is looked up verbatim — exactly as `GetDelegationRequest`
+        // resolves it: `delegationRequestIdType` is a minted identifier rather than a
+        // friendly name, which is why it is not case-folded the way an IAM entity name
+        // is. An identifier the account holds nothing under is refused, and the refusal
+        // writes nothing: no record is filed under it, so the read that follows refuses
+        // it too.
+        let Some(held) = store
+            .delegation_requests
+            .get_mut(&input.delegation_request_id)
+        else {
+            ::tracing::info!(
+                audit = true,
+                operation = "RejectDelegationRequest",
+                outcome = "refused_no_such_delegation_request",
+                caller_akid = %caller_akid,
+                delegation_request_id = %input.delegation_request_id,
+                "no delegation request was rejected"
+            );
+            return Err(
+                RejectDelegationRequestErrorModeled::NoSuchEntityException(NoSuchEntityException {
+                    message: Some(crate::state::delegation_request_write_not_found_message(
+                        &input.delegation_request_id,
+                    )),
+                })
+                .into(),
+            );
+        };
+
+        let rejected_at = crate::state::now();
+        // "Once a request is rejected, it cannot be accepted or updated later": the
+        // rejection itself is what takes the request to the rejected state, whatever state
+        // it was in before — this operation models no refusal for the state a request is
+        // already in, exactly as the acceptance, the update and the association model
+        // none.
+        held.state = Some(STATE_REJECTED.to_string());
+        // "When rejecting a request, an optional explanation can be added using the Notes
+        // request parameter", and the member the record carries such an explanation in is
+        // the one dedicated to it: "reasons for rejecting this delegation request, if this
+        // request was rejected. See also RejectDelegationRequest"
+        // (`DelegationRequest$RejectionReason`) — which is why a rejection writes there
+        // rather than to `Notes`, the member `UpdateDelegationRequest` adds to ("notes
+        // added to this delegation request, if this request was updated via the
+        // UpdateDelegationRequest API"). A call that carries no explanation supplies none,
+        // so the reason stays as the account holds it.
+        if let Some(notes) = input.notes {
+            held.rejection_reason = Some(notes);
+        }
+        // "Rejected requests expire after 7 days", counted from the rejection
+        // ([`REJECTED_LIFETIME_SECONDS`]).
+        held.expiration_time = Some(::aws_smithy_types::DateTime::from_secs(
+            rejected_at.secs() + REJECTED_LIFETIME_SECONDS,
+        ));
+        // "Last updated timestamp of the request" (`DelegationRequest$UpdatedTime`): the
+        // instant this call wrote the record.
+        held.updated_time = Some(rejected_at);
+
+        ::tracing::info!(
+            audit = true,
+            operation = "RejectDelegationRequest",
+            outcome = "rejected",
+            caller_akid = %caller_akid,
+            delegation_request_id = %input.delegation_request_id,
+            state = %STATE_REJECTED,
+            "the delegation request was rejected"
+        );
+
+        // The operation's output shape is `Unit`: what was written is reported by
+        // `GetDelegationRequest`, which reads the record this call just wrote.
+        Ok(RejectDelegationRequestOutput)
     }
 }

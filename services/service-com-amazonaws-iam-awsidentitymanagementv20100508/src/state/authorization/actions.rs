@@ -181,6 +181,9 @@ pub const UPDATE_DELEGATION_REQUEST: &str = "iam:UpdateDelegationRequest";
 /// `iam:AcceptDelegationRequest`.
 pub const ACCEPT_DELEGATION_REQUEST: &str = "iam:AcceptDelegationRequest";
 
+/// `iam:RejectDelegationRequest`.
+pub const REJECT_DELEGATION_REQUEST: &str = "iam:RejectDelegationRequest";
+
 /// `iam:AssociateDelegationRequest`.
 pub const ASSOCIATE_DELEGATION_REQUEST: &str = "iam:AssociateDelegationRequest";
 
