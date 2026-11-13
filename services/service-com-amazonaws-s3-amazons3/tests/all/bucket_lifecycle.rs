@@ -14,8 +14,9 @@
 //!   means `us-east-1`, the legacy value `EU` means `eu-west-1`, any other value IS the
 //!   Region code.
 //! * `CreateBucketOutput$Location` is `/<bucket>` for an account regional namespace
-//!   bucket and for a global bucket in `us-east-1`, and the global endpoint URL
-//!   `http://<bucket>.s3.amazonaws.com/` for a global bucket in any other Region.
+//!   bucket and for a global bucket in `us-east-1`, and the new bucket's own endpoint URL
+//!   for a global bucket in any other Region — rooted on the endpoint serving the request
+//!   (pinned over a table of endpoint bases by [`super::announced_response_urls`]).
 //! * Re-creating a bucket you already own answers `BucketAlreadyOwnedByYou`, except in
 //!   `us-east-1` where, "for legacy compatibility", it answers 200 OK.
 
@@ -68,15 +69,28 @@ pub(crate) fn router() -> MultiServiceRouter {
 }
 
 /// One row of the create-and-read-back table: the case name, the location constraint the
-/// request carries (when any), the bucket namespace it carries (when any), the `Location`
-/// the create must report, and the Region the bucket must then read back with.
+/// request carries (when any), the bucket namespace it carries (when any), the bucket the
+/// create names, the `Location` the create must report, and the Region the bucket must then
+/// read back with.
 type CreateRow<'a> = (
     &'a str,
     Option<&'a str>,
     Option<&'a str>,
     &'a str,
+    String,
     &'a str,
 );
+
+/// The URL a create reports for a bucket whose `Location` is its own endpoint URL, on an
+/// emulator served on NO port — the base `OperationContext::endpoint` reports for one
+/// (`smithy_server_runtime::UNSERVED_URL_BASE`), which is what this harness mounts.
+///
+/// What the rule itself generalises over — WHICH endpoint is serving the request — is pinned
+/// over a table of endpoint bases by [`super::announced_response_urls`]; here it fixes the
+/// one expectation the rest of this table is written against.
+fn endpoint_url_of(bucket: &str) -> String {
+    format!("{}/{bucket}/", smithy_server_runtime::UNSERVED_URL_BASE)
+}
 
 /// What a dispatched request answered.
 pub(crate) struct Answer {
@@ -378,70 +392,62 @@ async fn creating_a_bucket_reports_its_location_and_region_and_reads_back() {
             "no constraint defaults to us-east-1, so Location is the bucket path",
             None,
             None,
-            "/bucket-default",
+            "bucket-default",
+            "/bucket-default".to_string(),
             "us-east-1",
         ),
         (
-            "a named Region makes Location the global endpoint URL",
+            "a named Region makes Location the bucket's own endpoint URL",
             Some("us-west-2"),
             None,
-            "http://bucket-us-west-2.s3.amazonaws.com/",
+            "bucket-us-west-2",
+            endpoint_url_of("bucket-us-west-2"),
             "us-west-2",
         ),
         (
             "the legacy EU constraint creates the bucket in eu-west-1",
             Some("EU"),
             None,
-            "http://bucket-eu.s3.amazonaws.com/",
+            "bucket-eu",
+            endpoint_url_of("bucket-eu"),
             "eu-west-1",
         ),
         (
             "a Region the issue never cited behaves like any other",
             Some("ap-southeast-7"),
             None,
-            "http://bucket-ap-southeast-7.s3.amazonaws.com/",
+            "bucket-ap-southeast-7",
+            endpoint_url_of("bucket-ap-southeast-7"),
             "ap-southeast-7",
         ),
         (
             "a gov-cloud Region is still just a Region code",
             Some("us-gov-east-1"),
             None,
-            "http://bucket-us-gov-east-1.s3.amazonaws.com/",
+            "bucket-us-gov-east-1",
+            endpoint_url_of("bucket-us-gov-east-1"),
             "us-gov-east-1",
         ),
         (
             "an account regional namespace bucket reports the bucket path",
             Some("us-west-2"),
             Some("account-regional"),
-            "/bucket-account-regional",
+            "bucket-account-regional",
+            "/bucket-account-regional".to_string(),
             "us-west-2",
         ),
         (
             "a global namespace bucket in us-east-1 reports the bucket path",
             None,
             Some("global"),
-            "/bucket-global-default",
+            "bucket-global-default",
+            "/bucket-global-default".to_string(),
             "us-east-1",
         ),
     ];
 
-    for (case, constraint, namespace, expected_location, expected_region) in rows {
-        // The bucket name is the Location without its leading slash for the path rows,
-        // and the host's first label for the URL rows; both are derived here from the
-        // expectation so a row names its bucket once.
-        let bucket = expected_location
-            .strip_prefix('/')
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                expected_location
-                    .trim_start_matches("http://")
-                    .split('.')
-                    .next()
-                    .expect("the expected URL names the bucket")
-                    .to_string()
-            });
-
-        let created = create_bucket(&router, &bucket, constraint, namespace).await;
+    for (case, constraint, namespace, bucket, expected_location, expected_region) in rows {
+        let created = create_bucket(&router, bucket, constraint, namespace).await;
         assert_eq!(
             created.status, 200,
             "case {case:?}: expected HTTP 200 from CreateBucket on the fresh name \
@@ -451,7 +457,7 @@ async fn creating_a_bucket_reports_its_location_and_region_and_reads_back() {
         );
         assert_eq!(
             created.header("location").as_deref(),
-            Some(expected_location),
+            Some(expected_location.as_str()),
             "case {case:?}: expected Location {expected_location:?}, got {:?}",
             created.header("location")
         );
@@ -468,7 +474,7 @@ async fn creating_a_bucket_reports_its_location_and_region_and_reads_back() {
 
         // Read the created bucket back: the Region the constraint asked for is the one
         // persisted state answers with.
-        let head = head_bucket(&router, &bucket).await;
+        let head = head_bucket(&router, bucket).await;
         assert_eq!(
             head.status, 200,
             "case {case:?}: expected HTTP 200 from HeadBucket on the bucket just \

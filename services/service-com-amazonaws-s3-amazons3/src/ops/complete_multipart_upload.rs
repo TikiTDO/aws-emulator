@@ -708,7 +708,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CompleteMultipart
             replication: None,
             body,
         };
-        let region = bucket_record.region.clone();
 
         // The store performs the completion: the upload comes out, the object goes in under
         // the key, and the write is subject to exactly the ceilings a one-shot write is.
@@ -769,10 +768,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CompleteMultipart
 
         let output = CompleteMultipartUploadOutput {
             // "The URI that identifies the newly created object"
-            // (`CompleteMultipartUploadOutput$Location`) — the virtual-hosted address of the
-            // key in the Region its bucket lives in, which is the form the operation's own
-            // example answers (`<Location>http://Example-Bucket.s3.<Region>.amazonaws.com/Example-Object</Location>`).
-            location: Some(location_of(&input.bucket, &region, &input.key)),
+            // (`CompleteMultipartUploadOutput$Location`) — the address of the key on the
+            // endpoint serving this request, which is where the assembled object can really
+            // be fetched ([`location_of`]).
+            location: Some(location_of(ctx, &input.bucket, &input.key)),
             // "The name of the bucket that contains the newly created object" and "the
             // object key of the newly created object" — the address the object was really
             // written at.
@@ -981,22 +980,27 @@ fn refused_write(
     }
 }
 
-/// The `Location` a completed upload reports: the virtual-hosted URI of `key` in the bucket
-/// named `bucket`, which lives in `region`.
+/// The `Location` a completed upload reports: the URI of `key` in the bucket named
+/// `bucket`, on the endpoint this emulator is serving the request on.
 ///
 /// "The URI that identifies the newly created object"
-/// (`CompleteMultipartUploadOutput$Location`), in the form this operation's own example
-/// answers — `<bucket>.s3.<region>.amazonaws.com/<key>` — so the Region is the one the
-/// bucket was created in rather than anything the request named. The key is percent-encoded
-/// per path SEGMENT, which leaves the `/` separators of a key prefix as the path separators
-/// they are while every other character that a URI path cannot carry verbatim is encoded.
-fn location_of(bucket: &str, region: &str, key: &str) -> String {
+/// (`CompleteMultipartUploadOutput$Location`) — so the host is the one the caller can fetch
+/// the assembled object from ([`crate::service::announced_url::announced_bucket_url`]) rather
+/// than one of AWS's own, which resolves away from this process and holds no such object.
+/// The key is percent-encoded per path SEGMENT, which leaves the `/` separators of a key
+/// prefix as the path separators they are while every other character that a URI path cannot
+/// carry verbatim is encoded.
+fn location_of(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    bucket: &str,
+    key: &str,
+) -> String {
     let path = key
         .split('/')
         .map(crate::state::url_encoded_key)
         .collect::<Vec<String>>()
         .join("/");
-    format!("https://{bucket}.s3.{region}.amazonaws.com/{path}")
+    crate::service::announced_url::announced_bucket_url(ctx, bucket, &path)
 }
 
 /// The version id the object stored at `bucket`/`key` is addressable by, or `None` when it

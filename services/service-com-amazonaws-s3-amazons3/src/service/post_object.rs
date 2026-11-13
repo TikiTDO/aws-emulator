@@ -1138,8 +1138,8 @@ impl<Eng: Send + Sync + 'static> PostObject<Eng> {
     }
 
     /// The answer the stored object earns, with the `Location` it is reachable at: the
-    /// address the form was POSTed to, with the key below it — path-style when the bucket
-    /// was named in the path, and the host's own when it was named there.
+    /// path-style address of the key on the endpoint serving this request
+    /// ([`crate::service::announced_url::announced_bucket_url`]).
     fn answered(
         &self,
         form: &Form,
@@ -1148,14 +1148,12 @@ impl<Eng: Send + Sync + 'static> PostObject<Eng> {
         output: &PutObjectOutput,
         ctx: &OperationContext<'_>,
     ) -> RtResponse {
-        let host = super::request_host(ctx.parts()).unwrap_or_default();
         let encoded_key = ::percent_encoding::utf8_percent_encode(key, PATH_UNRESERVED);
-        let named_in_host = super::first_path_segment(ctx.parts().uri.path()) != Some(bucket);
-        let location = if named_in_host {
-            format!("https://{host}/{encoded_key}")
-        } else {
-            format!("https://{host}/{bucket}/{encoded_key}")
-        };
+        let location = crate::service::announced_url::announced_bucket_url(
+            ctx,
+            bucket,
+            &encoded_key.to_string(),
+        );
         served(
             form,
             &location,

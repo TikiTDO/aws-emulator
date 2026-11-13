@@ -575,6 +575,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 }
                 Ok(CreateBucketOutput {
                     location: Some(location_of(
+                        ctx,
                         &input.bucket,
                         &region,
                         input.bucket_namespace.as_deref(),
@@ -645,6 +646,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 }
                 Ok(CreateBucketOutput {
                     location: Some(location_of(
+                        ctx,
                         &input.bucket,
                         &existing_region,
                         input.bucket_namespace.as_deref(),
@@ -952,12 +954,24 @@ fn requested_tags(
 /// followed by the name of the bucket for all account regional namespace buckets and all
 /// global general purpose buckets created in us-east-1. … For global general purpose
 /// buckets created in other Amazon Web Services Regions, the Location field is the global
-/// endpoint URL" — i.e. `http://<bucket>.s3.amazonaws.com/`.
-fn location_of(bucket: &str, region: &str, bucket_namespace: Option<&str>) -> String {
+/// endpoint URL".
+///
+/// The first form is a path, which addresses the new bucket under whatever endpoint the
+/// caller is talking to, so it is reported as the member documents it. The second is an
+/// absolute URL, and the ENDPOINT it names is the one this emulator is serving the request
+/// on ([`crate::service::announced_url::announced_bucket_url`]) rather than one of AWS's own
+/// hosts: a client that follows the Location it was handed has to arrive back at the bucket
+/// that was just created, and no host under `amazonaws.com` resolves to this process.
+fn location_of(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    bucket: &str,
+    region: &str,
+    bucket_namespace: Option<&str>,
+) -> String {
     let account_regional = bucket_namespace == Some(ACCOUNT_REGIONAL_NAMESPACE);
     if account_regional || region == crate::state::DEFAULT_BUCKET_REGION {
         format!("/{bucket}")
     } else {
-        format!("http://{bucket}.s3.amazonaws.com/")
+        crate::service::announced_url::announced_bucket_url(ctx, bucket, "")
     }
 }

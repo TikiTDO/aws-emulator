@@ -48,10 +48,6 @@ const MIN_MULTIPART_PART_BYTES: usize = 5 * 1024 * 1024;
 /// `smithy_query(query="shape",shape="com.amazonaws.s3#CompletedPart")`).
 const MAX_PART_NUMBER: i32 = 10_000;
 
-/// The Region every request in this suite is signed for, and so the Region the buckets it
-/// creates live in — which is what the `Location` of a completed upload names.
-const REGION: &str = "us-east-1";
-
 /// `POST /<bucket>/<key>?uploads` — `CreateMultipartUpload`, answering the upload id the
 /// store minted.
 async fn initiate(router: &MultiServiceRouter, name: &str, key: &str) -> String {
@@ -385,10 +381,21 @@ async fn a_completion_assembles_its_parts_into_the_object_at_the_key() {
             "case {case:?}: expected the completion to report the key it wrote, got {:?}",
             completed.element("Key")
         );
+        // "The URI that identifies the newly created object" — on the endpoint serving the
+        // request, which for this harness is the base an emulator served on no port reports
+        // (`smithy_server_runtime::UNSERVED_URL_BASE`). The rule itself is pinned over a
+        // table of endpoint bases by [`super::announced_response_urls`].
         assert_eq!(
             completed.element("Location").as_deref(),
-            Some(format!("https://{name}.s3.{REGION}.amazonaws.com/{key}").as_str()),
-            "case {case:?}: expected the virtual-hosted URI of the new object, got {:?}",
+            Some(
+                format!(
+                    "{}/{name}/{key}",
+                    smithy_server_runtime::UNSERVED_URL_BASE
+                )
+                .as_str()
+            ),
+            "case {case:?}: expected the URI of the new object on the serving endpoint, \
+             got {:?}",
             completed.element("Location")
         );
         assert_eq!(

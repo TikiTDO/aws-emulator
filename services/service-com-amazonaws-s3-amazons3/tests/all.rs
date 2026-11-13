@@ -17,6 +17,8 @@ mod access_point_data_plane;
 mod account_public_access_block;
 #[path = "all/anonymous_object_reads.rs"]
 mod anonymous_object_reads;
+#[path = "all/announced_response_urls.rs"]
+mod announced_response_urls;
 #[path = "all/aws_published_sample_data.rs"]
 mod aws_published_sample_data;
 #[path = "all/bucket_abac.rs"]

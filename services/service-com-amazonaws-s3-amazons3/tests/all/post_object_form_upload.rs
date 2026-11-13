@@ -60,7 +60,11 @@ type FormField<'a> = (&'a str, &'a str);
 /// of parts, each introduced by the boundary and carrying its own
 /// `Content-Disposition: form-data` head, and the file part is the one that also states a
 /// `filename`.
-fn form_document(
+///
+/// `pub(crate)`: the announced-URL suite ([`super::announced_response_urls`]) submits a form
+/// of its own to read the `Location` the answer names, and drives it through this one
+/// document builder rather than keeping a second copy of the wire format.
+pub(crate) fn form_document(
     fields: &[FormField<'_>],
     file: Option<(&str, &[u8], Option<&str>)>,
 ) -> Vec<u8> {
@@ -94,7 +98,9 @@ fn form_document(
 
 /// The media type a form submission announces, with the boundary its parts are delimited
 /// by.
-fn form_media_type() -> String {
+///
+/// `pub(crate)` for the same reason as [`form_document`].
+pub(crate) fn form_media_type() -> String {
     format!("multipart/form-data; boundary={BOUNDARY}")
 }
 

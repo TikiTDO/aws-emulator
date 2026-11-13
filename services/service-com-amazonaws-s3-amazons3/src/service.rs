@@ -60,6 +60,10 @@
 //! diagnostics beside its code and message). [`sigv4`] holds that rule; a refusal it
 //! declines to word still renders through the entry's own protocol-correct default.
 
+// The absolute URL this service ANNOUNCES for a bucket or an object a caller addresses next —
+// rooted on the endpoint serving the request rather than on one of AWS's own hosts — see
+// `service/announced_url.rs`.
+pub mod announced_url;
 // What AUTHORIZES one request: the bucket's own policy, evaluated with the condition keys
 // the request carries, and the account the request says owns the bucket — see
 // `service/authorization.rs`.
