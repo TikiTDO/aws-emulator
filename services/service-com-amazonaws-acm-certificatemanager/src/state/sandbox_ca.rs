@@ -20,7 +20,7 @@ use ::service_common::acm_certificate_key_material::{
     CertificateKeyMaterial, CertificateKeyMaterialDirectory,
 };
 
-use super::{Certificate, STATUS_ISSUED, TYPE_AMAZON_ISSUED};
+use super::{Certificate, STATUS_ISSUED, TYPE_AMAZON_ISSUED, TYPE_IMPORTED};
 
 /// Optional directory where `sandbox-acm-ca.pem` and `sandbox-acm-ca-key.pem` are persisted or
 /// reused across restarts so sandbox containers can mount the root CA alongside the emulator CA.
@@ -219,10 +219,11 @@ pub fn populate_issued_key_material(
     }
 }
 
-/// The ARNs of issued `AMAZON_ISSUED` certificates that hold a certificate body but whose private
-/// key is not in `directory`. After a restore that is an incomplete pair: left alone,
-/// [`populate_issued_key_material`] would mint a different leaf under the same ARN on the next
-/// read (Hearth, PR 19 owner reading, finding 2), so boot reports these instead.
+/// The ARNs of issued `AMAZON_ISSUED` and `IMPORTED` certificates that hold a certificate body but
+/// whose private key is not in `directory`: after a restore, each is an incomplete pair. An
+/// Amazon-issued one would be reminted as a different leaf under the same ARN on the next read
+/// ([`populate_issued_key_material`]; Hearth, PR 19 owner reading, finding 2), and an imported one
+/// has no remint, so ELB would fall back to its core certificate (Mira, c44497). Boot reports both.
 pub fn issued_without_key_material(
     certificates: &std::collections::BTreeMap<String, Certificate>,
     directory: &CertificateKeyMaterialDirectory,
@@ -231,7 +232,7 @@ pub fn issued_without_key_material(
         .iter()
         .filter(|(arn, cert)| {
             cert.status == STATUS_ISSUED
-                && cert.cert_type == TYPE_AMAZON_ISSUED
+                && (cert.cert_type == TYPE_AMAZON_ISSUED || cert.cert_type == TYPE_IMPORTED)
                 && cert.certificate_body.is_some()
                 && directory.material(arn).is_none()
         })

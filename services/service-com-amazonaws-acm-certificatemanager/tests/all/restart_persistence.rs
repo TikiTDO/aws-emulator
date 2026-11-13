@@ -97,14 +97,16 @@ async fn an_issued_certificate_restored_without_its_key_is_reported() {
     let (status, imported) = call(&router, "ImportCertificate", &import_body(&generated)).await;
     assert_eq!(status, 200, "ImportCertificate failed: {imported}");
     let arn = imported["CertificateArn"].as_str().unwrap().to_string();
-    // Stand the imported certificate in for an Amazon-issued one: the remint path is theirs.
-    engine.state::<AcmState>().lock().certificates.get_mut(&arn).unwrap().cert_type =
-        "AMAZON_ISSUED".to_string();
 
     let acm = engine.state::<AcmState>();
     let with_keys = engine.state::<CertificateKeyMaterialDirectory>();
-    assert!(issued_without_key_material(&acm.lock().certificates, &with_keys.lock()).is_empty());
-
     let missing = CertificateKeyMaterialDirectory::default();
+    // An imported certificate keeps its key only in the directory: no remint can replace it.
+    assert!(issued_without_key_material(&acm.lock().certificates, &with_keys.lock()).is_empty());
+    assert_eq!(issued_without_key_material(&acm.lock().certificates, &missing), vec![arn.clone()]);
+
+    // An Amazon-issued one would be reminted under the same ARN: also reported.
+    acm.lock().certificates.get_mut(&arn).unwrap().cert_type = "AMAZON_ISSUED".to_string();
+    assert!(issued_without_key_material(&acm.lock().certificates, &with_keys.lock()).is_empty());
     assert_eq!(issued_without_key_material(&acm.lock().certificates, &missing), vec![arn]);
 }
