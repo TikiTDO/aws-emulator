@@ -727,6 +727,36 @@ pub(crate) async fn ec2(
     payload
 }
 
+/// The same call with every parameter VALUE percent-encoded, for a request carrying a value
+/// that is not made of unreserved characters — an instance's user data, which is base64 and
+/// so may carry `+`, `/` and `=`.
+///
+/// [`ec2`] passes its values through as written, which is what lets a caller spell an
+/// already-encoded one; a value this one is given is encoded here, so a caller must NOT
+/// pre-encode it.
+pub(crate) async fn ec2_form(
+    router: &MultiServiceRouter,
+    action: &str,
+    params: &[(&str, &str)],
+    case: &str,
+) -> String {
+    let encoded: Vec<(&str, String)> = params
+        .iter()
+        .map(|(name, value)| {
+            (
+                *name,
+                percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
+                    .to_string(),
+            )
+        })
+        .collect();
+    let borrowed: Vec<(&str, &str)> = encoded
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+    ec2(router, action, &borrowed, case).await
+}
+
 /// The text of the FIRST `<name>` element of an `ec2Query` response — the minted id a
 /// create answers with.
 pub(crate) fn ec2_element(xml: &str, name: &str, case: &str) -> String {

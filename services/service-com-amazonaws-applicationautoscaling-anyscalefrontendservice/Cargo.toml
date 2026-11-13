@@ -57,6 +57,15 @@ chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
+# `base64`: an instance's user data is base64 on the wire ("user data must be base64-encoded",
+# `RunInstancesRequest$UserData`), so the launch the metric-driven scenario suite makes encodes
+# the container agent's configuration the way a client's launch carries it.
+base64 = "0.22"
+# Amazon EC2, for the capacity an ECS cluster is given by LAUNCHING an instance into it: the
+# metric-driven scenario suite launches that instance through Amazon EC2's own API on the same
+# engine, because an instance is that service's resource. A DEV dependency: nothing in `src/`
+# reads Amazon EC2's state — the ECS store answers what capacity a cluster holds.
+service-com-amazonaws-ec2-amazonec2 = { workspace = true }
 # Amazon Keyspaces, for the `cassandra` scalable target whose TABLE lives there: a
 # registration resolves that table by calling the owning service, so the suite that pins
 # that rule mounts it beside this service on one engine. A DEV dependency, because the

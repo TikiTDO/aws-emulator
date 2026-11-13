@@ -25,6 +25,8 @@ mod customized_metric_alarms;
 mod emulator;
 #[path = "all/keyspaces_table_resolution.rs"]
 mod keyspaces_table_resolution;
+#[path = "all/metric_driven_ecs_scaling.rs"]
+mod metric_driven_ecs_scaling;
 #[path = "all/movement_fulfilment.rs"]
 mod movement_fulfilment;
 #[path = "all/not_scaled_activities.rs"]

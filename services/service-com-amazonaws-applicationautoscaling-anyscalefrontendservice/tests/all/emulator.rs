@@ -46,6 +46,21 @@ impl Emulator {
         emulator
     }
 
+    /// The same emulator with the Amazon EC2 service mounted beside the others, for a suite
+    /// whose ECS capacity is LAUNCHED: an instance launched into a cluster is what gives that
+    /// cluster capacity, and the instance is Amazon EC2's own resource, so it is created
+    /// through that service's own API on the same engine — which is what `core/router`
+    /// assembles too.
+    pub fn with_ec2() -> Self {
+        let mut emulator = Self::empty();
+        emulator.router.register_service(
+            service_com_amazonaws_ec2_amazonec2::EmulatedService::new(Arc::clone(
+                &emulator.engine,
+            )),
+        );
+        emulator
+    }
+
     /// The same emulator with no resource created yet, for a suite whose rows create the
     /// resources they need (or deliberately do not).
     pub fn empty() -> Self {
@@ -196,6 +211,36 @@ impl Emulator {
             body,
         )
         .await
+    }
+
+    /// Call an Amazon EC2 operation, the way a client asks for one: an `ec2Query` POST whose
+    /// `application/x-www-form-urlencoded` body carries the action and its parameters, each
+    /// value percent-encoded, answered with XML.
+    pub async fn call_ec2(&self, action: &str, params: &[(&str, &str)]) -> (u16, String) {
+        let mut body = format!("Action={action}&Version=2016-11-15");
+        for (name, value) in params {
+            body.push('&');
+            body.push_str(name);
+            body.push('=');
+            body.push_str(&form_encode(value));
+        }
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header(
+                "authorization",
+                format!(
+                    "AWS4-HMAC-SHA256 Credential=AKIDEMULATOR/20260101/{REGION}/ec2\
+                     /aws4_request, SignedHeaders=host, Signature=0"
+                ),
+            )
+            .body(bytes::Bytes::from(body))
+            .expect("a well-formed ec2Query request");
+        let response = self.router.dispatch(request).await;
+        let status = response.status().as_u16();
+        let text = String::from_utf8_lossy(response.body()).to_string();
+        (status, text)
     }
 
     /// Create an ECS service of `desired_count` tasks in a cluster of its own, with ONE

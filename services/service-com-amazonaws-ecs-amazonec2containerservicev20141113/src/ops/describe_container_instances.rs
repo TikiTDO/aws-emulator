@@ -196,8 +196,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
+        // The capacity the account's Amazon EC2 instances owe this cluster: an instance
+        // launched into it was registered by the agent on it at the instant that fell due,
+        // whether or not anybody called, so this describe reports it
+        // ([`crate::state::settle_ec2_capacity`]). Taken with NO guard of this store held,
+        // since it reads the Amazon EC2 store under that store's own lock.
+        let now = ::std::time::SystemTime::now();
+        crate::state::settle_ec2_capacity(&*self.engine, now);
+
         let mut guard = state.lock();
-        guard.advance_clock(::std::time::SystemTime::now());
+        guard.advance_clock(now);
 
         // A deleted cluster is still a record this account holds (`Cluster$status`:
         // "Clusters with an INACTIVE status may remain discoverable in your account for a

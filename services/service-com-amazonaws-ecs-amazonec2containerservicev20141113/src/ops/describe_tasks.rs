@@ -201,8 +201,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // Everything the CLOCK owes this read, materialised before the tasks are read: the
+        // capacity the account's Amazon EC2 instances owe their clusters, the tasks the
+        // scheduler then places for a service that is short of its count, and the launch
+        // steps the START of such a task waits on — the whole pass, exactly as the clock
+        // pump runs it ([`crate::state::advance_task_clock`]). Made with NO guard of this
+        // store held, since each half reads another service's store under that store's own
+        // lock.
+        let now = ::std::time::SystemTime::now();
+        crate::state::advance_task_clock(&*self.engine, now);
+
         let mut guard = state.lock();
-        guard.advance_clock(::std::time::SystemTime::now());
+        guard.advance_clock(now);
 
         // A deleted cluster is still a record this account holds (`Cluster$status`:
         // "Clusters with an INACTIVE status may remain discoverable in your account for a

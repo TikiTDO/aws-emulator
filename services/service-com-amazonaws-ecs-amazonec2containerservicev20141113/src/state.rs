@@ -79,6 +79,20 @@
 //! runs nothing: the image's own entry point is what would run, and this emulator holds no
 //! image, so no output and no exit code is invented for it.
 //!
+//! WHAT "performed in this process" IS, and the boundary it keeps: the program's grammar is
+//! read by the `brush-parser` crate, which builds a syntax tree and runs nothing, and the
+//! tree is then walked by [`container_shell`]'s OWN session, which PERFORMS a fixed catalog
+//! of session-local utilities whose whole effect is inside that session — its output, its
+//! status, its variables and its signal handlers. It starts no host process (the executing
+//! half of that project, `brush-core`, is deliberately not a dependency of this crate),
+//! resolves no command name against the host's `PATH`, opens no host file and reaches no
+//! network; a command naming anything outside the catalog, and every form and expansion the
+//! session does not perform, fails closed with the status a shell answers for a command it
+//! cannot run. Every bound on one run is held in code the program cannot reach: a step
+//! budget, the deadline its session is constructed with (which also clamps every wait), a
+//! nesting limit, a limit on what one word may expand to and a cap on the output it may
+//! deliver. See that module's own documentation for each of them.
+//!
 //! ## The rollouts that WAIT
 //!
 //! A rollout whose deployment configuration carries a `PAUSE` lifecycle hook does not run
@@ -278,6 +292,11 @@ pub use container_runtime::*;
 /// The service scheduler's steady state: the replacement a service's stopped task earns,
 /// and the standalone task that earns none.
 mod service_steady_state;
+
+/// The capacity an Amazon EC2 instance launched into a cluster gives it: the registration
+/// the container agent on that instance makes.
+mod ec2_capacity;
+pub use ec2_capacity::*;
 
 /// The region an ARN carries when the request is unsigned (so it has no SigV4
 /// credential scope to read a region from). `emulator_arn`'s own documented default.

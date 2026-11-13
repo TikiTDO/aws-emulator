@@ -642,6 +642,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             input.network_configuration.as_ref(),
         );
 
+        // The capacity the account's Amazon EC2 instances owe their clusters: an instance
+        // launched into a cluster was registered by the agent on it, whether or not anybody
+        // called, so the capacity this placement runs on is in place before the scheduler
+        // looks for it ([`crate::state::settle_ec2_capacity`]). Taken with NO guard of this
+        // store held, since it reads the Amazon EC2 store under that store's own lock.
+        crate::state::settle_ec2_capacity(&*self.engine, now);
+
         let mut guard = state.lock();
         guard.advance_clock(now);
 

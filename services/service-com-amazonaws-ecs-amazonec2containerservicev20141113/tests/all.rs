@@ -73,6 +73,8 @@ mod describe_failure_identifiers;
 mod describe_service_deployments;
 #[path = "all/domain_refusal_wording.rs"]
 mod domain_refusal_wording;
+#[path = "all/ec2_launched_cluster_capacity.rs"]
+mod ec2_launched_cluster_capacity;
 #[path = "all/ecr_image_pull.rs"]
 mod ecr_image_pull;
 #[path = "all/ecs_wire.rs"]

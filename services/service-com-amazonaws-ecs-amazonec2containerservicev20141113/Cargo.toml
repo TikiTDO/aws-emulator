@@ -84,6 +84,11 @@ aws-sdk-cloudwatchlogs = { version = "1", default-features = false }
 # lines with it); its `peg` dependency is a procedural macro, so that part of it runs on the
 # BUILDER's machine at build time, as every macro in this workspace does.
 brush-parser = { version = "0.4", default-features = false }
+# `base64`: the user data of an EC2 instance is base64 ("user data must be base64-encoded",
+# `RunInstancesRequest$UserData`), and the cluster an instance was launched into is read out
+# of it (`state::ec2_capacity`), so the stored text is decoded with the one base64 codec this
+# workspace already locks.
+base64 = "0.22"
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }
 aws-smithy-schema-server = { workspace = true }

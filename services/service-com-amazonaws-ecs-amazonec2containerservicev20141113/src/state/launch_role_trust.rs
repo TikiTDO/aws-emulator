@@ -72,12 +72,15 @@ pub fn settle_task_launches<Eng: Send + Sync + 'static>(engine: &Eng) {
 ///
 /// The order is the one Amazon ECS takes the steps in:
 ///
-/// 1. the steps outstanding are taken, so the pass below starts no task whose launch nothing
-///    has decided ([`TaskRecord::launch_steps_taken`]) — the roles a launch resolved are put
-///    to the account's IAM records before any container of it runs, not after;
-/// 2. the clock pass materialises what was owed at `now`, which is also where the service
+/// 1. the capacity the account's instances owe their clusters is registered, so the pass
+///    below has somewhere to place a task whose capacity has arrived
+///    ([`super::settle_ec2_capacity`]);
+/// 2. the launch steps outstanding are taken, so the pass below starts no task whose launch
+///    nothing has decided ([`TaskRecord::launch_steps_taken`]) — the roles a launch resolved
+///    are put to the account's IAM records before any container of it runs, not after;
+/// 3. the clock pass materialises what was owed at `now`, which is also where the service
 ///    scheduler places the tasks a service is short of ([`super::service_steady_state`]);
-/// 3. and the steps of the tasks THAT placement produced are taken, so a task the clock
+/// 4. and the steps of the tasks THAT placement produced are taken, so a task the clock
 ///    placed is launched by the pass that placed it, exactly as a task a call places is.
 ///
 /// What ONE call costs is bounded by what the store HOLDS, not by the request: each step is a
@@ -93,6 +96,12 @@ pub fn settle_task_launches<Eng: Send + Sync + 'static>(engine: &Eng) {
 /// take another store's, so no two of them are ever held at once (see the module's LOCK ORDER
 /// note).
 pub fn advance_task_clock<Eng: Send + Sync + 'static>(engine: &Eng, now: SystemTime) {
+    // The capacity the account's Amazon EC2 instances owe their clusters, which the clock
+    // owes just as it owes a task's own moves: an instance launched into a cluster was
+    // registered by its agent whether or not anybody called
+    // ([`super::settle_ec2_capacity`]). Taken before the pass below, so the scheduler places
+    // what the new capacity lets it place in this same pass.
+    super::settle_ec2_capacity(engine, now);
     settle_task_launches(engine);
     if let Some(state) = service_state(engine) {
         state.lock().advance_clock(now);
