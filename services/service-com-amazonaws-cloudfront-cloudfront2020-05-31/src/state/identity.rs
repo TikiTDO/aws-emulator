@@ -331,6 +331,47 @@ pub fn malformed_arn() -> crate::ops::types::InvalidArgument {
     }
 }
 
+/// The sentence an ASSOCIATION refuses a web ACL CloudFront may not be put behind with:
+/// the whole text is fixed — it states that the web ACL named is not one for CloudFront and
+/// what to name instead — so nothing of the request reaches it. Recorded behaviour.
+pub const INVALID_WEB_ACL_MESSAGE: &str = "The specified web ACL isn't valid. Specify a web \
+     ACL that was previously validated and try again.";
+
+/// The modelled `InvalidArgument` (HTTP 400) an association naming a web ACL outside the
+/// namespace CloudFront is protected by is refused with — "An argument is invalid."
+pub fn invalid_web_acl() -> crate::ops::types::InvalidArgument {
+    crate::ops::types::InvalidArgument {
+        message: Some(INVALID_WEB_ACL_MESSAGE.to_string()),
+    }
+}
+
+/// Whether `web_acl_arn` names a web ACL a distribution — or a distribution tenant — may
+/// be put behind.
+///
+/// CloudFront is protected by the web ACLs of ONE WAFv2 namespace: the `Scope` value
+/// `CLOUDFRONT` is the one "for a global resource type, such as a Amazon CloudFront
+/// distribution", and a web ACL of the REGIONAL namespace protects regional resources, so
+/// WAF would never enforce it in front of a distribution. The namespace a web ACL belongs
+/// to is carried in its own ARN, which is read by the service that mints it
+/// (`service_com_amazonaws_wafv2_awswaf_20190729::state::arn_scope`), so this service holds
+/// no second reading of a WAFv2 ARN: a value that IS one is associable exactly where it
+/// names a WEB ACL of the global namespace.
+///
+/// A value that is no WAFv2 resource ARN at all is not judged here. `WebACLId` carries
+/// either generation — "to specify a web ACL created using the latest version of WAF, use
+/// the ACL ARN … To specify a web ACL created using WAF Classic, use the ACL ID" — so a
+/// WAF Classic identifier names no WAFv2 namespace to be outside of, and whether a value
+/// that is no identifier at all was accepted is a different question about the same member.
+pub fn associable_web_acl_arn(web_acl_arn: &str) -> bool {
+    let Some(scope) = ::service_com_amazonaws_wafv2_awswaf_20190729::state::arn_scope(web_acl_arn)
+    else {
+        return true;
+    };
+    scope == ::service_com_amazonaws_wafv2_awswaf_20190729::state::SCOPE_CLOUDFRONT
+        && ::service_com_amazonaws_wafv2_awswaf_20190729::state::arn_resource_kind(web_acl_arn)
+            == Some(::service_com_amazonaws_wafv2_awswaf_20190729::state::WEB_ACL_ARN_KIND)
+}
+
 /// Why the resource-policy surface refuses `arn`, or `None` when it names a resource the
 /// surface attaches policies to.
 ///

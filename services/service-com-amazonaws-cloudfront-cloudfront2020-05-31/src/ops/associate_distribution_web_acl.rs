@@ -12,16 +12,18 @@
 //! clock owes it the terminal status, because the new configuration has to reach the edge
 //! locations.
 //!
-//! What the association does NOT do is resolve the web ACL. A web ACL is a WAF resource,
-//! not one this store holds, and the model constrains `WebACLArn` no further than
-//! `string`, so the identifier the request names is what the distribution carries from
-//! then on; the one thing a request can get wrong here without naming anything outside
-//! this service is naming NO web ACL at all, which is the modelled `InvalidArgument`. The
-//! other two modelled errors have no condition here either: `AccessDenied` belongs to the
-//! authorization the emulator does not perform, and `EntityLimitExceeded` reports a quota
-//! on an entity count, while an association creates no entity and CloudFront publishes no
-//! bound on how many distributions one web ACL may be associated with, so nothing this
-//! store holds can be over one.
+//! What the association does NOT do is resolve the web ACL: a web ACL is a WAF resource,
+//! not one this store holds, so WHICH web ACL of CloudFront's own namespace a caller named
+//! is not decided here. What IS decided about the value is the namespace it names: a
+//! distribution is protected by the web ACLs of the global namespace alone — the one WAFv2's
+//! `CLOUDFRONT` scope is "for a global resource type, such as a Amazon CloudFront
+//! distribution" — so an ARN naming a web ACL of the regional namespace, or another resource
+//! of either, is the modelled `InvalidArgument` and nothing is mutated, and so is naming no
+//! web ACL at all. The other two modelled errors have no condition here: `AccessDenied`
+//! belongs to the authorization the emulator does not perform, and `EntityLimitExceeded`
+//! reports a quota on an entity count, while an association creates no entity and CloudFront
+//! publishes no bound on how many distributions one web ACL may be associated with, so
+//! nothing this store holds can be over one.
 //!
 //! ## Shape of an operation
 //!
@@ -215,10 +217,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "The Amazon Resource Name (ARN) of the WAF web ACL to associate" is what this
         // member carries, and a web ACL is a WAF resource this store cannot resolve — so
-        // the one thing decidable here is whether the request named a web ACL at all. A
-        // blank value names none, which is the modelled `InvalidArgument` rather than an
-        // association of nothing.
-        if input.web_acl_arn.trim().is_empty() {
+        // the one thing decidable about WHICH web ACL it names is whether the request named
+        // one at all. A blank value names none, which is the modelled `InvalidArgument`
+        // rather than an association of nothing. The value is read ONCE here, so the ARN
+        // that is judged below is the ARN that is stored.
+        let web_acl_arn = input.web_acl_arn.trim();
+        if web_acl_arn.is_empty() {
             return Err(AssociateDistributionWebACLErrorModeled::InvalidArgument(
                 InvalidArgument {
                     message: Some(
@@ -230,12 +234,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // A distribution is protected by the web ACLs of ONE WAFv2 namespace — the global
+        // one the `CLOUDFRONT` scope names — so an ARN naming a web ACL of the regional
+        // namespace (or another resource of either) names nothing WAF would enforce in
+        // front of this distribution ([`crate::state::associable_web_acl_arn`]). It is
+        // refused BEFORE the configuration is written, so nothing is mutated and no version
+        // is minted: a later read still reports the web ACL the distribution had.
+        if !crate::state::associable_web_acl_arn(web_acl_arn) {
+            return Err(AssociateDistributionWebACLErrorModeled::InvalidArgument(
+                crate::state::invalid_web_acl(),
+            )
+            .into());
+        }
+
         // The association IS the stored configuration's `WebACLId`: one source of truth,
         // so a later `GetDistribution` reports the web ACL this call associated, and the
         // mutation goes through the same path `UpdateDistribution` writes a configuration
         // by — fresh version token, `LastModifiedTime` now, and the propagation the new
         // configuration is owed.
-        config.web_acl_id = Some(input.web_acl_arn.clone());
+        config.web_acl_id = Some(web_acl_arn.to_string());
         // The record was read above under this same held lock, so the store still holds
         // it; the modelled not-found is answered rather than panicking if it ever does
         // not.

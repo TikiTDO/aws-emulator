@@ -40,3 +40,27 @@ pub const SCOPE_NOT_VALID_REASON: &str = "The scope is not valid.";
 pub fn invalid_scope_exception(scope: &str) -> WAFInvalidParameterException {
     invalid_parameter_exception(FIELD_SCOPE_VALUE, scope, SCOPE_NOT_VALID_REASON)
 }
+
+/// The `Scope` whose namespace the resource part of a wafv2 resource ARN opens with,
+/// or `None` where `value` is no wafv2 resource ARN at all.
+///
+/// The layout is the one [`is_wafv2_resource_arn`] pins —
+/// `arn:<partition>:wafv2:<region>:<account>:<global|regional>/<kind>/<name>/<id>` —
+/// and that leading segment is exactly what a `Scope` names: `global` is the
+/// namespace [`SCOPE_CLOUDFRONT`] names and `regional` the one [`SCOPE_REGIONAL`]
+/// does ([`resource_arn`] mints them from the scope the create named). So a caller
+/// holding an ARN alone can tell WHICH namespace the resource it names lives in,
+/// without resolving it against this store — which is what another service deciding
+/// whether it may use a web ACL needs.
+pub fn arn_scope(value: &str) -> Option<&'static str> {
+    if !is_wafv2_resource_arn(value) {
+        return None;
+    }
+    match value.split(':').nth(5)?.split('/').next()? {
+        "global" => Some(SCOPE_CLOUDFRONT),
+        "regional" => Some(SCOPE_REGIONAL),
+        // `is_wafv2_resource_arn` admits no third namespace, so this arm states that
+        // invariant rather than hiding a case.
+        _ => None,
+    }
+}

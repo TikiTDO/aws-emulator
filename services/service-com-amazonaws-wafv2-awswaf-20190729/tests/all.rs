@@ -39,6 +39,8 @@ mod firewall_manager_rule_groups;
 mod forwarded_ip_set_reference;
 #[path = "all/get_web_acl_for_resource.rs"]
 mod get_web_acl_for_resource;
+#[path = "all/global_scope_web_acl_creation.rs"]
+mod global_scope_web_acl_creation;
 #[path = "all/invalid_permission_policy_message.rs"]
 mod invalid_permission_policy_message;
 #[path = "all/ip_set_address_order.rs"]

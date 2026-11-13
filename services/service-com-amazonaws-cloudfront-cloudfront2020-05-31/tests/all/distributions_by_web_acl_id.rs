@@ -79,7 +79,7 @@ const ROWS: &[Row] = &[
         associated: None,
     },
     Row {
-        case: "the create's configuration names the wafv2 regional web ACL",
+        case: "the create's configuration names the wafv2 global web ACL of another account",
         in_config: Some(1),
         associated: None,
     },
@@ -104,7 +104,7 @@ const ROWS: &[Row] = &[
         associated: None,
     },
     Row {
-        case: "created with no web ACL, then associated with the wafv2 regional one",
+        case: "created with no web ACL, then associated with another account's global one",
         in_config: None,
         associated: Some(1),
     },

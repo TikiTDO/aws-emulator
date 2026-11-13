@@ -4,6 +4,11 @@
 //! resolves anything the request names or touches the store: the `Scope` the request
 //! names, against the endpoint it was signed for.
 //!
+//! Two readings, because a scope answers two different questions. A call that RESOLVES
+//! something in a namespace is served where that namespace lives ([`validate_scope`]);
+//! a call that MINTS a web ACL into one names only the namespace its new resource lands
+//! in, and is served wherever it arrives ([`validate_minted_scope`]).
+//!
 //! The ONLY thing it reads out of the request is the SigV4 credential scope's
 //! region, through the framework's own reader ([`request_region`]); it reads no
 //! environment variable, no host and no file, and it compares strings — nothing here
@@ -59,6 +64,34 @@ pub fn validate_scope(
     let served_here =
         scope != SCOPE_CLOUDFRONT || request_region(parts) == CLOUDFRONT_SCOPE_REGION;
     if !is_known_scope(scope) || !served_here {
+        return Err(invalid_scope_exception(scope));
+    }
+    Ok(())
+}
+
+/// `Ok(())` when a request MINTING a web ACL may name `scope`, else the refusal WAF
+/// answers.
+///
+/// One condition, not two. What a mint does NOT depend on is the endpoint it arrived
+/// at — a `Scope` names the NAMESPACE the new web ACL lands in rather than an endpoint
+/// the caller must reach, and WAF accepts a global-namespace web ACL created from a
+/// regional endpoint (recorded behaviour, against the "API and SDKs - For all calls,
+/// use the Region endpoint us-east-1" the member's own doc states for a client),
+/// storing the global resource either way: `resource_arn` carries the region the global
+/// namespace lives in whatever the create was signed for, so the web ACL a regional
+/// endpoint mints for the CLOUDFRONT scope is the same global resource as one minted at
+/// [`CLOUDFRONT_SCOPE_REGION`], under the same ARN form.
+///
+/// What remains is the VALUE: a value the `Scope` enum does not declare is no scope at
+/// all, the same bad parameter [`validate_scope`] refuses it as. `Scope` is a modelled
+/// enum, so the framework refuses such a value at the request boundary before any
+/// handler runs — the branch below states that invariant rather than guarding a case a
+/// request can still reach.
+///
+/// A call that RESOLVES something already in that namespace keeps the endpoint
+/// condition ([`validate_scope`]): the global namespace is read where it lives.
+pub fn validate_minted_scope(scope: &str) -> Result<(), WAFInvalidParameterException> {
+    if !is_known_scope(scope) {
         return Err(invalid_scope_exception(scope));
     }
     Ok(())

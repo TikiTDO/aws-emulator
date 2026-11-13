@@ -97,8 +97,8 @@ struct Removal {
     precondition: Stated,
 }
 
-/// Every form the association can take (the [`WEB_ACLS`] forms: a `wafv2` ARN at global
-/// and at regional scope, another partition, a WAF Classic ARN and a bare WAF Classic
+/// Every form the association can take (the [`WEB_ACLS`] forms: a `wafv2` ARN of the global
+/// namespace in two accounts, another partition, a WAF Classic ARN and a bare WAF Classic
 /// id), reached both ways a configuration can come to name a web ACL, plus the
 /// distribution that never named one — crossed with the forms the optional `If-Match`
 /// takes.
@@ -110,7 +110,7 @@ const REMOVALS: &[Removal] = &[
         precondition: Stated::Current,
     },
     Removal {
-        case: "wafv2-regional-from-an-association",
+        case: "wafv2-global-other-account-from-an-association",
         web_acl: Some(1),
         reached: Reached::ByAssociate,
         precondition: Stated::Absent,

@@ -335,5 +335,7 @@ mod verify_dns_configuration;
 mod vpc_origin_lifecycle;
 #[path = "all/web_acl_association.rs"]
 mod web_acl_association;
+#[path = "all/web_acl_scope_admission.rs"]
+mod web_acl_scope_admission;
 #[path = "all/wire_instant_ordering.rs"]
 mod wire_instant_ordering;

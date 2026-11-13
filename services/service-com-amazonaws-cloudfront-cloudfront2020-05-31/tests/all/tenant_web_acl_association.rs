@@ -25,8 +25,8 @@
 //! * the propagation a write owes the tenant is the CLOCK's, as it is for a distribution.
 //!
 //! The rows differ along what the rule generalises over: the FORM of the web ACL named
-//! (each entry of [`crate::web_acl_association::WEB_ACLS`] — the WAF generation, the ARN
-//! scope, the partition and the bare WAF Classic id), and what the tenant already carries
+//! (each entry of [`crate::web_acl_association::WEB_ACLS`] — the WAF generation, the
+//! account, the partition and the bare WAF Classic id), and what the tenant already carries
 //! (no customizations at all, customizations that are not about a web ACL, a web ACL
 //! already overridden, and a web ACL explicitly disabled).
 //!

@@ -28,8 +28,8 @@
 //!   version token — one record, two readers.
 //!
 //! The rows differ along what the rules generalise over: the FORM of the ARN filtered by
-//! (every entry of [`crate::web_acl_association::WEB_ACLS`] — the WAF generation, the ARN
-//! scope, the partition and the bare WAF Classic id — and three ACM certificate ARNs
+//! (every entry of [`crate::web_acl_association::WEB_ACLS`] — the WAF generation, the
+//! account, the partition and the bare WAF Classic id — and three ACM certificate ARNs
 //! spanning regions and partitions), the KIND of customization a tenant carries (a web ACL
 //! overridden, a web ACL disabled, a certificate, both, geographic restrictions only, none
 //! at all), how many tenants share one ARN, and every page size from one up past the

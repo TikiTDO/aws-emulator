@@ -266,7 +266,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        if let Err(refusal) = crate::service::requests::validate_scope(&input.scope, ctx.parts()) {
+        // A `Scope` this request MINTS a web ACL into names the namespace the new web
+        // ACL lands in, so the only thing wrong with it can be the value itself: a
+        // global-namespace web ACL is created from a regional endpoint too, and the
+        // resource stored for it is the global one either way (the ARN minted below
+        // carries the region that namespace lives in). The endpoint condition belongs to
+        // the calls that RESOLVE a resource in the namespace
+        // (`crate::service::requests::validate_scope`).
+        if let Err(refusal) = crate::service::requests::validate_minted_scope(&input.scope) {
             return Err(CreateWebACLErrorModeled::WAFInvalidParameterException(refusal).into());
         }
 

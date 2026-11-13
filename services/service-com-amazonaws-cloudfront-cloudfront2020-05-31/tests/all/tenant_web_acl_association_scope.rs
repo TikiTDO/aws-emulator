@@ -14,8 +14,8 @@
 //! precondition and changes nothing.
 //!
 //! The rows differ along what the rule generalises over: the FORM of the web ACL named
-//! (every entry of [`crate::web_acl_association::WEB_ACLS`] — the WAF generation, the ARN
-//! scope, the partition and the bare WAF Classic id), the LENGTH of the chain of
+//! (every entry of [`crate::web_acl_association::WEB_ACLS`] — the WAF generation, the
+//! account, the partition and the bare WAF Classic id), the LENGTH of the chain of
 //! associations a tenant is put through (each form in turn on one tenant, then the last one
 //! repeated), what the tenant already carries (every entry of
 //! [`crate::tenant_web_acl_association::STARTS`]), and WHICH tenant of a set the call names.

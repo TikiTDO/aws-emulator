@@ -17,9 +17,11 @@
 //!   nothing a later read can see.
 //! * a distribution the store does not hold is `EntityNotFound` (HTTP 404) — the error this
 //!   operation models for an entity it cannot find.
-//! * a request that names NO web ACL is `InvalidArgument` (HTTP 400): the web ACL itself is
-//!   a WAF resource this service cannot resolve, so whether one was named at all is the
-//!   only thing about the value this operation decides.
+//! * a request that names NO web ACL is `InvalidArgument` (HTTP 400): an association of
+//!   nothing is not an association. WHICH web ACL of CloudFront's own namespace was named is
+//!   not resolved here — a web ACL is a WAF resource this service does not hold — while the
+//!   NAMESPACE a `wafv2` ARN names is decided, and the forms that decision refuses are
+//!   [`crate::web_acl_scope_admission`]'s table.
 //!
 //! The wire harness (the router, the request helpers and the restXml element scanner) is
 //! the one [`crate::distribution_lifecycle`] builds, so these assertions travel the same
@@ -35,10 +37,16 @@ use crate::distribution_lifecycle::{
     past_propagation, Answer, API_VERSION,
 };
 
-/// Web ACL identifiers this suite associates, spanning the forms the member takes: the
-/// WAF generation (`wafv2`, and the `waf`/`waf-regional` services of WAF Classic), the
-/// scope a `wafv2` ARN carries (`global`, `regional`), the partition, whether the region
-/// segment is populated, and the bare ACL id WAF Classic is named by.
+/// Web ACL identifiers this suite associates, spanning the forms the member takes that an
+/// association ADMITS: the WAF generation (`wafv2`, and the `waf`/`waf-regional` services of
+/// WAF Classic), the partition, the account and region segments, and the bare ACL id WAF
+/// Classic is named by.
+///
+/// Every `wafv2` ARN here names the GLOBAL namespace, because that is the only one a
+/// distribution may be put behind: the `CLOUDFRONT` scope is the one "for a global resource
+/// type, such as a Amazon CloudFront distribution". The forms an association refuses — a
+/// `wafv2` ARN of the regional namespace, and one naming another resource of either — are
+/// the table [`crate::web_acl_scope_admission`] drives both association operations from.
 ///
 /// The forms come from the model's own documentation of `DistributionConfig$WebACLId` —
 /// "use the ACL ARN, for example
@@ -54,8 +62,8 @@ pub(crate) const WEB_ACLS: &[(&str, &str)] = &[
          a1b2c3d4-5678-90ab-cdef-EXAMPLE11111",
     ),
     (
-        "wafv2-regional",
-        "arn:aws:wafv2:eu-west-1:210987654321:regional/webacl/OtherWebACL/\
+        "wafv2-global-other-account",
+        "arn:aws:wafv2:us-east-1:210987654321:global/webacl/OtherWebACL/\
          99998888-7777-6666-5555-EXAMPLE44444",
     ),
     (

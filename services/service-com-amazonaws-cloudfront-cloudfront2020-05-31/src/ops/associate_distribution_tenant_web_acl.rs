@@ -14,6 +14,12 @@
 //! disassociation: a request that states no `If-Match` is refused with
 //! `InvalidIfMatchVersion` (HTTP 400).
 //!
+//! What the association does NOT do is resolve the web ACL: a web ACL is a WAF resource, not
+//! one this store holds. What IS decided about the value is the namespace it names — a
+//! tenant, like its parent distribution, is protected by the web ACLs of WAFv2's global
+//! namespace alone — so an ARN naming a web ACL of the regional namespace, or another
+//! resource of either, is the modelled `InvalidArgument` and nothing is mutated.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -235,6 +241,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                             .to_string(),
                     ),
                 },
+            )
+            .into());
+        }
+
+        // A tenant is protected by the web ACLs of the SAME one WAFv2 namespace its parent
+        // distribution is — the global one the `CLOUDFRONT` scope names — so an ARN naming a
+        // web ACL of the regional namespace (or another resource of either) names nothing
+        // WAF would enforce in front of it ([`crate::state::associable_web_acl_arn`]). It is
+        // refused BEFORE the customization is written, so nothing is mutated and no version
+        // is minted.
+        if !crate::state::associable_web_acl_arn(web_acl_arn) {
+            return Err(AssociateDistributionTenantWebACLErrorModeled::InvalidArgument(
+                crate::state::invalid_web_acl(),
             )
             .into());
         }
