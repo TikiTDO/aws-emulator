@@ -179,6 +179,8 @@ mod open_id_connect_client_id_registration;
 mod open_id_connect_client_ids;
 #[path = "all/open_id_connect_provider_absence_wording.rs"]
 mod open_id_connect_provider_absence_wording;
+#[path = "all/open_id_connect_provider_deletion.rs"]
+mod open_id_connect_provider_deletion;
 #[path = "all/open_id_connect_provider_listing.rs"]
 mod open_id_connect_provider_listing;
 #[path = "all/open_id_connect_provider_tag_absence_wording.rs"]
