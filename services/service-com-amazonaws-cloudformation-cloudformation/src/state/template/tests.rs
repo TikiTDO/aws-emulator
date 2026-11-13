@@ -167,6 +167,18 @@ fn a_name_is_read_from_wherever_the_type_states_it() {
             Some("a-repository"),
         ),
         (
+            "CE AnomalyMonitor unconventional name property MonitorName",
+            "AWS::CE::AnomalyMonitor",
+            ::serde_json::json!({ "MonitorName": "my-cost-monitor" }),
+            Some("my-cost-monitor"),
+        ),
+        (
+            "CE AnomalySubscription unconventional name property SubscriptionName",
+            "AWS::CE::AnomalySubscription",
+            ::serde_json::json!({ "SubscriptionName": "my-cost-subscription" }),
+            Some("my-cost-subscription"),
+        ),
+        (
             "a name inside the input structure the owning API takes it in",
             GLUE_DATABASE,
             ::serde_json::json!({

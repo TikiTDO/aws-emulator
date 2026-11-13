@@ -595,6 +595,8 @@ pub(super) fn database_port(
 pub(super) fn declared_name_property(resource_type: &str) -> Option<&'static str> {
     match resource_type {
         "AWS::BedrockAgentCore::Runtime" => Some("AgentRuntimeName"),
+        "AWS::CE::AnomalyMonitor" => Some("MonitorName"),
+        "AWS::CE::AnomalySubscription" => Some("SubscriptionName"),
         // API Gateway's `CreateDomainName` takes the `DomainName` the resource IS, on both
         // of its control planes, and that name is what either type's `Ref` returns — the
         // type's last segment is `DomainName`, so neither `DomainNameName` nor `Name` finds

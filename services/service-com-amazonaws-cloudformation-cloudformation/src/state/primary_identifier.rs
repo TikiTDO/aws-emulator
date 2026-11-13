@@ -148,6 +148,8 @@ fn identifying_return_value(resource_type: &str) -> Option<&'static str> {
         "AWS::WAFv2::LoggingConfiguration" => "ResourceArn",
         "AWS::SES::VdmAttributes" => "VdmAttributesResourceId",
         "AWS::SES::ConfigurationSetEventDestination" => "Id",
+        "AWS::CE::AnomalyMonitor" => "MonitorArn",
+        "AWS::CE::AnomalySubscription" => "SubscriptionArn",
         _ => return None,
     };
     Some(identifier)
