@@ -263,6 +263,8 @@ mod list_type_versions_registry_scope;
 mod list_types;
 #[path = "all/logs_and_iot_resources.rs"]
 mod logs_and_iot_resources;
+#[path = "all/cloudwatch_alarm_resources.rs"]
+mod cloudwatch_alarm_resources;
 #[path = "all/logs_group_children_resources.rs"]
 mod logs_group_children_resources;
 #[path = "all/macro_acknowledgement_and_include_refresh.rs"]
