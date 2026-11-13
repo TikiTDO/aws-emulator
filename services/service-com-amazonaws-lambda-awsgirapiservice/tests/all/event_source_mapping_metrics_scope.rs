@@ -7,20 +7,21 @@
 //! The RULE asserted over the tables below: `EventSourceMappingMetricsConfig$Metrics` is "the
 //! metrics you want your event source mapping to produce", which is a SET of the values its
 //! enum declares drawn from the ones the mapping's own event source supports — so a value
-//! that source does not support, and a value named twice, each leave the selection short of
-//! being one and are refused with the modelled `InvalidParameterValueException` (HTTP 400)
-//! naming the values that source DOES expect, with no mapping created or changed. Two of the
-//! three values are documented for the Kafka event sources alone — "`ErrorCount` (Amazon MSK
-//! and self-managed Apache Kafka)" and "`KafkaMetrics` (Amazon MSK and self-managed Apache
-//! Kafka)" — so they are supported only on a mapping whose event source is an Amazon MSK
-//! cluster or VPC connection or a self-managed Apache Kafka cluster. `EventCount` carries no
-//! such scope and is supported on every source.
+//! that source does not support leaves the selection short of being one and is refused with
+//! the modelled `InvalidParameterValueException` (HTTP 400) naming the values that source
+//! DOES expect, with no mapping created or changed. Two of the three values are documented
+//! for the Kafka event sources alone — "`ErrorCount` (Amazon MSK and self-managed Apache
+//! Kafka)" and "`KafkaMetrics` (Amazon MSK and self-managed Apache Kafka)" — so they are
+//! supported only on a mapping whose event source is an Amazon MSK cluster or VPC connection
+//! or a self-managed Apache Kafka cluster. `EventCount` carries no such scope and is
+//! supported on every source. A selection that REPEATS a value falls short of being a set for
+//! a reason of the LIST alone and carries its own fixed sentence, whatever the source; that
+//! class is tabled in `event_source_mapping_metrics_duplicates`.
 //!
 //! The rows differ along what the rule generalises over: which event source the mapping
 //! names (each vendor `EventSourceArn` enumerates, plus the self-managed cluster that has no
 //! ARN), which of the enum's values the selection holds, how many it holds, in which order,
-//! whether it repeats one, and whether the selection arrives on the create or on a later
-//! update.
+//! and whether the selection arrives on the create or on a later update.
 //!
 //! The metric vocabulary and its per-source scope are the model's own
 //! (`smithy_query(query="shape", shape="com.amazonaws.lambda#EventSourceMappingMetricsConfig")`
@@ -119,7 +120,7 @@ struct ScopeRow {
 /// DynamoDB Streams, Amazon MSK as a cluster and as a VPC connection, Amazon MQ, Amazon
 /// DocumentDB) and the self-managed Apache Kafka cluster that carries no ARN, each against
 /// selections drawn from the whole `EventSourceMappingMetric` enum — one value, two values,
-/// all three, one value twice, and the empty list.
+/// all three, and the empty list.
 fn scope_rows() -> Vec<ScopeRow> {
     vec![
         ScopeRow {
@@ -135,31 +136,6 @@ fn scope_rows() -> Vec<ScopeRow> {
             extras: Value::Null,
             metrics: Vec::new(),
             verdict: Verdict::Accepted,
-        },
-        ScopeRow {
-            case: "a queue asked for the event counts twice",
-            event_source: Some(QUEUE_SOURCE),
-            extras: Value::Null,
-            metrics: vec![EVENT_COUNT_METRICS_SELECTOR, EVENT_COUNT_METRICS_SELECTOR],
-            verdict: Verdict::Refused(EVENT_COUNT_METRICS_SELECTOR),
-        },
-        ScopeRow {
-            case: "a queue asked for a Kafka metric twice",
-            event_source: Some(QUEUE_SOURCE),
-            extras: Value::Null,
-            metrics: vec![KAFKA_METRICS_SELECTOR, KAFKA_METRICS_SELECTOR],
-            verdict: Verdict::Refused(EVENT_COUNT_METRICS_SELECTOR),
-        },
-        ScopeRow {
-            case: "a queue asked for the event counts and then them again",
-            event_source: Some(QUEUE_SOURCE),
-            extras: Value::Null,
-            metrics: vec![
-                EVENT_COUNT_METRICS_SELECTOR,
-                ERROR_COUNT_METRICS_SELECTOR,
-                EVENT_COUNT_METRICS_SELECTOR,
-            ],
-            verdict: Verdict::Refused(EVENT_COUNT_METRICS_SELECTOR),
         },
         ScopeRow {
             case: "a queue asked for the Kafka consumer metrics",
@@ -243,15 +219,6 @@ fn scope_rows() -> Vec<ScopeRow> {
             verdict: Verdict::Accepted,
         },
         ScopeRow {
-            case: "an Amazon MSK cluster asked for one metric twice",
-            event_source: Some(MSK_SOURCE),
-            extras: json!({ "Topics": ["order-events"] }),
-            metrics: vec![KAFKA_METRICS_SELECTOR, KAFKA_METRICS_SELECTOR],
-            // A Kafka source supports the whole enum, so that is what it expects of a
-            // selection naming one of them twice.
-            verdict: Verdict::Refused("EventCount, ErrorCount, KafkaMetrics"),
-        },
-        ScopeRow {
             case: "an Amazon MSK VPC connection asked for the processing error count",
             event_source: Some(MSK_VPC_CONNECTION_SOURCE),
             extras: json!({ "Topics": ["order-events"] }),
@@ -279,10 +246,10 @@ fn request_of(row: &ScopeRow, function: &str) -> Value {
 }
 
 /// RULE: a `MetricsConfig` is a SET of metrics the mapping's own event source supports — a
-/// selection naming one value twice, and one naming a value the model scopes to the Kafka
-/// event sources on a mapping whose source is not one of those, are each refused with the
-/// modelled `InvalidParameterValueException` naming the values that source expects, and no
-/// mapping is created.
+/// selection naming a value the model scopes to the Kafka event sources, on a mapping whose
+/// source is not one of those, is refused with the modelled
+/// `InvalidParameterValueException` naming the values that source expects, and no mapping is
+/// created.
 #[tokio::test]
 async fn a_metrics_config_is_judged_against_the_resolved_event_source() {
     let router = emulator();
@@ -376,8 +343,8 @@ struct UpdateRow {
 }
 
 /// The catalog of selections an update of a QUEUE mapping can state, over the same enum: the
-/// one value that source supports, an emptied selection, that value twice, and each
-/// Kafka-scoped value, alone and beside the event counts.
+/// one value that source supports, an emptied selection, and each Kafka-scoped value, alone
+/// and beside the event counts.
 fn update_rows() -> Vec<UpdateRow> {
     vec![
         UpdateRow {
@@ -389,11 +356,6 @@ fn update_rows() -> Vec<UpdateRow> {
             case: "an emptied selection",
             metrics: Vec::new(),
             verdict: Verdict::Accepted,
-        },
-        UpdateRow {
-            case: "the event counts twice",
-            metrics: vec![EVENT_COUNT_METRICS_SELECTOR, EVENT_COUNT_METRICS_SELECTOR],
-            verdict: Verdict::Refused(EVENT_COUNT_METRICS_SELECTOR),
         },
         UpdateRow {
             case: "the Kafka consumer metrics",
@@ -413,10 +375,9 @@ fn update_rows() -> Vec<UpdateRow> {
     ]
 }
 
-/// RULE: the same reading holds on an update — a selection the mapping's own event source
-/// does not support, whether because it names one value twice or because the source does not
-/// support the value, is refused with the modelled `InvalidParameterValueException` and
-/// leaves the stored selection exactly as it was.
+/// RULE: the same reading holds on an update — a selection naming a value the mapping's own
+/// event source does not support is refused with the modelled
+/// `InvalidParameterValueException` and leaves the stored selection exactly as it was.
 #[tokio::test]
 async fn an_update_cannot_select_a_metric_outside_the_mapped_source_scope() {
     let router = emulator();

@@ -298,14 +298,21 @@ pub fn is_kafka_source(vendor: Option<&str>, self_managed: bool) -> bool {
 ///
 /// `EventSourceMappingMetricsConfig$Metrics` is "the metrics you want your event source
 /// mapping to produce", which is a SET of the values the enum declares drawn from the ones
-/// the source the mapping polls supports ([`metrics::supported_metrics`]): two of the three
-/// are documented for the Kafka event sources alone, so a metric the source has no consumers
-/// or processing errors to report cannot be produced for it at all, and a value named twice
-/// asks for one metric twice. Each is refused with the modelled 400 the operations wrap this
-/// message in — which names the values that source DOES expect (see
-/// [`metrics::unsupported_metrics_refusal`]) — and nothing is stored or changed: a mapping
-/// advertising a metric vocabulary its source cannot apply would report a configuration no
-/// poller could honour.
+/// the source the mapping polls supports ([`metrics::supported_metrics`]). A selection can
+/// fall short of that in two INDEPENDENT ways, each with its own refusal:
+///
+/// * it repeats a value, asking for one metric twice — a fault of the list by itself, decided
+///   without resolving the event source at all, so it is read first and answers the fixed
+///   sentence [`metrics::duplicate_metrics_refusal`] carries, whichever value repeats and
+///   whatever the source is;
+/// * it names a value the source cannot produce — two of the three are documented for the
+///   Kafka event sources alone, so a source with no consumers or processing errors to report
+///   cannot produce those at all — which is refused with the values that source DOES expect
+///   ([`metrics::unsupported_metrics_refusal`]).
+///
+/// Each is refused with the modelled 400 the operations wrap this message in, and nothing is
+/// stored or changed: a mapping advertising a metric vocabulary its source cannot apply would
+/// report a configuration no poller could honour.
 #[must_use]
 pub fn metrics_config_refusal(
     metrics_config: Option<&crate::ops::types::EventSourceMappingMetricsConfig>,
@@ -313,7 +320,9 @@ pub fn metrics_config_refusal(
     self_managed: bool,
 ) -> Option<String> {
     let metrics = metrics_config.and_then(|config| config.metrics.as_deref())?;
-    metrics::unsupported_metrics_refusal(metrics, is_kafka_source(vendor, self_managed))
+    metrics::duplicate_metrics_refusal(metrics).or_else(|| {
+        metrics::unsupported_metrics_refusal(metrics, is_kafka_source(vendor, self_managed))
+    })
 }
 
 /// Whether the event source supports reading from a stated instant, from

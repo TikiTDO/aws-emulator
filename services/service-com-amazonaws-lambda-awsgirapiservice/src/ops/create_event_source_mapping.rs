@@ -28,8 +28,11 @@
 //! `EventSourceMappingMetricsConfig$Metrics` is "the metrics you want your event source
 //! mapping to produce", which is a SET of the values its enum declares drawn from the ones
 //! that source supports — two of the three are documented for the Kafka event sources alone —
-//! so anything else is refused with that same modelled 400, naming the values the source does
-//! expect, and no mapping is created (see [`crate::state::metrics_config_refusal`]).
+//! so a value that source cannot produce is refused with that same modelled 400 naming the
+//! values the source does expect, and a selection that repeats a value is refused with that
+//! modelled 400 carrying its own fixed sentence instead, independently of which values the
+//! source supports; in either case no mapping is created (see
+//! [`crate::state::metrics_config_refusal`]).
 //!
 //! Where a record of a failed batch is handed to is held to the same source: a destination
 //! of `DestinationConfig` is a resource Lambda WRITES that record to, and the kinds
@@ -485,7 +488,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // "The metrics you want your event source mapping to produce" is a SET of the
         // values the enum declares drawn from the ones the source this mapping would poll
         // supports: two of the three are documented for the Kafka event sources alone, and a
-        // value named twice is no selection either (see
+        // value named twice is no selection either and carries its own sentence (see
         // [`crate::state::metrics_config_refusal`]).
         if let Some(message) = crate::state::metrics_config_refusal(
             input.metrics_config.as_ref(),

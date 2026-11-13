@@ -119,23 +119,46 @@ pub fn supported_metrics(kafka_source: bool) -> &'static [&'static str] {
     }
 }
 
-/// Whether `metrics` is a selection the event source supports, and if not, what it is
-/// refused with: the values that source expects instead.
+/// What a `Metrics` selection that names one value twice is refused with.
+///
+/// The sentence is FIXED: the fault is the repetition, which is a property of the list on its
+/// own, so neither the value that repeats nor the event source the mapping polls enters it.
+pub const DUPLICATE_METRICS_REFUSAL: &str = "MetricsConfig contains duplicate metrics.";
+
+/// Whether `metrics` names any value twice, and if so, what it is refused with.
 ///
 /// A selection is a SET of the values the enum declares — which is why the member's own
-/// length stops at the number of values there are — drawn from the ones the source supports
-/// ([`supported_metrics`]). So a value that source does not support, and a value named twice,
-/// each leave it short of being one, and both are refused with the values that source does
-/// expect. The empty selection asks for nothing and is a selection.
+/// length stops at the number of values there are — so a value named twice asks for one
+/// metric twice and leaves the selection short of being a set. That is a fault of the LIST
+/// ALONE, decided without resolving the mapping's event source, so it is read before the
+/// per-source vocabulary ([`unsupported_metrics_refusal`]) and answers its own fixed
+/// sentence, [`DUPLICATE_METRICS_REFUSAL`].
+#[must_use]
+pub fn duplicate_metrics_refusal(metrics: &[String]) -> Option<String> {
+    metrics
+        .iter()
+        .enumerate()
+        .any(|(index, metric)| metrics[..index].contains(metric))
+        .then(|| DUPLICATE_METRICS_REFUSAL.to_string())
+}
+
+/// Whether every value in `metrics` is one the event source supports, and if not, what the
+/// selection is refused with: the values that source expects instead.
+///
+/// The judgement is per VALUE, against the ones the source supports
+/// ([`supported_metrics`]): a value that source cannot produce is refused with the values it
+/// does expect, whether it is stated once or more. How many times a value is named is the
+/// separate reading of [`duplicate_metrics_refusal`]. The empty selection asks for nothing
+/// and names no unsupported value.
 ///
 /// The sentence is the one AWS states for this refusal, with the values it names taken from
 /// the source the request resolved.
 #[must_use]
 pub fn unsupported_metrics_refusal(metrics: &[String], kafka_source: bool) -> Option<String> {
     let supported = supported_metrics(kafka_source);
-    let unsupported = metrics.iter().enumerate().any(|(index, metric)| {
-        !supported.contains(&metric.as_str()) || metrics[..index].contains(metric)
-    });
+    let unsupported = metrics
+        .iter()
+        .any(|metric| !supported.contains(&metric.as_str()));
     unsupported.then(|| {
         format!(
             "Invalid EventSourceMapping metrics. Expected values: [{}]",

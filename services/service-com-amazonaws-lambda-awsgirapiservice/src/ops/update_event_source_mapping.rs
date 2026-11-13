@@ -24,8 +24,10 @@
 //!
 //! A `MetricsConfig` the update states is held to the same rule the create's is: it is a SET
 //! of the values `EventSourceMappingMetricsConfig$Metrics` declares drawn from the ones the
-//! mapping's own event source supports, and anything else is refused with the same modelled
-//! `InvalidParameterValueException` and changes nothing (see
+//! mapping's own event source supports, so a value that source cannot produce is refused with
+//! the modelled `InvalidParameterValueException` naming the values it does expect, and a
+//! selection that repeats a value is refused with that same modelled error carrying its own
+//! fixed sentence; in either case nothing changes (see
 //! [`crate::state::metrics_config_refusal`]).
 //!
 //! A `DestinationConfig` the update states is held to the same rule the create's is too:
@@ -432,8 +434,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let self_managed = mapped_source.is_none();
         // A `MetricsConfig` this update states is held to exactly what the create's is: a
         // SET of the values the enum declares drawn from the ones the source the mapping
-        // polls supports (see [`crate::state::metrics_config_refusal`]). A selection it
-        // cannot satisfy changes nothing.
+        // polls supports (see [`crate::state::metrics_config_refusal`]) — a repeated value
+        // and a value that source cannot produce each carry their own sentence. A selection
+        // it cannot satisfy changes nothing.
         if let Some(message) = crate::state::metrics_config_refusal(
             input.metrics_config.as_ref(),
             mapped_source
