@@ -275,6 +275,11 @@ impl<Eng> PutImage<Eng> {
         now: ::std::time::SystemTime,
         planned_signings: Vec<crate::state::signing::ImageSigning>,
     ) -> Result<(PutImageOutput, crate::state::image_events::ImageAction), PutImageError> {
+        let capacity = emulator_server::ecr_capacity::configured().map_err(|_| {
+            PutImageError::from(PutImageErrorModeled::ServerException(ServerException {
+                message: Some("invalid ECR capacity configuration".to_string()),
+            }))
+        })?;
         let mut store = state.lock();
 
         // The repository the push addresses has to exist before anything is charged
@@ -302,7 +307,7 @@ impl<Eng> PutImage<Eng> {
                     message: Some(format!(
                         "this registry holds at most {} bytes of stored image manifests \
                          and in-flight layer uploads together",
-                        crate::state::MAX_REGISTRY_CALLER_BYTES
+                        capacity.store_bytes
                     )),
                 })
                 .into(),

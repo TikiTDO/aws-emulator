@@ -77,7 +77,11 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     ) -> RtResponse {
         // A cross-repository mount may be declined by starting a regular upload,
         // as specified by RegistryV2. Never fetch the caller's `from` as a URL.
-        let bytes = match body(req, state::MAX_LAYER_UPLOAD_BYTES) {
+        let capacity = match emulator_server::ecr_capacity::configured() {
+            Ok(capacity) => capacity,
+            Err(_) => return error(500, "UNKNOWN", "invalid ECR capacity configuration"),
+        };
+        let bytes = match body(req, capacity.layer_bytes) {
             Ok(bytes) => bytes,
             Err(response) => return response,
         };
@@ -191,11 +195,15 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
             }
             _ => {}
         }
-        let bytes = match body(req, state::MAX_LAYER_UPLOAD_BYTES) {
+        let capacity = match emulator_server::ecr_capacity::configured() {
+            Ok(capacity) => capacity,
+            Err(_) => return error(500, "UNKNOWN", "invalid ECR capacity configuration"),
+        };
+        let bytes = match body(req, capacity.layer_bytes) {
             Ok(bytes) => bytes,
             Err(response) => return response,
         };
-        if held.saturating_add(bytes.len()) > state::MAX_LAYER_UPLOAD_BYTES
+        if !capacity.layer_fits(held, bytes.len())
             || !store.has_byte_budget_for(bytes.len())
         {
             return error(
