@@ -76,11 +76,26 @@ chrono = { version = "0.4", default-features = false, features = ["std", "now"] 
 # The time zone a schedule is evaluated in (`Schedule$Timezone`), resolved against the IANA
 # database rather than a hand-written offset table.
 chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
+# `state::metric_stream_export::open_telemetry`: the records a metric stream whose `OutputFormat`
+# is `opentelemetry1.0` or `opentelemetry0.7` exports are OpenTelemetry metrics messages in
+# protobuf, so the maintained protobuf codec encodes and frames them. Its derive is a proc macro,
+# so the message declarations here are encoded by generated code rather than by a hand-written
+# serializer; the codec parses and writes nothing else.
+prost = "0.14"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
+# The OpenTelemetry protocol's own message definitions, used ONLY by the unit test that decodes
+# an exported `opentelemetry1.0` record with them: that is what holds the records this crate
+# renders (`state::metric_stream_export::open_telemetry`) to the published field numbers and wire
+# types, instead of reading them back with the same declarations that wrote them. Only the
+# generated messages are taken (no transport, no SDK pipeline).
+opentelemetry-proto = { version = "0.33", default-features = false, features = [
+    "gen-tonic-messages",
+    "metrics",
+] }
 # SNS is mounted beside CloudWatch on one engine in the alarm-action tests, because an
 # alarm's action is an SNS topic and a notification is asserted where a client sees it: on
 # the topic's subscription.

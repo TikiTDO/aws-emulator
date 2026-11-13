@@ -45,14 +45,17 @@
 //! permissions: firehose:PutRecord firehose:PutRecordBatch" (`PutMetricStreamInput$RoleArn`) —
 //! so a role IAM answers withholds that write exports nothing.
 //!
-//! A stream configured for one of the OpenTelemetry output formats is not exported from here:
-//! those formats frame their records as length-delimited protobuf, which this module does not
-//! render, and a record in another format is not a record such a consumer could read. Nothing
-//! is invented for them.
+//! A stream configured for one of the OpenTelemetry output formats exports the same metric
+//! updates, selected by the same filters and summarised over the same periods, in the records
+//! that format asks for: [`open_telemetry`] renders those, and this module pushes them the same
+//! way.
 
 use ::serde_json::{Map, Value};
 
 use crate::ops::types::{GetMetricStreamOutput, MetricStreamFilter};
+
+/// The records of a stream whose `OutputFormat` is one of the OpenTelemetry values.
+pub mod open_telemetry;
 
 /// The span one exported record covers, and so the bucket a published datapoint is exported
 /// in: one minute, the granularity a regular-resolution metric is aggregated at ("For metrics
@@ -62,9 +65,46 @@ use crate::ops::types::{GetMetricStreamOutput, MetricStreamFilter};
 /// different periods are two.
 const EXPORT_PERIOD_SECS: f64 = 60.0;
 
-/// The `OutputFormat` whose records this module renders: "Valid values are `json`,
-/// `opentelemetry1.0`, and `opentelemetry0.7`." (`PutMetricStreamInput$OutputFormat`).
+/// The `OutputFormat` whose records this module renders itself: "Valid values are `json`,
+/// `opentelemetry1.0`, and `opentelemetry0.7`." (`PutMetricStreamInput$OutputFormat`) — the
+/// other two are rendered by [`open_telemetry`].
 const JSON_FORMAT: &str = "json";
+
+/// The FORM a stream's records take, which is what its `OutputFormat` names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordFormat {
+    /// One JSON document per record ([`json_record`]).
+    Json,
+    /// One length-delimited OpenTelemetry message per record, of the release the format names
+    /// ([`open_telemetry`]).
+    OpenTelemetry(open_telemetry::OpenTelemetryVersion),
+}
+
+impl RecordFormat {
+    /// The form an `OutputFormat` value asks for, or `None` for a stream carrying no format at
+    /// all — the member is required, so a stored stream has one, and a value outside the set the
+    /// model declares never reaches the store.
+    fn named(format: Option<&str>) -> Option<Self> {
+        match format? {
+            JSON_FORMAT => Some(Self::Json),
+            other => open_telemetry::OpenTelemetryVersion::named(other).map(Self::OpenTelemetry),
+        }
+    }
+}
+
+/// What ONE stream's records are rendered from: the stream's identity, where its metrics were
+/// published, and the form its records take.
+#[derive(Debug, Clone)]
+struct StreamIdentity {
+    /// The stream's name, which every record names as the stream it came from.
+    name: String,
+    /// The stream's own ARN, which an OpenTelemetry record names as the exporter.
+    arn: String,
+    /// The Region the metrics were published in.
+    region: String,
+    /// The form the records take.
+    format: RecordFormat,
+}
 
 /// The ARN namespace of Amazon Data Firehose, whose delivery streams are what a metric stream
 /// exports into.
@@ -89,7 +129,7 @@ const PUT_RECORD_ACTION: &str = "firehose:PutRecord";
 /// stream cannot keep up is not exported.
 const MAX_RECORDS_PER_REQUEST: usize = 500;
 
-/// The members of the `value` object every exported record carries, as the statistics a stream
+/// The members of the `value` object a json record carries, as the statistics a stream
 /// always sends: "a metric stream always sends the `MAX`, `MIN`, `SUM`, and `SAMPLECOUNT`
 /// statistics for each metric that is streamed" (`PutMetricStream`), each under the name the
 /// json record format spells it with.
@@ -151,9 +191,10 @@ fn period_start(timestamp_secs: f64) -> f64 {
 /// Export the records the datapoints a request just stored owe, to every running stream of
 /// `region` whose filters select them.
 ///
-/// The store is locked to COMPUTE the records and released before any of them is delivered, so
-/// one publisher's fan-out cannot block another's read, and nothing in this path writes to the
-/// store: a record is a reading of the datapoints it already holds.
+/// The store is locked to MEASURE what the records report and released before any of them is
+/// rendered or delivered, so no document formatting happens in the critical section and one
+/// publisher's fan-out cannot block another's read. Nothing in this path writes to the store: a
+/// record is a reading of the datapoints it already holds.
 pub async fn export_published<Eng: Send + Sync + 'static>(
     engine: &Eng,
     ctx: &smithy_server_runtime::OperationContext<'_>,
@@ -173,23 +214,60 @@ pub async fn export_published<Eng: Send + Sync + 'static>(
         planned(&store, region, published)
     };
     for export in exports {
-        deliver(ctx, &export).await;
+        let records = rendered(&export);
+        if records.is_empty() {
+            continue;
+        }
+        deliver(ctx, &export, &records).await;
     }
 }
 
-/// What ONE stream is owed: where it delivers, under which role, and the records themselves in
-/// the order they are to arrive.
+/// What ONE stream is owed: where it delivers, under which role, how its records are rendered,
+/// and what each record reports, in the order they are to arrive.
 #[derive(Debug, Clone)]
 struct StreamExport {
     /// The delivery stream the records are pushed into.
     firehose_arn: String,
     /// The role the push is made as, when the stream carries one.
     role_arn: Option<String>,
-    /// The records, oldest period first.
-    records: Vec<String>,
+    /// The stream the records come from, and the form they take.
+    stream: StreamIdentity,
+    /// What each record reports, oldest period first.
+    measured: Vec<MeasuredPeriod>,
+}
+
+/// ONE record's measurements, taken while the store is held: a record is rendered from these and
+/// from nothing else, so the rendering needs no access to the store.
+#[derive(Debug, Clone)]
+struct MeasuredPeriod {
+    /// The metric the record reports.
+    key: super::MetricKey,
+    /// The instant the period opens at, as epoch seconds.
+    start: f64,
+    /// The unit its datapoints were published under.
+    unit: String,
+    /// The statistics every streamed metric carries.
+    statistics: super::BasicStatistics,
+    /// The additional statistics the stream asks for, each as `(name, value)`, in the order the
+    /// stream asks for them and without the ones this period does not define.
+    additional: Vec<(String, f64)>,
+}
+
+/// One (period, unit) group of a published series: the datapoints one record reports.
+struct PeriodGroup<'a> {
+    /// The instant the period opens at.
+    start: f64,
+    /// The unit these datapoints were published under.
+    unit: &'a str,
+    /// The datapoints themselves.
+    data: Vec<&'a super::StoredDatum>,
 }
 
 /// The exports every running stream of `region` is owed for `published`.
+///
+/// The record budget is applied BEFORE any measuring: a stream collects at most as many
+/// (period, unit) groups as the budget still allows, so what the budget does not reach is never
+/// measured and never rendered.
 fn planned(
     store: &super::ComAmazonawsCloudwatchGraniteserviceversion20100801State,
     region: &str,
@@ -211,17 +289,24 @@ fn planned(
         if stream.state.as_deref() != Some(super::METRIC_STREAM_RUNNING) {
             continue;
         }
-        if stream.output_format.as_deref() != Some(JSON_FORMAT) {
+        let Some(format) = RecordFormat::named(stream.output_format.as_deref()) else {
             continue;
-        }
+        };
         let Some(firehose_arn) = stream.firehose_arn.clone() else {
             continue;
         };
         let name = stream.name.clone().unwrap_or_else(|| key.name.clone());
-        // Oldest period first across every metric of the batch, so the records of one metric
-        // arrive in the order its datapoints were published.
-        let mut records: Vec<(f64, String)> = Vec::new();
+        let arn = stream
+            .arn
+            .clone()
+            .unwrap_or_else(|| super::metric_stream_arn(region, &name));
+        // The groups this stream owes a record for, measured as they are collected; at most
+        // `budget` of them, so the work is bounded by the budget rather than truncated after it.
+        let mut measured: Vec<MeasuredPeriod> = Vec::new();
         for series in published {
+            if measured.len() >= budget {
+                break;
+            }
             if !streams_metric(stream, &series.key) {
                 continue;
             }
@@ -229,25 +314,104 @@ fn planned(
                 continue;
             };
             let additional = additional_statistics(stream, &series.key);
-            for start in &series.period_starts {
-                for document in period_records(&name, region, series, *start, data, &additional) {
-                    records.push((*start, document));
-                }
+            for group in grouped(series, data, budget - measured.len()) {
+                measured.push(measured_period(&series.key, &additional, &group));
             }
         }
-        records.sort_by(|(left, _), (right, _)| left.total_cmp(right));
-        records.truncate(budget);
-        if records.is_empty() {
+        // Oldest period first across every metric of the batch, so the records of one metric
+        // arrive in the order its datapoints were published.
+        measured.sort_by(|left, right| left.start.total_cmp(&right.start));
+        if measured.is_empty() {
             continue;
         }
-        budget -= records.len();
+        budget -= measured.len();
         exports.push(StreamExport {
             firehose_arn,
             role_arn: stream.role_arn.clone(),
-            records: records.into_iter().map(|(_, document)| document).collect(),
+            stream: StreamIdentity {
+                name,
+                arn,
+                region: region.to_string(),
+                format,
+            },
+            measured,
         });
     }
     exports
+}
+
+/// The (period, unit) groups one published series owes records for, at most `limit` of them.
+///
+/// ONE pass over the series' stored datapoints: each datum is placed in the period it falls in
+/// and under the unit it was published under, and a datum of a period this request did not
+/// publish into is skipped — so the scan costs the series' datapoints once, whatever the number
+/// of periods the request spans. A record reports the measurement's unit, and two datapoints
+/// published under different units are not one measurement, so the unit is part of the group.
+fn grouped<'a>(
+    series: &PublishedSeries,
+    data: &'a [super::StoredDatum],
+    limit: usize,
+) -> Vec<PeriodGroup<'a>> {
+    let mut groups: ::std::collections::BTreeMap<(i64, &'a str), Vec<&'a super::StoredDatum>> =
+        ::std::collections::BTreeMap::new();
+    for datum in data {
+        let start = period_start(datum.timestamp_secs);
+        if !start.is_finite() || !publishes(series, start) {
+            continue;
+        }
+        // A period opens at a whole second, so the instant keys the group as the integer it is.
+        let bucket = (start as i64, datum.unit());
+        if let Some(group) = groups.get_mut(&bucket) {
+            group.push(datum);
+        } else if groups.len() < limit {
+            groups.insert(bucket, vec![datum]);
+        }
+    }
+    groups
+        .into_iter()
+        .map(|((bucket, unit), data)| PeriodGroup {
+            start: bucket as f64,
+            unit,
+            data,
+        })
+        .collect()
+}
+
+/// Whether this request published into the period opening at `start`: the periods it touched are
+/// held ascending, so the question is answered without scanning them.
+fn publishes(series: &PublishedSeries, start: f64) -> bool {
+    series
+        .period_starts
+        .binary_search_by(|held| held.total_cmp(&start))
+        .is_ok()
+}
+
+/// What one group's record reports: the statistics a stream always sends, folded over the
+/// group's datapoints, and the additional statistics it asks for.
+///
+/// An additional statistic the period does not define is left out: a percentile of a datapoint
+/// whose individual values were never published, say, is a value this store cannot compute
+/// rather than one it may invent.
+fn measured_period(
+    key: &super::MetricKey,
+    additional: &[String],
+    group: &PeriodGroup<'_>,
+) -> MeasuredPeriod {
+    MeasuredPeriod {
+        key: key.clone(),
+        start: group.start,
+        unit: group.unit.to_string(),
+        statistics: super::BasicStatistics::of(group.data.iter().copied()),
+        additional: additional
+            .iter()
+            .filter_map(|statistic| {
+                Some((
+                    statistic.clone(),
+                    super::statistic_value(&group.data, statistic)?,
+                ))
+            })
+            .collect(),
+    }
 }
 
 /// Whether `stream` streams the metric `key` names.
@@ -302,53 +466,62 @@ fn additional_statistics(stream: &GetMetricStreamOutput, key: &super::MetricKey)
     statistics
 }
 
-/// The records one (series, period) pair owes: one per UNIT the period's datapoints carry,
-/// since a record reports the measurement's unit and two datapoints published under different
-/// units are not one measurement.
-fn period_records(
-    stream_name: &str,
-    region: &str,
-    series: &PublishedSeries,
-    start: f64,
-    data: &[super::StoredDatum],
-    additional: &[String],
-) -> Vec<String> {
-    let mut by_unit: ::std::collections::BTreeMap<&str, Vec<&super::StoredDatum>> =
-        ::std::collections::BTreeMap::new();
-    for datum in data {
-        if datum.timestamp_secs >= start && datum.timestamp_secs < start + EXPORT_PERIOD_SECS {
-            by_unit.entry(datum.unit()).or_default().push(datum);
+/// The records one planned export delivers, rendered once the store's lock is released: the
+/// measurements are already taken, so no part of the formatting reads the store.
+fn rendered(export: &StreamExport) -> Vec<Vec<u8>> {
+    export
+        .measured
+        .iter()
+        .map(|measured| record(&export.stream, measured))
+        .collect()
+}
+
+/// ONE exported record, in the form the stream's `OutputFormat` asks for.
+fn record(stream: &StreamIdentity, measured: &MeasuredPeriod) -> Vec<u8> {
+    match stream.format {
+        RecordFormat::Json => json_record(stream, measured).into_bytes(),
+        RecordFormat::OpenTelemetry(version) => {
+            open_telemetry::record(&open_telemetry::ExportedPeriod {
+                version,
+                exporter_arn: &stream.arn,
+                region: &stream.region,
+                key: &measured.key,
+                start_secs: measured.start,
+                end_secs: measured.start + EXPORT_PERIOD_SECS,
+                unit: &measured.unit,
+                statistics: measured.statistics,
+                percentiles: &percentiles(&measured.additional),
+            })
         }
     }
-    by_unit
-        .into_iter()
-        .map(|(unit, group)| {
-            record(
-                stream_name,
-                region,
-                &series.key,
-                start,
-                unit,
-                &group,
-                additional,
-            )
-        })
+}
+
+/// The additional statistics as the quantiles an OpenTelemetry record reports them at: the
+/// percentile each `pNN` statistic names, in percent, and its value over the period's
+/// distribution.
+///
+/// These formats carry percentiles only ("If the `OutputFormat` for the stream is
+/// `opentelemetry1.0` or `opentelemetry0.7`, the only valid values are `p??` percentile
+/// statistics such as `p90`, `p99` and so on.",
+/// `MetricStreamStatisticsConfiguration$AdditionalStatistics`), so a statistic that names no
+/// percentile has no quantile to be reported at.
+fn percentiles(additional: &[(String, f64)]) -> Vec<(f64, f64)> {
+    additional
+        .iter()
+        .filter_map(|(statistic, value)| Some((super::parse_percentile(statistic)?, *value)))
         .collect()
 }
 
 /// ONE exported record, in the json output format: which stream and account it came from, the
 /// metric it reports, the period it covers and the statistics of that period.
-fn record(
-    stream_name: &str,
-    region: &str,
-    key: &super::MetricKey,
-    start: f64,
-    unit: &str,
-    group: &[&super::StoredDatum],
-    additional: &[String],
-) -> String {
-    let folded = super::BasicStatistics::of(group.iter().copied());
+fn json_record(stream: &StreamIdentity, measured: &MeasuredPeriod) -> String {
+    let folded = measured.statistics;
     let mut value = Map::new();
+    // The additional statistics first, so the four a stream always sends are the ones a record
+    // reports under their own members whatever a statistics configuration asks for.
+    for (statistic, computed) in &measured.additional {
+        insert_number(&mut value, statistic, *computed);
+    }
     for (member, statistic) in [
         (MAX_MEMBER, folded.maximum),
         (MIN_MEMBER, folded.minimum),
@@ -357,15 +530,8 @@ fn record(
     ] {
         insert_number(&mut value, member, statistic);
     }
-    // An additional statistic the period does not define is not reported as anything: a
-    // percentile of a datapoint whose individual values were never published, say, is a value
-    // this store cannot compute rather than one it may invent.
-    for statistic in additional {
-        if let Some(computed) = super::statistic_value(group, statistic) {
-            insert_number(&mut value, statistic, computed);
-        }
-    }
-    let dimensions: Map<String, Value> = key
+    let dimensions: Map<String, Value> = measured
+        .key
         .dimensions
         .iter()
         .map(|(name, value)| (name.clone(), Value::String(value.clone())))
@@ -373,33 +539,46 @@ fn record(
     let mut document = Map::new();
     document.insert(
         "metric_stream_name".to_string(),
-        Value::String(stream_name.to_string()),
+        Value::String(stream.name.clone()),
     );
     document.insert(
         "account_id".to_string(),
         Value::String(::emulator_server::emulator_account_id().to_string()),
     );
-    document.insert("region".to_string(), Value::String(region.to_string()));
+    document.insert("region".to_string(), Value::String(stream.region.clone()));
     document.insert(
         "namespace".to_string(),
-        Value::String(key.namespace.clone()),
+        Value::String(measured.key.namespace.clone()),
     );
     document.insert(
         "metric_name".to_string(),
-        Value::String(key.metric_name.clone()),
+        Value::String(measured.key.metric_name.clone()),
     );
     document.insert("dimensions".to_string(), Value::Object(dimensions));
     // The instant the period opens at, in the milliseconds the json record format stamps a
     // record with.
     document.insert(
         "timestamp".to_string(),
-        Value::from((start * 1_000.0) as i64),
+        Value::from(milliseconds(measured.start)),
     );
     document.insert("value".to_string(), Value::Object(value));
-    document.insert("unit".to_string(), Value::String(unit.to_string()));
+    document.insert("unit".to_string(), Value::String(measured.unit.clone()));
     // One record per line, so a consumer reading the delivered bytes reads one JSON document
     // per record however many of them a buffer was flushed with.
     format!("{}\n", Value::Object(document))
+}
+
+/// An epoch instant in the milliseconds the json record format stamps a record with.
+///
+/// A period opens at a whole second, so the milliseconds are taken from those seconds: an
+/// instant no millisecond count can hold is reported as the nearest one it can, rather than
+/// through a conversion whose result bears no relation to it.
+fn milliseconds(seconds: f64) -> i64 {
+    const MILLIS_PER_SECOND: i64 = 1_000;
+    if !seconds.is_finite() {
+        return 0;
+    }
+    (seconds.trunc() as i64).saturating_mul(MILLIS_PER_SECOND)
 }
 
 /// Report one statistic in the `value` object, where it is a number JSON can carry: a
@@ -415,7 +594,11 @@ fn insert_number(value: &mut Map<String, Value>, member: &str, statistic: f64) {
 /// Every failure is LOGGED and changes nothing a caller is told: an export is asynchronous and
 /// is not part of any operation's answer, exactly as an alarm action's delivery is not
 /// ([`super::alarm_actions`]).
-async fn deliver(ctx: &smithy_server_runtime::OperationContext<'_>, export: &StreamExport) {
+async fn deliver(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    export: &StreamExport,
+    records: &[Vec<u8>],
+) {
     let Some(stream_name) = ::service_common::arn::resource_id_of_type(
         &export.firehose_arn,
         DELIVERY_STREAM_RESOURCE_TYPE,
@@ -442,35 +625,42 @@ async fn deliver(ctx: &smithy_server_runtime::OperationContext<'_>, export: &Str
     };
     // The export is the ROLE's write to make, so a role IAM answers does not allow it exports
     // nothing: a record the destination's service would have refused the call to is never
-    // pushed.
-    if let Some(role_arn) = export.role_arn.as_deref() {
-        if ::service_common::iam_role::role_withholds_action(
-            ctx,
-            region,
-            role_arn,
-            PUT_RECORD_ACTION,
-            &export.firehose_arn,
-        )
-        .await
-        {
-            ::tracing::warn!(
-                role_arn = %role_arn,
-                firehose_arn = %export.firehose_arn,
-                "this metric stream's role is not allowed to put records into its destination, \
-                 so nothing was exported"
-            );
-            return;
-        }
+    // pushed. A stream with no role at all makes no such write either — the member is required
+    // ("The ARN of an IAM role that this metric stream will use to access Amazon Kinesis Data
+    // Firehose resources", `PutMetricStreamInput$RoleArn`), so there is no role to put records
+    // under.
+    let Some(role_arn) = export.role_arn.as_deref() else {
+        ::tracing::warn!(
+            firehose_arn = %export.firehose_arn,
+            "this metric stream names no role to put records into its destination under, so \
+             nothing was exported"
+        );
+        return;
+    };
+    if ::service_common::iam_role::role_withholds_action(
+        ctx,
+        region,
+        role_arn,
+        PUT_RECORD_ACTION,
+        &export.firehose_arn,
+    )
+    .await
+    {
+        ::tracing::warn!(
+            role_arn = %role_arn,
+            firehose_arn = %export.firehose_arn,
+            "this metric stream's role is not allowed to put records into its destination, \
+             so nothing was exported"
+        );
+        return;
     }
     let client = firehose_client(ctx.callback(), region);
     // One `PutRecord` per record, awaited in turn: the destination takes the records in the
     // order they are put, which is what makes the records of one metric arrive in the order its
     // datapoints were published.
-    for document in &export.records {
+    for document in records {
         let built = ::aws_sdk_firehose::types::Record::builder()
-            .data(::aws_sdk_firehose::primitives::Blob::new(
-                document.as_bytes().to_vec(),
-            ))
+            .data(::aws_sdk_firehose::primitives::Blob::new(document.clone()))
             .build();
         let failure = match built {
             Ok(record) => client

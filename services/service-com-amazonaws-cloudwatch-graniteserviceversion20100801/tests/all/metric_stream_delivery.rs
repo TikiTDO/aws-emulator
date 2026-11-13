@@ -37,14 +37,14 @@ use crate::harness::TARGET_PREFIX;
 const HOST: &str = "127.0.0.1:9297";
 
 /// The Region every call below is signed for.
-const REGION: &str = "us-east-1";
+pub(crate) const REGION: &str = "us-east-1";
 
 /// The account the emulator serves, as every other suite in this target spells it.
-const ACCOUNT: &str = "000000000000";
+pub(crate) const ACCOUNT: &str = "000000000000";
 
 /// The role a metric stream delivers through, and the one the Firehose destination assumes.
 /// No IAM service is mounted here, so this only names the role form each member documents.
-const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/MetricStreamRole";
+pub(crate) const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/MetricStreamRole";
 
 /// Long enough for a created Firehose stream to be `ACTIVE`, which is when it takes records:
 /// that service's own clock-owed `CREATING` -> `ACTIVE` span, with room to spare.
@@ -52,18 +52,18 @@ const PAST_THE_FIREHOSE_TRANSITION: Duration = Duration::from_millis(3_400);
 
 /// How long a delivery is waited for before a case fails: far longer than the Firehose
 /// delivery span, so a slow machine does not fail a case the clock would have served.
-const DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
+pub(crate) const DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
 
 /// How long a case waits before concluding that NOTHING was exported — the same budget a
 /// positive case gets, so an absence is asserted after as long a wait as a delivery needs.
 const SILENCE_WINDOW: Duration = Duration::from_secs(3);
 
 /// How often the destination is polled while waiting for a delivery.
-const POLL_INTERVAL: Duration = Duration::from_millis(25);
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// The one-minute period an exported record covers (`MetricStat$Period`: "a period can be as
 /// short as one minute (60 seconds) and must be a multiple of 60").
-const PERIOD_SECS: f64 = 60.0;
+pub(crate) const PERIOD_SECS: f64 = 60.0;
 
 /// What a dispatched S3 request answered.
 struct Answer {
@@ -72,12 +72,15 @@ struct Answer {
 }
 
 /// CloudWatch, Amazon Data Firehose and Amazon S3 on one shared engine.
-struct Emulator {
+///
+/// Shared with every other suite that asserts an export where a client sees it: the pipeline a
+/// metric stream delivers through is this one whatever output format the stream carries.
+pub(crate) struct Emulator {
     router: MultiServiceRouter,
 }
 
 impl Emulator {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
         let mut router = MultiServiceRouter::new();
         // Signature verification is the emulator's concern, not this service's.
@@ -128,7 +131,7 @@ impl Emulator {
     }
 
     /// One CloudWatch operation, requiring a 200.
-    async fn cloudwatch(&self, operation: &str, body: &Value) -> Value {
+    pub(crate) async fn cloudwatch(&self, operation: &str, body: &Value) -> Value {
         let (status, parsed) = self
             .rpc(
                 "monitoring",
@@ -146,7 +149,7 @@ impl Emulator {
     }
 
     /// One Firehose operation, requiring a 200.
-    async fn firehose(&self, operation: &str, body: &Value) -> Value {
+    pub(crate) async fn firehose(&self, operation: &str, body: &Value) -> Value {
         let (status, parsed) = self
             .rpc(
                 "firehose",
@@ -185,7 +188,7 @@ impl Emulator {
     /// The create names NO `LocationConstraint`: the unspecified constraint stands for
     /// us-east-1, which is the Region this suite signs for, and naming it explicitly is what S3
     /// refuses.
-    async fn create_bucket(&self, bucket: &str) {
+    pub(crate) async fn create_bucket(&self, bucket: &str) {
         let answer = self.s3("PUT", &format!("/{bucket}"), b"").await;
         assert_eq!(
             answer.status,
@@ -196,7 +199,7 @@ impl Emulator {
     }
 
     /// Every key `bucket` holds, read through `ListObjectsV2`.
-    async fn keys(&self, bucket: &str) -> Vec<String> {
+    pub(crate) async fn keys(&self, bucket: &str) -> Vec<String> {
         let answer = self.s3("GET", &format!("/{bucket}?list-type=2"), b"").await;
         assert_eq!(
             answer.status,
@@ -214,7 +217,7 @@ impl Emulator {
     }
 
     /// The bytes `bucket` holds at `key`, read through `GetObject`.
-    async fn object(&self, bucket: &str, key: &str) -> Vec<u8> {
+    pub(crate) async fn object(&self, bucket: &str, key: &str) -> Vec<u8> {
         let answer = self.s3("GET", &format!("/{bucket}/{key}"), b"").await;
         assert_eq!(
             answer.status,
@@ -394,7 +397,7 @@ async fn publish(
 }
 
 /// Publish one `MetricDatum` as written.
-async fn publish_datum(emulator: &Emulator, namespace: &str, datum: Value) {
+pub(crate) async fn publish_datum(emulator: &Emulator, namespace: &str, datum: Value) {
     emulator
         .cloudwatch(
             "PutMetricData",
@@ -409,12 +412,12 @@ async fn publish_datum(emulator: &Emulator, namespace: &str, datum: Value) {
 /// The MIDDLE of the period keeps a row's placement independent of where in a period the suite
 /// happens to run, and a period boundary crossed mid-case moves every stamp of the case
 /// together.
-fn stamp(periods_back: i64) -> f64 {
+pub(crate) fn stamp(periods_back: i64) -> f64 {
     period_of(periods_back) + PERIOD_SECS / 2.0
 }
 
 /// The instant the period `periods_back` periods before the current one opens at.
-fn period_of(periods_back: i64) -> f64 {
+pub(crate) fn period_of(periods_back: i64) -> f64 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |since| since.as_secs_f64());
